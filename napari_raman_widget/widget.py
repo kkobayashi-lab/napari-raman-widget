@@ -19,6 +19,11 @@ from .plot_windows import (
 from .ui_helpers import make_collapsible
 
 
+DEFAULT_LIGHTFIELD_CONFIG = (
+    r"C:\Users\spraman\Documents\LightField\Experiments\RamanConfocal.lfe"
+)
+
+
 class HardwareWidget(QWidget):
     def __init__(self, viewer: napari.Viewer):
         super().__init__()
@@ -65,6 +70,12 @@ class HardwareWidget(QWidget):
         tf_row.addWidget(self.tf_path)
         tf_row.addWidget(tf_browse)
         loading_layout.addLayout(tf_row)
+
+        loading_layout.addWidget(QLabel("LightField experiment:"))
+        self.lightfield_config = QLineEdit()
+        self.lightfield_config.setText(DEFAULT_LIGHTFIELD_CONFIG)
+        self.lightfield_config.setPlaceholderText(DEFAULT_LIGHTFIELD_CONFIG)
+        loading_layout.addWidget(self.lightfield_config)
 
         loading_layout.addWidget(
             QLabel("Output folder (optional, applied on connect):")
@@ -1181,7 +1192,9 @@ class HardwareWidget(QWidget):
 
         try:
             from pymmcore_plus import CMMCorePlus
-            from raman_control.andor import AndorSpectraCollector
+            from raman_control.princeton import (
+                SpectraCollector as PrincetonSpectraCollector,
+            )
             from cns_control.coordtransformer import CoordTransformer
 
             self.core = CMMCorePlus.instance()
@@ -1211,7 +1224,12 @@ class HardwareWidget(QWidget):
             except Exception as e:
                 print(f"[napari-micromanager load] {e}")
 
-            self.collector = AndorSpectraCollector()
+            lightfield_config = self.lightfield_config.text().strip()
+            if not lightfield_config:
+                lightfield_config = DEFAULT_LIGHTFIELD_CONFIG
+            self.collector = PrincetonSpectraCollector(
+                lightFieldConfig=lightfield_config
+            )
             self.daq = self.collector.daq
             self.default_engine = self.core.mda.engine
 
@@ -1220,13 +1238,14 @@ class HardwareWidget(QWidget):
                 self.transformer = CoordTransformer.from_json(tf)
 
             self._refresh_channel_combos()
-            self.wl_update_btn.setEnabled(True)
-            self.refresh_wavelength()
-            self.refresh_wavelength()
-            self.grating_update_btn.setEnabled(True)
-            self.refresh_gratings()
+            self.wl_current_label.setText("Set in LightField")
+            self.wl_update_btn.setEnabled(False)
+            self.grating_combo.clear()
+            self.grating_combo.addItem("Set in LightField")
+            self.grating_combo.setEnabled(False)
+            self.grating_update_btn.setEnabled(False)
 
-            msg = "Status: connected OK"
+            msg = "Status: connected OK (Princeton/LightField)"
             if not cfg:
                 msg += " (no cfg loaded)"
             if not tf:
@@ -1326,6 +1345,12 @@ class HardwareWidget(QWidget):
         except Exception as e:
             print(f"unload error: {e}")
         self.core = None
+
+        try:
+            if self.collector is not None:
+                self.collector.close()
+        except Exception as e:
+            print(f"collector close error: {e}")
         self.collector = None
         self.daq = None
         self.transformer = None
