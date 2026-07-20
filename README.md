@@ -30,6 +30,9 @@ This assumes `pymmcore-plus`, `raman-control`, `raman-mda-engine`, and
 `cns-control` are already installed in the same environment (they are not
 on PyPI and must be installed from your internal/local sources).
 
+On Windows, follow [WINDOWS_ENVIRONMENT.md](WINDOWS_ENVIRONMENT.md) to avoid
+mixing incompatible Conda and PyTorch OpenMP runtimes in the napari process.
+
 ## Run
 
 From inside the repo, with your conda environment active:

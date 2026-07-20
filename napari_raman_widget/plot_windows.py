@@ -86,13 +86,25 @@ class SpectrumWindow(QMainWindow):
         )
         self._redraw()
 
+    @staticmethod
+    def filter_mean(spec, f=2):
+        mean_spec = np.mean(spec, axis=0)
+        std_spec = np.std(spec, axis=0)
+        
+        # Create a mask for values within 3 standard deviations
+        mask = (spec >= (mean_spec - f * std_spec)) & (spec <= (mean_spec + f * std_spec))
+        
+        # Compute the mean while ignoring values outside 3 std
+        filtered_mean_spec = np.sum(spec * mask, axis=0) / np.sum(mask, axis=0)
+        return filtered_mean_spec
+
     def _redraw(self):
-        from cns_control.utils import filter_mean
+        # from cns_control.utils import filter_mean
         import matplotlib.cm as cm
 
         self.ax.clear()
         if self._show_mean:
-            self.ax.plot(filter_mean(self.spec))
+            self.ax.plot(self.filter_mean(self.spec))
         else:
             n = self.spec.shape[0]
             colors = cm.viridis(np.linspace(0, 1, n))

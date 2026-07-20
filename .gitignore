@@ -31,3 +31,6 @@ model_*.json
 # OS
 .DS_Store
 Thumbs.db
+
+debug*/
+WINDOWS_ENVIRONMENT.md

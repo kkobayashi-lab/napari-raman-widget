@@ -41,7 +41,7 @@ class HardwareWidget(QWidget):
         self.selection_results = None
         self.mda_channel_rows = []
         self.mda_writer = None
-
+        self.mm_config = None
         outer = QVBoxLayout()
 
         # ================= LOADING SECTION =================
@@ -183,7 +183,7 @@ class HardwareWidget(QWidget):
         cal_n_row.addWidget(QLabel("N (repeats):"))
         self.cal_n_input = QSpinBox()
         self.cal_n_input.setRange(1, 1000)
-        self.cal_n_input.setValue(20)
+        self.cal_n_input.setValue(2)
         cal_n_row.addWidget(self.cal_n_input)
         calib_layout.addLayout(cal_n_row)
 
@@ -191,7 +191,7 @@ class HardwareWidget(QWidget):
         cal_exp_row.addWidget(QLabel("Exposure (ms):"))
         self.cal_exp_input = QDoubleSpinBox()
         self.cal_exp_input.setRange(1, 1_000_000)
-        self.cal_exp_input.setValue(1000)
+        self.cal_exp_input.setValue(100)
         self.cal_exp_input.setDecimals(1)
         cal_exp_row.addWidget(self.cal_exp_input)
         calib_layout.addLayout(cal_exp_row)
@@ -200,7 +200,7 @@ class HardwareWidget(QWidget):
         cal_volts_row.addWidget(QLabel("Max volts:"))
         self.cal_volts_input = QDoubleSpinBox()
         self.cal_volts_input.setRange(0.01, 10.0)
-        self.cal_volts_input.setValue(1.8)
+        self.cal_volts_input.setValue(1.6)
         self.cal_volts_input.setDecimals(2)
         self.cal_volts_input.setSingleStep(0.1)
         cal_volts_row.addWidget(self.cal_volts_input)
@@ -218,7 +218,7 @@ class HardwareWidget(QWidget):
         cal_thres_row.addWidget(QLabel("Threshold:"))
         self.cal_thres_input = QDoubleSpinBox()
         self.cal_thres_input.setRange(0.0, 100.0)
-        self.cal_thres_input.setValue(1.0)
+        self.cal_thres_input.setValue(10)
         self.cal_thres_input.setDecimals(2)
         self.cal_thres_input.setSingleStep(0.1)
         cal_thres_row.addWidget(self.cal_thres_input)
@@ -422,12 +422,19 @@ class HardwareWidget(QWidget):
         self.grid_enable_check.toggled.connect(self._toggle_grid_mode)
         grid_layout.addWidget(self.grid_enable_check)
 
+        channel_row = QHBoxLayout()
+        channel_row.addWidget(QLabel("Grid setup channel:"))
+        self.grid_channel_combo = QComboBox()
+        self.grid_channel_combo.addItem("Raman (no preview)", None)
+        channel_row.addWidget(self.grid_channel_combo)
+        grid_layout.addLayout(channel_row)
+
         # Fixed point in image (pixel) coordinates -- same point at every FOV.
         fovx_row = QHBoxLayout()
         fovx_row.addWidget(QLabel("FOV x (px):"))
         self.grid_fovx_input = QSpinBox()
         self.grid_fovx_input.setRange(0, 100000)
-        self.grid_fovx_input.setValue(740)
+        self.grid_fovx_input.setValue(510)
         fovx_row.addWidget(self.grid_fovx_input)
         grid_layout.addLayout(fovx_row)
 
@@ -435,7 +442,7 @@ class HardwareWidget(QWidget):
         fovy_row.addWidget(QLabel("FOV y (px):"))
         self.grid_fovy_input = QSpinBox()
         self.grid_fovy_input.setRange(0, 100000)
-        self.grid_fovy_input.setValue(540)
+        self.grid_fovy_input.setValue(510)
         fovy_row.addWidget(self.grid_fovy_input)
         grid_layout.addLayout(fovy_row)
 
@@ -508,7 +515,7 @@ class HardwareWidget(QWidget):
         cy_row.addWidget(QLabel("Center Y:"))
         self.sel_cy_input = QSpinBox()
         self.sel_cy_input.setRange(0, 100000)
-        self.sel_cy_input.setValue(540)
+        self.sel_cy_input.setValue(510)
         cy_row.addWidget(self.sel_cy_input)
         sel_layout.addLayout(cy_row)
 
@@ -516,7 +523,7 @@ class HardwareWidget(QWidget):
         cx_row.addWidget(QLabel("Center X:"))
         self.sel_cx_input = QSpinBox()
         self.sel_cx_input.setRange(0, 100000)
-        self.sel_cx_input.setValue(740)
+        self.sel_cx_input.setValue(510)
         cx_row.addWidget(self.sel_cx_input)
         sel_layout.addLayout(cx_row)
 
@@ -789,11 +796,11 @@ class HardwareWidget(QWidget):
         # Keep references to pop-up windows so they don't get garbage collected.
         self._plot_windows = []
 
-        # Poll the stage position periodically for the live X/Y/Z readout.
-        self._pos_timer = QTimer(self)
-        self._pos_timer.setInterval(500)  # ms
-        self._pos_timer.timeout.connect(self._update_position_label)
-        self._pos_timer.start()
+        # Temporarily disable the napari widget's live X/Y polling.
+        # self._pos_timer = QTimer(self)
+        # self._pos_timer.setInterval(500)  # ms
+        # self._pos_timer.timeout.connect(self._update_position_label)
+        # self._pos_timer.start()
 
     # -------- file pickers --------
     def browse_cfg(self):
@@ -841,7 +848,7 @@ class HardwareWidget(QWidget):
         X, Y = self._get_image_xy()
         return self.transformer.BF_to_volts(
             (pt.reshape(1, -1)) / np.array([Y, X]),
-            max_volts=1.8,
+            max_volts=1.6,
         )
 
     def _parse_float_list(self, text, label="list"):
@@ -1040,6 +1047,23 @@ class HardwareWidget(QWidget):
         if entry in self.mda_channel_rows:
             self.mda_channel_rows.remove(entry)
 
+    def _refresh_grid_channel_combo(self, available_channels):
+        """Keep Raman first while refreshing available hardware channels."""
+        current = self.grid_channel_combo.currentData()
+        self.grid_channel_combo.blockSignals(True)
+        self.grid_channel_combo.clear()
+        self.grid_channel_combo.addItem("Raman (no preview)", None)
+        for channel in available_channels:
+            self.grid_channel_combo.addItem(channel, channel)
+
+        if current is not None:
+            index = self.grid_channel_combo.findData(current)
+            if index >= 0:
+                self.grid_channel_combo.setCurrentIndex(index)
+        self.grid_channel_combo.setEnabled(True)
+        self.grid_channel_combo.blockSignals(False)
+
+
     def _refresh_channel_combos(self):
         """Repopulate every channel combo with the current MM channel list."""
         available_no_bf = self._available_channels()
@@ -1050,6 +1074,8 @@ class HardwareWidget(QWidget):
             )
         except Exception:
             available_all = []
+
+        self._refresh_grid_channel_combo(available_all)
 
         for entry in self.channel_rows:
             combo = entry["combo"]
@@ -1093,8 +1119,9 @@ class HardwareWidget(QWidget):
             return
 
         try:
-            mda_dock = self.main_window._dock_widgets["MDA"]
-            mda_settings = mda_dock.children()[4]
+            from raman_mda_engine.utils import get_mda_widget_from_napari
+
+            mda_settings = get_mda_widget_from_napari(self.main_window)
         except Exception as e:
             print(f"[mda setup] couldn't locate MDA widget: {e}")
             return
@@ -1208,6 +1235,7 @@ class HardwareWidget(QWidget):
             cfg = self.cfg_path.text().strip()
             if cfg:
                 self.core.loadSystemConfiguration(cfg)
+                self.mm_config = cfg
                 try:
                     self.core.setConfig("Channel", "GFP")
                     time.sleep(1)
@@ -1216,6 +1244,19 @@ class HardwareWidget(QWidget):
                     print(f"[channel warm-up] {e}")
 
             try:
+                # pymmcore-widgets uses the Qt 6 locations for these classes.
+                # Expose their Qt 5 locations before napari imports the plugin.
+                from qtpy import QtGui, QtWidgets
+
+                for name in (
+                    "QAction",
+                    "QActionGroup",
+                    "QUndoCommand",
+                    "QUndoStack",
+                ):
+                    if not hasattr(QtGui, name):
+                        setattr(QtGui, name, getattr(QtWidgets, name))
+
                 result = self.viewer.window.add_plugin_dock_widget(
                     "napari-micromanager"
                 )
@@ -1380,41 +1421,82 @@ class HardwareWidget(QWidget):
         if self.transformer is None:
             self.status.setText("Status: no transformer loaded")
             return
-        if len(self.viewer.layers) == 0:
-            self.status.setText("Status: no layer to read point from")
+
+        points_layer = self.viewer.layers.selection.active
+        if not isinstance(points_layer, napari.layers.Points):
+            points_layer = next(
+                (
+                    layer
+                    for layer in reversed(self.viewer.layers)
+                    if isinstance(layer, napari.layers.Points)
+                ),
+                None,
+            )
+        if points_layer is None:
+            self.status.setText("Status: no Points layer available")
+            return
+
+        points = np.asarray(points_layer.data)
+        if len(points) == 0:
+            self.status.setText(
+                f"Status: Points layer '{points_layer.name}' is empty"
+            )
             return
 
         exposure = float(self.exposure_input.value())
         N = int(self.n_input.value())
 
+        # Keep acquisition separate from saving and plotting so a display
+        # problem can never be mislabeled as a hardware collection failure.
         try:
             self.daq.galvo.stop()
             self.daq.galvo.start()
 
-            pt = self.viewer.layers[-1].data[0, -2:]
+            pt = points[-1, -2:]
             volts = self._pt_to_volts(pt)
             spec = self.collector.collect_spectra_pts(
                 np.tile(volts[0], (N, 1)), exposure
             )
+        except Exception as e:
+            self.status.setText(f"Status: collection failed -- {e}")
+            return
 
-            save_name = self.collect_save_input.text().strip()
-            saved_msg = ""
-            if save_name:
+        save_name = self.collect_save_input.text().strip()
+        saved_msg = ""
+        save_error = None
+        if save_name:
+            try:
                 if not save_name.lower().endswith(".npy"):
                     save_name += ".npy"
                 np.save(save_name, spec)
                 saved_msg = f" -> {save_name}"
                 print(f"Saved spectrum to {save_name}")
+            except Exception as e:
+                save_error = e
 
+        plot_error = None
+        try:
             win = SpectrumWindow(spec, title="Raman spectra")
             win.show()
             self._plot_windows.append(win)
-
-            self.status.setText(
-                f"Status: collected {N}x{exposure:.0f}ms OK{saved_msg}"
-            )
         except Exception as e:
-            self.status.setText(f"Status: collection failed -- {e}")
+            plot_error = e
+
+        if save_error is not None or plot_error is not None:
+            problems = []
+            if save_error is not None:
+                problems.append(f"save failed: {save_error}")
+            if plot_error is not None:
+                problems.append(f"plot failed: {plot_error}")
+            self.status.setText(
+                f"Status: collected {N}x{exposure:.0f}ms OK; "
+                + "; ".join(problems)
+            )
+            return
+
+        self.status.setText(
+            f"Status: collected {N}x{exposure:.0f}ms OK{saved_msg}"
+        )
 
     # -------- laser aiming calibration --------
     def run_calibration(self):
@@ -1689,11 +1771,11 @@ class HardwareWidget(QWidget):
                 currentz = self.core.getPosition()
                 base_z = currentz - z_offset
                 self.core.setConfig("Channel", "RM")
-                self.core.setShutterOpen("Fluoshutter", True)
+                # self.core.setShutterOpen("Fluoshutter", True)
 
                 X_img, Y_img = self._get_image_xy()
                 volts = self.transformer.BF_to_volts(
-                    grid / np.array([Y_img, X_img]), max_volts=1.8
+                    grid / np.array([Y_img, X_img]), max_volts=1.6
                 )
                 self.core.stopSequenceAcquisition()
                 self.core.setExposure(1)
@@ -1711,16 +1793,16 @@ class HardwareWidget(QWidget):
                     all_specs.append(specs)
 
                     if do_zscan:
-                        self.core.setShutterOpen("Fluoshutter", False)
+                        # self.core.setShutterOpen("Fluoshutter", False)
                         self.core.setConfig("Channel", "BF")
                         self.core.setExposure(10)
                         BF_z = self.core.snap()
                         all_BF_z.append(BF_z)
                         self.core.setConfig("Channel", "RM")
-                        self.core.setShutterOpen("Fluoshutter", True)
+                        # self.core.setShutterOpen("Fluoshutter", True)
                         self.core.setExposure(1)
 
-                self.core.setShutterOpen("Fluoshutter", False)
+                # self.core.setShutterOpen("Fluoshutter", False)
                 self.core.setPosition(currentz)
                 self.core.setConfig("Channel", "BF")
                 self.core.setExposure(10)
@@ -1977,6 +2059,7 @@ class HardwareWidget(QWidget):
         x_step = float(self.grid_xstep_input.value())
         y_step = float(self.grid_ystep_input.value())
         repeats = int(self.grid_repeats_input.value())
+        preview_channel = self.grid_channel_combo.currentData()
         sq_size = float(self.sel_sqsize_input.value())
         sq_n = int(self.sel_sqn_input.value())
 
@@ -2002,6 +2085,7 @@ class HardwareWidget(QWidget):
                     x_range=x_range, y_range=y_range,
                     x_step=x_step, y_step=y_step,
                     repeats=repeats,
+                    preview_channel=preview_channel,
                 )
 
             self.selection_results = {
@@ -2010,9 +2094,14 @@ class HardwareWidget(QWidget):
                 "new_seq": new_seq,
             }
             n_pos = len(autofocus_p)
-            log.append("\n--- stage grid ready ---\n")
+            ready_detail = (
+                "using Raman placeholders"
+                if preview_channel is None
+                else f"after {preview_channel} preview"
+            )
+            log.append(f"\n--- grid ready {ready_detail} ---\n")
             self.status.setText(
-                f"Status: stage grid ready ({n_pos} positions, "
+                f"Status: grid ready {ready_detail} ({n_pos} positions, "
                 f"{repeats} pts each at ({fov_x},{fov_y})) -- then Run Raman MDA"
             )
         except Exception as e:
@@ -2097,7 +2186,7 @@ class HardwareWidget(QWidget):
 
         try:
             import datetime as _dt
-            from useq import ZRelativePositions
+            from useq import TIntervalLoops, ZRelativePositions
             from raman_mda_engine import (
                 RamanEngine, RamanTiffAndNumpyWriter,
             )
@@ -2112,6 +2201,7 @@ class HardwareWidget(QWidget):
 
             with _StdoutRedirector(log):
                 engine = RamanEngine(
+                    mmc=self.core,
                     spectra_collector=self.collector,
                     scale=2,
                     transformer=self.transformer,
@@ -2129,6 +2219,7 @@ class HardwareWidget(QWidget):
                     image_x=img_x,
                     image_y=img_y,
                     skip_imaging_for_same_pos=True,
+                    config_file = self.mm_config
                 )
 
                 self.core.register_mda_engine(engine)
@@ -2154,10 +2245,17 @@ class HardwareWidget(QWidget):
                         batch=batch, z_plan="middle",
                     )
 
-                new_time_plan = final_seq.time_plan.replace(
-                    loops=loops,
-                    interval=_dt.timedelta(seconds=interval),
-                )
+                time_interval = _dt.timedelta(seconds=interval)
+                if final_seq.time_plan is None:
+                    new_time_plan = TIntervalLoops(
+                        loops=loops,
+                        interval=time_interval,
+                    )
+                else:
+                    new_time_plan = final_seq.time_plan.replace(
+                        loops=loops,
+                        interval=time_interval,
+                    )
                 new_z_plan = ZRelativePositions(relative=z_relative)
 
                 if final_seq.channels:
