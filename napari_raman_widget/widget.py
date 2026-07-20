@@ -41,6 +41,8 @@ class HardwareWidget(QWidget):
         self.selection_results = None
         self.mda_channel_rows = []
         self.mda_writer = None
+        self.px2stage_picker = None
+        self.px2stage_xy = None
         self.mm_config = None
         outer = QVBoxLayout()
 
@@ -51,8 +53,8 @@ class HardwareWidget(QWidget):
         loading_layout.addWidget(QLabel("Micro-Manager config (.cfg):"))
         cfg_row = QHBoxLayout()
         self.cfg_path = QLineEdit()
-        self.cfg_path.setText("test3.cfg")
-        self.cfg_path.setPlaceholderText("test3.cfg")
+        self.cfg_path.setText(r"C:\Users\spraman\Desktop\config\exp_1ms_polysterenebeads_125mW_02_18_bakkk_v2.cfg")
+        self.cfg_path.setPlaceholderText(r"C:\Users\spraman\Desktop\config\exp_1ms_polysterenebeads_125mW_02_18_bakkk_v2.cfg")
         cfg_browse = QPushButton("...")
         cfg_browse.setFixedWidth(30)
         cfg_browse.clicked.connect(self.browse_cfg)
@@ -63,10 +65,10 @@ class HardwareWidget(QWidget):
         loading_layout.addWidget(QLabel("Transformer model (.json):"))
         tf_row = QHBoxLayout()
         self.tf_path = QLineEdit()
-        self.tf_path.setPlaceholderText("model_2026-01-08.json")
+        self.tf_path.setText(r"C:\Users\spraman\Desktop\config\model_2026-07-16.json")
+        self.tf_path.setPlaceholderText(r"C:\Users\spraman\Desktop\config\model_2026-07-16.json")
         tf_browse = QPushButton("...")
         tf_browse.setFixedWidth(30)
-        tf_browse.clicked.connect(self.browse_tf)
         tf_row.addWidget(self.tf_path)
         tf_row.addWidget(tf_browse)
         loading_layout.addLayout(tf_row)
@@ -228,42 +230,47 @@ class HardwareWidget(QWidget):
         self.calibrate_btn.clicked.connect(self.run_calibration)
         calib_layout.addWidget(self.calibrate_btn)
 
-        calib_box.setLayout(calib_layout)
-        outer.addWidget(calib_box)
+        # --- recalibration (shown when checked) ---
+        self.recal_check = QCheckBox("Recalibration")
+        self.recal_check.setChecked(False)
+        self.recal_check.toggled.connect(self._toggle_recal_fields)
+        calib_layout.addWidget(self.recal_check)
 
-        # ================= RECALIBRATION SECTION =================
-        recal_box = make_collapsible("Recalibration", expanded=False)
-        recal_layout = QVBoxLayout()
-
-        recal_help = QLabel(
+        self._recal_help = QLabel(
             "Opens manual selector on the last calibration dataset.\n"
             "Click points, Enter to advance, Backspace to go back,\n"
             "R to reset, N to mark as NaN. Close window when done,\n"
             "then click Save to write the new model."
         )
-        recal_help.setWordWrap(True)
-        recal_layout.addWidget(recal_help)
-
+        self._recal_help.setWordWrap(True)
+        calib_layout.addWidget(self._recal_help)
         model_name_row = QHBoxLayout()
-        model_name_row.addWidget(QLabel("Model name:"))
+        self._recal_model_name_label = QLabel("Model name:")
+        model_name_row.addWidget(self._recal_model_name_label)
         self.model_name_input = QLineEdit()
         self.model_name_input.setPlaceholderText("model_2026-01-08")
         model_name_row.addWidget(self.model_name_input)
-        recal_layout.addLayout(model_name_row)
-
+        calib_layout.addLayout(model_name_row)
         self.open_selector_btn = QPushButton("Open manual selector")
         self.open_selector_btn.clicked.connect(self.open_selector)
-        recal_layout.addWidget(self.open_selector_btn)
-
+        calib_layout.addWidget(self.open_selector_btn)
         self.save_model_btn = QPushButton("Save recalibrated model")
         self.save_model_btn.clicked.connect(self.save_recalibration)
-        recal_layout.addWidget(self.save_model_btn)
+        calib_layout.addWidget(self.save_model_btn)
 
-        recal_box.setLayout(recal_layout)
-        outer.addWidget(recal_box)
+        # collect recal widgets so they can be hidden as a group
+        self._recal_widgets = [
+            self._recal_help,
+            self._recal_model_name_label, self.model_name_input,
+            self.open_selector_btn, self.save_model_btn,
+        ]
+        self._toggle_recal_fields(False)   # hidden until checked
+
+        calib_box.setLayout(calib_layout)
+        outer.addWidget(calib_box)
 
         # ================= COLLECT REFERENCE SPECTRA SECTION =================
-        ref_box = make_collapsible("Collect reference spectra", expanded=False)
+        ref_box = make_collapsible("Axial background scan", expanded=False)
         ref_layout = QVBoxLayout()
 
         ref_name_row = QHBoxLayout()
@@ -497,6 +504,13 @@ class HardwareWidget(QWidget):
         reps_row.addWidget(self.grid_repeats_input)
         grid_layout.addLayout(reps_row)
 
+        # Skip the slow per-position BF pre-scan; use a zero-memory blank
+        # placeholder layer to establish dims instead.
+        self.grid_blank_check = QCheckBox("Skip BF pre-scan (use blank images)")
+        self.grid_blank_check.setChecked(True)
+        grid_layout.addWidget(self.grid_blank_check)
+        self.run_grid_sel_btn = QPushButton("Generate grid")
+
         self.run_grid_sel_btn = QPushButton("Generate grid")
         self.run_grid_sel_btn.clicked.connect(self.run_grid_selection)
         grid_layout.addWidget(self.run_grid_sel_btn)
@@ -558,26 +572,61 @@ class HardwareWidget(QWidget):
         npf_row.addWidget(self.sel_npf_input)
         sel_layout.addLayout(npf_row)
 
+        # Center-cell mode: split each FOV into one new stage position per
+        # detected cell, each shifted so that cell sits exactly at center.
+        self.sel_center_cell_check = QCheckBox(
+            "Center cell (split FOV into one position per cell, centered)"
+        )
+        self.sel_center_cell_check.setChecked(False)
+        self.sel_center_cell_check.toggled.connect(self._toggle_center_cell_fields)
+        sel_layout.addWidget(self.sel_center_cell_check)
+
+        vdm_row = QHBoxLayout()
+        self._vdm_label = QLabel("Vandermonde model (.json):")
+        vdm_row.addWidget(self._vdm_label)
+        self.sel_vdm_path = QLineEdit()
+        self.sel_vdm_path.setPlaceholderText("vandermonde_model.json")
+        self._vdm_browse = QPushButton("...")
+        self._vdm_browse.setFixedWidth(30)
+        self._vdm_browse.clicked.connect(self.browse_vandermonde)
+        vdm_row.addWidget(self.sel_vdm_path)
+        vdm_row.addWidget(self._vdm_browse)
+        sel_layout.addLayout(vdm_row)
+
+        # Hidden until "Center cell" is checked.
+        self._vdm_label.setVisible(False)
+        self.sel_vdm_path.setVisible(False)
+        self._vdm_browse.setVisible(False)
+
+
+        shape_row = QHBoxLayout()
+        shape_row.addWidget(QLabel("Aiming pattern:"))
+        self.sel_shape_combo = QComboBox()
+        self.sel_shape_combo.addItems(["Square", "Circle"])
+        shape_row.addWidget(self.sel_shape_combo)
+        sel_layout.addLayout(shape_row)
+
         sq_size_row = QHBoxLayout()
-        sq_size_row.addWidget(QLabel("Square size:"))
+        sq_size_row.addWidget(QLabel("Pattern size (px):"))
         self.sel_sqsize_input = QDoubleSpinBox()
-        self.sel_sqsize_input.setRange(0.001, 10.0)
-        self.sel_sqsize_input.setValue(0.002)
-        self.sel_sqsize_input.setDecimals(4)
-        self.sel_sqsize_input.setSingleStep(0.0005)
+        self.sel_sqsize_input.setRange(0.0, 10000.0)
+        self.sel_sqsize_input.setValue(30)
+        self.sel_sqsize_input.setDecimals(1)
+        self.sel_sqsize_input.setSingleStep(1.0)
         sq_size_row.addWidget(self.sel_sqsize_input)
         sel_layout.addLayout(sq_size_row)
 
         sq_n_row = QHBoxLayout()
-        sq_n_row.addWidget(QLabel("Square N (subpoints):"))
+        sq_n_row.addWidget(QLabel("N_x (subpoints):"))
         self.sel_sqn_input = QSpinBox()
         self.sel_sqn_input.setRange(1, 100)
         self.sel_sqn_input.setValue(1)
         sq_n_row.addWidget(self.sel_sqn_input)
         sel_layout.addLayout(sq_n_row)
 
+
         bkd_row = QHBoxLayout()
-        bkd_row.addWidget(QLabel("Background threshold:"))
+        bkd_row.addWidget(QLabel("Background distance (px):"))
         self.sel_bkd_input = QDoubleSpinBox()
         self.sel_bkd_input.setRange(0.0, 1_000_000.0)
         self.sel_bkd_input.setValue(80)
@@ -586,11 +635,25 @@ class HardwareWidget(QWidget):
         sel_layout.addLayout(bkd_row)
 
         batch_row = QHBoxLayout()
-        batch_row.addWidget(QLabel("Batch:"))
+        batch_row.addWidget(QLabel("Integrated batch collection:"))
         self.sel_batch_combo = QComboBox()
         self.sel_batch_combo.addItems(["False", "True"])
         batch_row.addWidget(self.sel_batch_combo)
         sel_layout.addLayout(batch_row)
+
+        sel_cp_row = QHBoxLayout()
+        sel_cp_row.addWidget(QLabel("Cellpose model:"))
+        self.sel_cellpose_combo = QComboBox()
+        try:
+            from cellpose import models as _cp_models
+            _sel_model_names = list(_cp_models.MODEL_NAMES)
+        except Exception:
+            _sel_model_names = ["cyto2"]
+        self.sel_cellpose_combo.addItems(_sel_model_names)
+        if "cyto2" in _sel_model_names:
+            self.sel_cellpose_combo.setCurrentText("cyto2")
+        sel_cp_row.addWidget(self.sel_cellpose_combo)
+        sel_layout.addLayout(sel_cp_row)
 
         self.run_selection_btn = QPushButton("Run automated selection")
         self.run_selection_btn.clicked.connect(self.run_automated_selection)
@@ -618,6 +681,22 @@ class HardwareWidget(QWidget):
         self.mda_dir_input.setText("data/run")
         mda_dir_row.addWidget(self.mda_dir_input)
         mda_layout.addLayout(mda_dir_row)
+
+        afp_row = QHBoxLayout()
+        afp_row.addWidget(QLabel("Autofocus positions (comma-sep):"))
+        self.mda_afp_input = QLineEdit()
+        self.mda_afp_input.setText("")
+        self.mda_afp_input.setPlaceholderText("(blank = from selection)")
+        afp_row.addWidget(self.mda_afp_input)
+        mda_layout.addLayout(afp_row)
+
+        imgp_row = QHBoxLayout()
+        imgp_row.addWidget(QLabel("Imaging positions (comma-sep):"))
+        self.mda_imgp_input = QLineEdit()
+        self.mda_imgp_input.setText("")
+        self.mda_imgp_input.setPlaceholderText("(blank = same as autofocus p)")
+        imgp_row.addWidget(self.mda_imgp_input)
+        mda_layout.addLayout(imgp_row)
 
         raman_off_row = QHBoxLayout()
         raman_off_row.addWidget(QLabel("Raman glass offset (um):"))
@@ -668,7 +747,7 @@ class HardwareWidget(QWidget):
         fine_pts_row.addWidget(self._fine_pts_label)
         self.mda_fine_pts_input = QSpinBox()
         self.mda_fine_pts_input.setRange(2, 500)
-        self.mda_fine_pts_input.setValue(15)
+        self.mda_fine_pts_input.setValue(8)
         fine_pts_row.addWidget(self.mda_fine_pts_input)
         mda_layout.addLayout(fine_pts_row)
 
@@ -678,10 +757,68 @@ class HardwareWidget(QWidget):
 
         # Segment-and-track toggle (independent of autofocus)
         self.mda_seg_track_check = QCheckBox(
-            "Segment and track (update aiming each cycle)"
+            "Segment and track (update aiming)"
         )
         self.mda_seg_track_check.setChecked(False)
+        self.mda_seg_track_check.toggled.connect(self._toggle_seg_track_fields)
         mda_layout.addWidget(self.mda_seg_track_check)
+        # Seg-track options (shown only when the box is checked)
+        seg_ch_row = QHBoxLayout()
+        self._seg_ch_label = QLabel("Segment channel:")
+        seg_ch_row.addWidget(self._seg_ch_label)
+        self.mda_seg_ch_combo = QComboBox()
+        self.mda_seg_ch_combo.addItem("BF")
+        seg_ch_row.addWidget(self.mda_seg_ch_combo)
+        mda_layout.addLayout(seg_ch_row)
+        seg_scale_row = QHBoxLayout()
+        self._seg_scale_label = QLabel("Image rescale factor:")
+        seg_scale_row.addWidget(self._seg_scale_label)
+        self.mda_seg_scale_input = QDoubleSpinBox()
+        self.mda_seg_scale_input.setRange(0.1, 100.0)
+        self.mda_seg_scale_input.setValue(2.0)
+        self.mda_seg_scale_input.setDecimals(1)
+        self.mda_seg_scale_input.setSingleStep(0.5)
+        seg_scale_row.addWidget(self.mda_seg_scale_input)
+        mda_layout.addLayout(seg_scale_row)
+        
+        # Cellpose model dropdown
+        seg_model_row = QHBoxLayout()
+        self._seg_model_label = QLabel("Cellpose model:")
+        seg_model_row.addWidget(self._seg_model_label)
+        self.mda_seg_model_combo = QComboBox()
+        try:
+            from cellpose import models as _cp_models
+            model_names = list(_cp_models.MODEL_NAMES)
+        except Exception:
+            model_names = ["cyto2"]
+        self.mda_seg_model_combo.addItems(model_names)
+        if "cyto2" in model_names:
+            self.mda_seg_model_combo.setCurrentText("cyto2")
+        seg_model_row.addWidget(self.mda_seg_model_combo)
+        mda_layout.addLayout(seg_model_row)
+        # Crop-around-mask dropdown
+        seg_crop_row = QHBoxLayout()
+        self._seg_crop_label = QLabel("Crop image around mask:")
+        seg_crop_row.addWidget(self._seg_crop_label)
+        self.mda_seg_crop_combo = QComboBox()
+        self.mda_seg_crop_combo.addItems(["True", "False"])
+        seg_crop_row.addWidget(self.mda_seg_crop_combo)
+        mda_layout.addLayout(seg_crop_row)
+        # Tracking config file
+        seg_track_cfg_row = QHBoxLayout()
+        self._seg_track_cfg_label = QLabel("Tracking config (.json):")
+        seg_track_cfg_row.addWidget(self._seg_track_cfg_label)
+        self.mda_track_cfg_input = QLineEdit()
+        self.mda_track_cfg_input.setText("particle_config.json")
+        self.mda_track_cfg_input.setPlaceholderText("particle_config.json")
+        self._seg_track_cfg_browse = QPushButton("...")
+        self._seg_track_cfg_browse.setFixedWidth(30)
+        self._seg_track_cfg_browse.clicked.connect(self.browse_tracking_cfg)
+        seg_track_cfg_row.addWidget(self.mda_track_cfg_input)
+        seg_track_cfg_row.addWidget(self._seg_track_cfg_browse)
+        mda_layout.addLayout(seg_track_cfg_row)
+        # hidden until seg-track is checked
+        self._toggle_seg_track_fields(False)
 
         mda_exp_row = QHBoxLayout()
         mda_exp_row.addWidget(QLabel("Exposure per cell (ms):"))
@@ -712,7 +849,7 @@ class HardwareWidget(QWidget):
         # Refocus / re-segment cadence: run autofocus AND segment-and-track
         # only every Nth timepoint (1 = every timepoint).
         refocus_row = QHBoxLayout()
-        refocus_row.addWidget(QLabel("Refocus every (timepoints):"))
+        refocus_row.addWidget(QLabel("Refocus & segment every (timepoints):"))
         self.mda_refocus_input = QSpinBox()
         self.mda_refocus_input.setRange(1, 1_000_000)
         self.mda_refocus_input.setValue(1)
@@ -754,24 +891,98 @@ class HardwareWidget(QWidget):
         self.stop_mda_btn.clicked.connect(self.stop_raman_mda)
         mda_btns_row.addWidget(self.run_mda_btn, 3)
         mda_btns_row.addWidget(self.stop_mda_btn, 1)
-        mda_layout.addLayout(mda_btns_row)
 
+        mda_layout.addLayout(mda_btns_row)
+ 
+        # --- separator ---
+        sep = QLabel("-" * 45)
+        sep.setAlignment(Qt.AlignCenter)
+        mda_layout.addWidget(sep)
+ 
         self.gen_dataset_btn = QPushButton("Generate dataset")
         self.gen_dataset_btn.clicked.connect(self.generate_dataset)
         mda_layout.addWidget(self.gen_dataset_btn)
+ 
+        # --- pixel-to-stage calibration ---
+        self.px2stage_check = QCheckBox("Pixel-to-stage calibration")
+        self.px2stage_check.setChecked(False)
+        self.px2stage_check.toggled.connect(self._toggle_px2stage_fields)
+        mda_layout.addWidget(self.px2stage_check)
 
+        self._px2s_help = QLabel(
+            "Pick the same feature in each grid position, then fit a\n"
+            "pixel->stage Vandermonde model. Uses stage XY from the\n"
+            "dataset's useq_sequence attribute."
+        )
+        self._px2s_help.setWordWrap(True)
+        mda_layout.addWidget(self._px2s_help)
+
+        px2s_ds_row = QHBoxLayout()
+        self._px2s_ds_label = QLabel("Dataset (.zarr):")
+        px2s_ds_row.addWidget(self._px2s_ds_label)
+        self.px2stage_ds_path = QLineEdit()
+        self.px2stage_ds_path.setPlaceholderText("data/dataset/ds_run_7.zarr")
+        self._px2s_ds_browse = QPushButton("...")
+        self._px2s_ds_browse.setFixedWidth(30)
+        self._px2s_ds_browse.clicked.connect(self.browse_px2stage_ds)
+        px2s_ds_row.addWidget(self.px2stage_ds_path)
+        px2s_ds_row.addWidget(self._px2s_ds_browse)
+        mda_layout.addLayout(px2s_ds_row)
+
+        px2s_deg_row = QHBoxLayout()
+        self._px2s_deg_label = QLabel("Vandermonde degree:")
+        px2s_deg_row.addWidget(self._px2s_deg_label)
+        self.px2stage_degree_input = QSpinBox()
+        self.px2stage_degree_input.setRange(1, 5)
+        self.px2stage_degree_input.setValue(1)
+        px2s_deg_row.addWidget(self.px2stage_degree_input)
+        mda_layout.addLayout(px2s_deg_row)
+
+        self.px2stage_pick_btn = QPushButton("Pick points...")
+        self.px2stage_pick_btn.clicked.connect(self.open_pixel_stage_picker)
+        mda_layout.addWidget(self.px2stage_pick_btn)
+
+        px2s_name_row = QHBoxLayout()
+        self._px2s_name_label = QLabel("Model file:")
+        px2s_name_row.addWidget(self._px2s_name_label)
+        self.px2stage_name_input = QLineEdit()
+        self.px2stage_name_input.setText("vandermonde_model.json")
+        px2s_name_row.addWidget(self.px2stage_name_input)
+        mda_layout.addLayout(px2s_name_row)
+
+        self.px2stage_save_btn = QPushButton("Fit && save model")
+        self.px2stage_save_btn.clicked.connect(self.fit_and_save_pixel_stage)
+        mda_layout.addWidget(self.px2stage_save_btn)
+
+        # collect the px2stage widgets so they can be hidden as a group
+        self._px2stage_widgets = [
+            self._px2s_help,
+            self._px2s_ds_label, self.px2stage_ds_path, self._px2s_ds_browse,
+            self._px2s_deg_label, self.px2stage_degree_input,
+            self.px2stage_pick_btn,
+            self._px2s_name_label, self.px2stage_name_input,
+            self.px2stage_save_btn,
+        ]
+        # hidden until the box is checked
+        self._toggle_px2stage_fields(False)
+ 
         mda_box.setLayout(mda_layout)
         outer.addWidget(mda_box)
 
+        # make_collapsible re-shows ALL descendants on expand, which clobbers
+        # our conditional field hiding -- re-apply it after any box expands.
+        for _box in (calib_box, scan_box, self.sel_box, mda_box):
+            _box.toggled.connect(lambda checked: self._reapply_toggles())
+
         outer.addStretch()
 
-        # ================= LIVE STAGE POSITION =================
-        self.pos_label = QLabel("Stage:  X --  Y --")
-        self.pos_label.setStyleSheet(
-            "QLabel { border-top: 1px solid palette(mid); padding: 4px; "
-            "font-family: monospace; }"
-        )
-        outer.addWidget(self.pos_label)
+        # # ================= LIVE STAGE POSITION =================
+        # self.pos_label = QLabel("Stage:  X --  Y --")
+        # self.pos_label.setStyleSheet(
+        #     "QLabel { border-top: 1px solid palette(mid); padding: 4px; "
+        #     "font-family: monospace; }"
+        # )
+        # outer.addWidget(self.pos_label)
 
         # ================= STATUS BAR (bottom) =================
         self.status = QLabel("Status: disconnected")
@@ -826,6 +1037,28 @@ class HardwareWidget(QWidget):
         if path:
             self.out_path.setText(path)
 
+    def browse_vandermonde(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Vandermonde model", "",
+            "JSON files (*.json);;All files (*)",
+        )
+        if path:
+            self.sel_vdm_path.setText(path)
+
+    def browse_tracking_cfg(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select tracking config", "",
+            "JSON files (*.json);;All files (*)",
+        )
+        if path:
+            self.mda_track_cfg_input.setText(path)
+
+    def _toggle_center_cell_fields(self, checked):
+        """Show/hide the Vandermonde model path fields based on center-cell mode."""
+        self._vdm_label.setVisible(checked)
+        self.sel_vdm_path.setVisible(checked)
+        self._vdm_browse.setVisible(checked)
+
     # -------- helpers --------
     def _get_image_xy(self):
         """Return (X_size, Y_size) from the camera via the core if connected,
@@ -843,6 +1076,20 @@ class HardwareWidget(QWidget):
                 Y, X = shape[-2], shape[-1]
                 return int(X), int(Y)
         return 1344, 1024
+
+    def _make_point_transformer(self, size_px, n):
+        """Build the selected aiming transformer from a pixel size.
+
+        Converts px -> normalized using image width. Square uses it as edge
+        length, Circle as radius.
+        """
+        from raman_mda_engine.aiming.transformers import Square, Circle
+        img_x, _ = self._get_image_xy()
+        length = float(size_px) / float(img_x)
+        n = max(1, int(n))
+        if self.sel_shape_combo.currentText() == "Circle":
+            return Circle(length, n)
+        return Square(length, n)
 
     def _pt_to_volts(self, pt):
         X, Y = self._get_image_xy()
@@ -918,6 +1165,30 @@ class HardwareWidget(QWidget):
         self._zscan_steps_label.setVisible(checked)
         self.scan_zsteps_input.setVisible(checked)
 
+    def _toggle_seg_track_fields(self, checked):
+        """Show/hide the segment-channel and rescale fields."""
+        self._seg_ch_label.setVisible(checked)
+        self.mda_seg_ch_combo.setVisible(checked)
+        self._seg_scale_label.setVisible(checked)
+        self.mda_seg_scale_input.setVisible(checked)
+        self._seg_model_label.setVisible(checked)
+        self.mda_seg_model_combo.setVisible(checked)
+        self._seg_crop_label.setVisible(checked)
+        self.mda_seg_crop_combo.setVisible(checked)
+        self._seg_track_cfg_label.setVisible(checked)
+        self.mda_track_cfg_input.setVisible(checked)
+        self._seg_track_cfg_browse.setVisible(checked)
+
+    def _toggle_px2stage_fields(self, checked):
+        """Show/hide the pixel-to-stage calibration fields."""
+        for w in self._px2stage_widgets:
+            w.setVisible(checked)
+
+    def _toggle_recal_fields(self, checked):
+        """Show/hide the recalibration fields."""
+        for w in self._recal_widgets:
+            w.setVisible(checked)
+
     def _toggle_autofocus_fields(self, method):
         """Show/hide the MDA autofocus fields based on the chosen object.
 
@@ -940,6 +1211,15 @@ class HardwareWidget(QWidget):
         self.mda_fine_range_input.setVisible(is_laser)
         self._fine_pts_label.setVisible(is_laser)
         self.mda_fine_pts_input.setVisible(is_laser)
+
+    def _reapply_toggles(self):
+        self._toggle_center_cell_fields(self.sel_center_cell_check.isChecked())
+        self._toggle_seg_track_fields(self.mda_seg_track_check.isChecked())
+        self._toggle_zscan_fields(self.scan_zscan_check.isChecked())
+        self._toggle_autofocus_fields(self.sel_af_combo.currentText())
+        self._toggle_px2stage_fields(self.px2stage_check.isChecked())
+        self._toggle_px2stage_fields(self.px2stage_check.isChecked())
+        self._toggle_recal_fields(self.recal_check.isChecked())
 
     # -------- channel row helpers --------
     def _available_channels(self):
@@ -1106,6 +1386,17 @@ class HardwareWidget(QWidget):
                 combo.addItem("(connect first)")
                 combo.setEnabled(False)
             combo.blockSignals(False)
+        
+        combo = self.mda_seg_ch_combo
+        current = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        if available_all:
+            combo.addItems(available_all)
+            combo.setCurrentText(current if current in available_all else "BF")
+        else:
+            combo.addItem("BF")
+        combo.blockSignals(False)
 
     def _prepare_for_selection(self):
         """Stop live mode, set axis order to tpcz, set z plan to RangeAround."""
@@ -1199,6 +1490,132 @@ class HardwareWidget(QWidget):
         except Exception as e:
             log.append(f"\n--- generation failed: {e} ---\n")
             self.status.setText(f"Status: dataset generation failed - {e}")
+
+    
+    def browse_px2stage_ds(self):
+        # zarr stores are directories
+        path = QFileDialog.getExistingDirectory(
+            self, "Select dataset (.zarr)", "data/dataset"
+        )
+        if path:
+            self.px2stage_ds_path.setText(path)
+ 
+    def open_pixel_stage_picker(self):
+        """Open the frame-by-frame point picker on the selected dataset."""
+        import json as _json
+        path = self.px2stage_ds_path.text().strip()
+        if not path:
+            self.status.setText("Status: select a dataset (.zarr) first")
+            return
+        try:
+            ds = xr.open_zarr(path)
+            if "useq_sequence" not in ds.attrs:
+                self.status.setText(
+                    "Status: dataset has no useq_sequence attr -- "
+                    "regenerate it with the current loader"
+                )
+                return
+            seq = _json.loads(ds.attrs["useq_sequence"])
+            self.px2stage_xy = np.array(
+                [[s["x"], s["y"]] for s in seq["stage_positions"]]
+            )
+            # one frame per position: first t / c / z
+            imgs = ds["image"].isel(t=0, c=0, z=0).values
+            if len(imgs) != len(self.px2stage_xy):
+                print(
+                    f"[px2stage] warning: {len(imgs)} frames vs "
+                    f"{len(self.px2stage_xy)} stage positions"
+                )
+            import matplotlib
+            matplotlib.use("QtAgg")
+            import matplotlib.pyplot as plt
+            from cns_control.calibration import StagePointPicker
+            plt.ion()
+            self.px2stage_picker = StagePointPicker(imgs)
+            plt.show()
+            self.status.setText(
+                f"Status: picker open ({len(imgs)} frames) -- click through, "
+                "then Fit & save"
+            )
+        except Exception as e:
+            self.status.setText(f"Status: picker failed -- {e}")
+ 
+    def fit_and_save_pixel_stage(self):
+        """Fit the centered Vandermonde model on picked points and save it."""
+        if self.px2stage_picker is None or self.px2stage_xy is None:
+            self.status.setText("Status: no picked points -- pick points first")
+            return
+        log = LogWindow(title="Pixel-to-stage fit log")
+        log.show()
+        self._plot_windows.append(log)
+        try:
+            from cns_control.calibration import (
+                apply_vandermonde, fit_vandermonde, save_vandermonde_model,
+            )
+            points = np.asarray(self.px2stage_picker.points, dtype=float)
+            xy = self.px2stage_xy
+            n = min(len(points), len(xy))
+            points, xy = points[:n], xy[:n]
+            valid = ~np.isnan(points).any(axis=1)
+            degree = int(self.px2stage_degree_input.value())
+            n_terms = (degree + 1) * (degree + 2) // 2
+            if valid.sum() < n_terms:
+                self.status.setText(
+                    f"Status: need >= {n_terms} points for degree {degree}, "
+                    f"got {valid.sum()}"
+                )
+                return
+            with _StdoutRedirector(log):
+                img_center = points[valid].mean(axis=0)
+                xy_center = xy[valid].mean(axis=0)
+                points_c = points[valid] - img_center
+                xy_c = xy[valid] - xy_center
+                print(f"Fitting on {valid.sum()}/{n} points")
+                print(f"img_center={img_center}, xy_center={xy_center}")
+                # RMSE comparison across degrees (offset domain)
+                for deg in (1, 2, 3):
+                    if valid.sum() < (deg + 1) * (deg + 2) // 2:
+                        print(f"degree={deg}  (not enough points)")
+                        continue
+                    C_deg = fit_vandermonde(points_c, xy_c, deg)
+                    res = xy_c - apply_vandermonde(points_c, C_deg, deg)
+                    rmse = np.sqrt(np.mean(res**2, axis=0))
+                    print(
+                        f"degree={deg}  RMSE: x={rmse[0]:.4f}, y={rmse[1]:.4f}"
+                    )
+                C = fit_vandermonde(points_c, xy_c, degree)
+                # sanity check: stage step for a 5 px x-offset
+                test = apply_vandermonde(np.array([[5.0, 0.0]]), C, degree)[0]
+                print(f"5px-x step -> stage (degree={degree}): {test}")
+            # save dialog so the user can rename / choose location
+            default_name = (
+                self.px2stage_name_input.text().strip()
+                or "vandermonde_model.json"
+            )
+            if not default_name.lower().endswith(".json"):
+                default_name += ".json"
+            save_path, _ = QFileDialog.getSaveFileName(
+                self, "Save Vandermonde model", default_name,
+                "JSON files (*.json);;All files (*)",
+            )
+            if not save_path:
+                self.status.setText("Status: save cancelled")
+                return
+            save_vandermonde_model(
+                save_path, C, degree,
+                img_center=img_center, xy_center=xy_center,
+            )
+            self.px2stage_name_input.setText(save_path)
+            # make it immediately usable by center-cell mode
+            self.sel_vdm_path.setText(save_path)
+            log.append(f"\n--- saved {save_path} ---\n")
+            self.status.setText(
+                f"Status: Vandermonde model (degree={degree}) saved -> "
+                f"{save_path}"
+            )
+        except Exception as e:
+            log.append(f"\n--- fit failed: {e} ---\n")
+            self.status.setText(f"Status: pixel-to-stage fit failed -- {e}")
 
     # -------- loading actions --------
     def connect(self):
@@ -1403,6 +1820,8 @@ class HardwareWidget(QWidget):
         self.main_window = None
         self.selection_results = None
         self.mda_writer = None
+        self.px2stage_picker = None
+        self.px2stage_xy = None
         self.status.setText("Status: disconnected")
         self.connect_btn.setEnabled(True)
         self.disconnect_btn.setEnabled(False)
@@ -1937,6 +2356,16 @@ class HardwareWidget(QWidget):
         bkd_thres = float(self.sel_bkd_input.value())
         batch = self.sel_batch_combo.currentText() == "True"
 
+        center_cell = self.sel_center_cell_check.isChecked()
+        vandermonde_model_path = self.sel_vdm_path.text().strip()
+        cellpose_model = self.sel_cellpose_combo.currentText() or "cyto2"
+
+        if center_cell and not vandermonde_model_path:
+            self.status.setText(
+                "Status: Center cell mode requires a Vandermonde model (.json)"
+            )
+            return
+
         log = LogWindow(title="Automated selection log")
         log.show()
         self._plot_windows.append(log)
@@ -1946,12 +2375,11 @@ class HardwareWidget(QWidget):
 
         try:
             from cns_control.utils import automated_point_selections
-            from raman_mda_engine.aiming.transformers import Square
 
             with _StdoutRedirector(log):
                 self._prepare_for_selection()
                 self.core.register_mda_engine(self.default_engine)
-                point_transformer = Square(sq_size, sq_n)
+                point_transformer = self._make_point_transformer(sq_size, sq_n)
                 sources, autofocus_p, new_seq = automated_point_selections(
                     self.core, self.viewer, self.main_window,
                     point_transformer,
@@ -1961,6 +2389,11 @@ class HardwareWidget(QWidget):
                     autofocus_object=autofocus_object,
                     bkd_thres=bkd_thres,
                     batch=batch,
+                    center_cell=center_cell,
+                    vandermonde_model_path=(
+                        vandermonde_model_path if center_cell else None
+                    ),
+                    cellpose_model=cellpose_model,
                 )
 
             self.selection_results = {
@@ -1968,11 +2401,16 @@ class HardwareWidget(QWidget):
                 "autofocus_p": autofocus_p,
                 "new_seq": new_seq,
             }
+            n_new = len(new_seq.stage_positions)
             log.append("\n--- selection complete ---\n")
-            self.status.setText("Status: automated selection done OK")
+            extra = (
+                f" ({n_new} centered positions)" if center_cell else ""
+            )
+            self.status.setText(f"Status: automated selection done OK{extra}")
         except Exception as e:
             log.append(f"\n--- selection failed: {e} ---\n")
             self.status.setText(f"Status: selection failed -- {e}")
+
 
     def run_manual_selection(self):
         """Create empty point-source layers for hand-clicking, mirroring the
@@ -2003,12 +2441,11 @@ class HardwareWidget(QWidget):
 
         try:
             from cns_control.utils import manual_point_selections
-            from raman_mda_engine.aiming.transformers import Square
 
             with _StdoutRedirector(log):
                 self._prepare_for_selection()
                 self.core.register_mda_engine(self.default_engine)
-                point_transformer = Square(sq_size, sq_n)
+                point_transformer = self._make_point_transformer(sq_size, sq_n)
                 sources, autofocus_p, new_seq = manual_point_selections(
                     self.core, self.viewer, self.main_window,
                     point_transformer,
@@ -2072,12 +2509,11 @@ class HardwareWidget(QWidget):
 
         try:
             from cns_control.utils import grid_point_selections
-            from raman_mda_engine.aiming.transformers import Square
 
             with _StdoutRedirector(log):
                 self._prepare_for_selection()
                 self.core.register_mda_engine(self.default_engine)
-                point_transformer = Square(sq_size, sq_n)
+                point_transformer = self._make_point_transformer(sq_size, sq_n)
                 sources, autofocus_p, new_seq = grid_point_selections(
                     self.core, self.viewer, self.main_window,
                     point_transformer,
@@ -2128,6 +2564,44 @@ class HardwareWidget(QWidget):
         sources = self.selection_results["sources"]
         autofocus_p = self.selection_results["autofocus_p"]
         new_seq = self.selection_results["new_seq"]
+        image_p = autofocus_p
+        afp_text = self.mda_afp_input.text().strip()
+        if afp_text and afp_text.lower() != "none":
+            try:
+                autofocus_p = np.array(
+                    self._parse_int_list(afp_text, "Autofocus positions")
+                )
+            except ValueError as e:
+                self.status.setText(f"Status: {e}")
+                return
+            n_pos = len(new_seq.stage_positions)
+            bad = [p for p in autofocus_p if p < 0 or p >= n_pos]
+            if bad:
+                self.status.setText(
+                    f"Status: autofocus positions out of range {bad} "
+                    f"(sequence has {n_pos} positions)"
+                )
+                return
+            print(f"[autofocus_p] manual override: {autofocus_p.tolist()}")
+        
+        imgp_text = self.mda_imgp_input.text().strip()
+        if imgp_text and imgp_text.lower() != "none":
+            try:
+                image_p = np.array(
+                    self._parse_int_list(imgp_text, "Imaging positions")
+                )
+            except ValueError as e:
+                self.status.setText(f"Status: {e}")
+                return
+            n_pos = len(new_seq.stage_positions)
+            bad = [p for p in image_p if p < 0 or p >= n_pos]
+            if bad:
+                self.status.setText(
+                    f"Status: imaging positions out of range {bad} "
+                    f"(sequence has {n_pos} positions)"
+                )
+                return
+            print(f"[image_p] manual override: {image_p.tolist()}")
 
         af_choice = self.sel_af_combo.currentText()
         autofocus_enabled = af_choice != "None"
@@ -2136,10 +2610,10 @@ class HardwareWidget(QWidget):
         batch = self.sel_batch_combo.currentText() == "True"
         sq_size = float(self.sel_sqsize_input.value())
         sq_n = int(self.sel_sqn_input.value())
-        if batch and sq_n < 2:
+        if batch and self._make_point_transformer(sq_size, sq_n).multiplier < 2:
             self.status.setText(
-                "Status: batch mode requires Square N >= 2 "
-                "(DAQ needs at least 2 samples per channel)"
+                "Status: batch mode needs a pattern with >= 2 points "
+                "(increase N)"
             )
             return
 
@@ -2154,6 +2628,11 @@ class HardwareWidget(QWidget):
         loops = int(self.mda_loops_input.value())
         interval = float(self.mda_interval_input.value())
         refocus_every = int(self.mda_refocus_input.value())
+        segment_channel = self.mda_seg_ch_combo.currentText() or "BF"
+        seg_scale = float(self.mda_seg_scale_input.value())
+        cellpose_model = self.mda_seg_model_combo.currentText() or "cyto2"
+        segment_crop = self.mda_seg_crop_combo.currentText() == "True"
+        tracking_config = self.mda_track_cfg_input.text().strip() or "particle_config.json"
 
         try:
             z_relative = self._parse_float_list(
@@ -2190,7 +2669,6 @@ class HardwareWidget(QWidget):
             from raman_mda_engine import (
                 RamanEngine, RamanTiffAndNumpyWriter,
             )
-            from raman_mda_engine.aiming.transformers import Square
             from cns_control.utils import set_up_new_seq
 
             try:
@@ -2203,13 +2681,18 @@ class HardwareWidget(QWidget):
                 engine = RamanEngine(
                     mmc=self.core,
                     spectra_collector=self.collector,
-                    scale=2,
                     transformer=self.transformer,
                     batch=batch,
                     autofocus=autofocus_enabled,
                     autofocus_p=autofocus_p,
+                    image_p=image_p,
                     autofocus_object=autofocus_object,
                     segment_and_track=segment_and_track,
+                    scale=seg_scale,
+                    segment_channel=segment_channel,
+                    cellpose_model=cellpose_model,
+                    segment_crop=segment_crop,
+                    tracking_config=tracking_config,
                     raman_glass_offset=raman_offset,
                     autofocus_search_range=af_range,
                     search_pts=search_pts,
@@ -2227,7 +2710,7 @@ class HardwareWidget(QWidget):
                 self.mda_writer = RamanTiffAndNumpyWriter(out_dir)
                 engine.aiming_sources = sources
 
-                point_transformer = Square(sq_size, sq_n)
+                point_transformer = self._make_point_transformer(sq_size, sq_n)
 
                 if batch:
                     final_seq = set_up_new_seq(
