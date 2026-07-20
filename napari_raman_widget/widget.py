@@ -32,6 +32,7 @@ class HardwareWidget(QWidget):
         self.collector = None
         self.daq = None
         self.transformer = None
+        self.vandermonde = None 
         self.default_engine = None
         self.calibration_ds = None
         self.calibrator = None
@@ -78,6 +79,17 @@ class HardwareWidget(QWidget):
         self.lightfield_config.setText(DEFAULT_LIGHTFIELD_CONFIG)
         self.lightfield_config.setPlaceholderText(DEFAULT_LIGHTFIELD_CONFIG)
         loading_layout.addWidget(self.lightfield_config)
+
+        loading_layout.addWidget(QLabel("Vandermonde model (.json):"))
+        vdm_row = QHBoxLayout()
+        self.sel_vdm_path = QLineEdit()
+        self.sel_vdm_path.setPlaceholderText("vandermonde_model.json")
+        vdm_browse = QPushButton("...")
+        vdm_browse.setFixedWidth(30)
+        vdm_browse.clicked.connect(self.browse_vandermonde)
+        vdm_row.addWidget(self.sel_vdm_path)
+        vdm_row.addWidget(vdm_browse)
+        loading_layout.addLayout(vdm_row)
 
         loading_layout.addWidget(
             QLabel("Output folder (optional, applied on connect):")
@@ -419,15 +431,19 @@ class HardwareWidget(QWidget):
 
         grid_layout.addWidget(QLabel(
             "Creates a grid of stage positions around the CURRENT stage XY,\n"
-            "each carrying the same single fixed point. No autofocus, non-batch."
+            "each carrying the same single fixed point (non-batch)."
         ))
 
-        # Enable checkbox: while checked, automated cell selection is locked and
-        # autofocus is forced to None / batch to False.
-        self.grid_enable_check = QCheckBox("Enable grid mode (locks automated selection)")
-        self.grid_enable_check.setChecked(False)
-        self.grid_enable_check.toggled.connect(self._toggle_grid_mode)
-        grid_layout.addWidget(self.grid_enable_check)
+        grid_af_row = QHBoxLayout()
+        grid_af_row.addWidget(QLabel("Autofocus object:"))
+        self.grid_af_combo = QComboBox()
+        self.grid_af_combo.addItems(
+            ["None", "laser", "software", "quartz", "glass", "cell"]
+        )
+        grid_af_row.addWidget(self.grid_af_combo)
+        grid_layout.addLayout(grid_af_row)
+        # let the grid combo also drive the MDA autofocus-field visibility
+        self.grid_af_combo.currentTextChanged.connect(self._toggle_autofocus_fields)
 
         channel_row = QHBoxLayout()
         channel_row.addWidget(QLabel("Grid setup channel:"))
@@ -549,9 +565,15 @@ class HardwareWidget(QWidget):
         r_row.addWidget(self.sel_r_input)
         sel_layout.addLayout(r_row)
 
+        mask_btn_row = QHBoxLayout()
         self.add_mask_btn = QPushButton("Add mask")
         self.add_mask_btn.clicked.connect(self.add_mask)
-        sel_layout.addWidget(self.add_mask_btn)
+        self.click_center_btn = QPushButton("Click to center")
+        self.click_center_btn.setCheckable(True)
+        self.click_center_btn.toggled.connect(self._toggle_click_to_center)
+        mask_btn_row.addWidget(self.add_mask_btn)
+        mask_btn_row.addWidget(self.click_center_btn)
+        sel_layout.addLayout(mask_btn_row)
 
         sel_layout.addWidget(QLabel("Automated point selection:"))
 
@@ -578,26 +600,7 @@ class HardwareWidget(QWidget):
             "Center cell (split FOV into one position per cell, centered)"
         )
         self.sel_center_cell_check.setChecked(False)
-        self.sel_center_cell_check.toggled.connect(self._toggle_center_cell_fields)
         sel_layout.addWidget(self.sel_center_cell_check)
-
-        vdm_row = QHBoxLayout()
-        self._vdm_label = QLabel("Vandermonde model (.json):")
-        vdm_row.addWidget(self._vdm_label)
-        self.sel_vdm_path = QLineEdit()
-        self.sel_vdm_path.setPlaceholderText("vandermonde_model.json")
-        self._vdm_browse = QPushButton("...")
-        self._vdm_browse.setFixedWidth(30)
-        self._vdm_browse.clicked.connect(self.browse_vandermonde)
-        vdm_row.addWidget(self.sel_vdm_path)
-        vdm_row.addWidget(self._vdm_browse)
-        sel_layout.addLayout(vdm_row)
-
-        # Hidden until "Center cell" is checked.
-        self._vdm_label.setVisible(False)
-        self.sel_vdm_path.setVisible(False)
-        self._vdm_browse.setVisible(False)
-
 
         shape_row = QHBoxLayout()
         shape_row.addWidget(QLabel("Aiming pattern:"))
@@ -659,9 +662,14 @@ class HardwareWidget(QWidget):
         self.run_selection_btn.clicked.connect(self.run_automated_selection)
         sel_layout.addWidget(self.run_selection_btn)
 
+        manual_row = QHBoxLayout()
         self.run_manual_btn = QPushButton("Manual selection")
         self.run_manual_btn.clicked.connect(self.run_manual_selection)
-        sel_layout.addWidget(self.run_manual_btn)
+        self.center_manual_btn = QPushButton("Center clicked cells")
+        self.center_manual_btn.clicked.connect(self.center_manual_cells)
+        manual_row.addWidget(self.run_manual_btn)
+        manual_row.addWidget(self.center_manual_btn)
+        sel_layout.addLayout(manual_row)
 
         sel_box.setLayout(sel_layout)
         outer.addWidget(sel_box)
@@ -1053,12 +1061,6 @@ class HardwareWidget(QWidget):
         if path:
             self.mda_track_cfg_input.setText(path)
 
-    def _toggle_center_cell_fields(self, checked):
-        """Show/hide the Vandermonde model path fields based on center-cell mode."""
-        self._vdm_label.setVisible(checked)
-        self.sel_vdm_path.setVisible(checked)
-        self._vdm_browse.setVisible(checked)
-
     # -------- helpers --------
     def _get_image_xy(self):
         """Return (X_size, Y_size) from the camera via the core if connected,
@@ -1076,6 +1078,22 @@ class HardwareWidget(QWidget):
                 Y, X = shape[-2], shape[-1]
                 return int(X), int(Y)
         return 1344, 1024
+    
+    def _load_vandermonde(self):
+        """Load the Vandermonde model from the path in the selection section.
+        Stores (C, degree) on self.vandermonde. Returns a status fragment."""
+        path = self.sel_vdm_path.text().strip()
+        if not path:
+            self.vandermonde = None
+            return " (no vandermonde)"
+        try:
+            from cns_control.utils import load_vandermonde_model
+            C, degree = load_vandermonde_model(path)
+            self.vandermonde = (C, degree)
+            return f" (vandermonde deg={degree} OK)"
+        except Exception as e:
+            self.vandermonde = None
+            return f" (vandermonde load failed: {e})"
 
     def _make_point_transformer(self, size_px, n):
         """Build the selected aiming transformer from a pixel size.
@@ -1142,22 +1160,6 @@ class HardwareWidget(QWidget):
             # last good reading up rather than flickering an error.
             pass
 
-    def _toggle_grid_mode(self, checked):
-        """While grid mode is on, lock the automated cell selection section and
-        force autofocus object -> None and batch -> False (grid selection is
-        inherently no-autofocus, non-batch)."""
-        if checked:
-            self.sel_af_combo.setCurrentText("None")
-            self.sel_batch_combo.setCurrentText("False")
-            # setCurrentText only emits when the text CHANGES; if it was already
-            # "None" the autofocus fields wouldn't refresh, so hide them directly.
-            self._toggle_autofocus_fields("None")
-        else:
-            # restore MDA autofocus field visibility to match the dropdown
-            self._toggle_autofocus_fields(self.sel_af_combo.currentText())
-        # Disabling the container disables all of its child widgets too.
-        self.sel_box.setEnabled(not checked)
-
     def _toggle_zscan_fields(self, checked):
         """Show/hide the z-scan range and steps fields."""
         self._zscan_range_label.setVisible(checked)
@@ -1213,11 +1215,9 @@ class HardwareWidget(QWidget):
         self.mda_fine_pts_input.setVisible(is_laser)
 
     def _reapply_toggles(self):
-        self._toggle_center_cell_fields(self.sel_center_cell_check.isChecked())
         self._toggle_seg_track_fields(self.mda_seg_track_check.isChecked())
         self._toggle_zscan_fields(self.scan_zscan_check.isChecked())
         self._toggle_autofocus_fields(self.sel_af_combo.currentText())
-        self._toggle_px2stage_fields(self.px2stage_check.isChecked())
         self._toggle_px2stage_fields(self.px2stage_check.isChecked())
         self._toggle_recal_fields(self.recal_check.isChecked())
 
@@ -1695,6 +1695,8 @@ class HardwareWidget(QWidget):
             if tf:
                 self.transformer = CoordTransformer.from_json(tf)
 
+            vdm_msg = self._load_vandermonde()
+
             self._refresh_channel_combos()
             self.wl_current_label.setText("Set in LightField")
             self.wl_update_btn.setEnabled(False)
@@ -1708,6 +1710,7 @@ class HardwareWidget(QWidget):
                 msg += " (no cfg loaded)"
             if not tf:
                 msg += " (no transformer)"
+            msg += vdm_msg
             self.status.setText(msg)
             self.connect_btn.setEnabled(False)
             self.disconnect_btn.setEnabled(True)
@@ -1723,7 +1726,8 @@ class HardwareWidget(QWidget):
         try:
             from cns_control.coordtransformer import CoordTransformer
             self.transformer = CoordTransformer.from_json(tf)
-            self.status.setText("Status: transformer reloaded OK")
+            vdm_msg = self._load_vandermonde()
+            self.status.setText(f"Status: transformer reloaded OK{vdm_msg}")
         except Exception as e:
             self.status.setText(f"Status: transformer reload failed -- {e}")
 
@@ -1822,6 +1826,7 @@ class HardwareWidget(QWidget):
         self.mda_writer = None
         self.px2stage_picker = None
         self.px2stage_xy = None
+        self.vandermonde = None
         self.status.setText("Status: disconnected")
         self.connect_btn.setEnabled(True)
         self.disconnect_btn.setEnabled(False)
@@ -2412,6 +2417,59 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: selection failed -- {e}")
 
 
+    def _toggle_click_to_center(self, checked):
+        """Arm/disarm one-shot click-to-center mode."""
+        if checked:
+            if self._click_center_cb not in self.viewer.mouse_drag_callbacks:
+                self.viewer.mouse_drag_callbacks.append(self._click_center_cb)
+            self.status.setText(
+                "Status: click-to-center ARMED -- click a spot in the image"
+            )
+        else:
+            try:
+                self.viewer.mouse_drag_callbacks.remove(self._click_center_cb)
+            except ValueError:
+                pass
+
+    def _click_center_cb(self, viewer, event):
+        """napari mouse callback: fires on press while armed."""
+        if event.button != 1:          # left click only
+            return
+        yx = np.array(event.position[-2:], dtype=float)
+        # disarm BEFORE moving so a slow move can't eat a second click
+        self.click_center_btn.setChecked(False)
+        self._move_clicked_to_center(yx)
+
+    def _move_clicked_to_center(self, yx):
+        """Move the stage so the clicked pixel lands at (cy, cx)."""
+        if self.core is None:
+            self.status.setText("Status: not connected")
+            return
+        if self.vandermonde is None:
+            self._load_vandermonde()
+        if self.vandermonde is None:
+            self.status.setText(
+                "Status: no Vandermonde model loaded (set it in Loading)"
+            )
+            return
+        try:
+            from cns_control.utils import apply_vandermonde_model
+            C, degree = self.vandermonde
+            cy = int(self.sel_cy_input.value())
+            cx = int(self.sel_cx_input.value())
+            offset_yx = yx - np.array([cy, cx], dtype=float)
+            offset_xy = np.array([offset_yx[1], offset_yx[0]])
+            stage_dx, stage_dy = apply_vandermonde_model(offset_xy, C, degree)
+            x, y = self.core.getXYPosition()
+            self.core.setXYPosition(float(x - stage_dx), float(y - stage_dy))
+            self.core.waitForSystem()
+            self.status.setText(
+                f"Status: moved ({yx[0]:.0f},{yx[1]:.0f}) -> center "
+                f"({cy},{cx})  [dX={-stage_dx:.2f}, dY={-stage_dy:.2f} um]"
+            )
+        except Exception as e:
+            self.status.setText(f"Status: click-to-center failed -- {e}")
+
     def run_manual_selection(self):
         """Create empty point-source layers for hand-clicking, mirroring the
         automated selection's (sources, autofocus_p, new_seq) contract.
@@ -2472,6 +2530,67 @@ class HardwareWidget(QWidget):
             log.append(f"\n--- manual selection failed: {e} ---\n")
             self.status.setText(f"Status: manual selection failed -- {e}")
 
+    def center_manual_cells(self):
+        """Convert hand-clicked cells (from a non-batch manual selection)
+        into one centered stage position per cell via the Vandermonde model."""
+        if self.core is None:
+            self.status.setText("Status: not connected")
+            return
+        if self.selection_results is None:
+            self.status.setText(
+                "Status: run Manual selection and click cells first"
+            )
+            return
+        if self.sel_batch_combo.currentText() == "True":
+            self.status.setText(
+                "Status: centering requires a NON-batch manual selection"
+            )
+            return
+        vandermonde_model_path = self.sel_vdm_path.text().strip()
+        if not vandermonde_model_path:
+            self.status.setText(
+                "Status: set a Vandermonde model (.json) in Loading first"
+            )
+            return
+        autofocus_object = self.sel_af_combo.currentText()
+        cy = int(self.sel_cy_input.value())
+        cx = int(self.sel_cx_input.value())
+        sq_size = float(self.sel_sqsize_input.value())
+        sq_n = int(self.sel_sqn_input.value())
+        log = LogWindow(title="Center clicked cells log")
+        log.show()
+        self._plot_windows.append(log)
+        self.status.setText("Status: centering clicked cells...")
+        self.repaint()
+        try:
+            from cns_control.utils import center_manual_selections
+            with _StdoutRedirector(log):
+                point_transformer = self._make_point_transformer(sq_size, sq_n)
+                sources, autofocus_p, new_seq = center_manual_selections(
+                    self.core, self.viewer, self.main_window,
+                    point_transformer,
+                    sources=self.selection_results["sources"],
+                    vandermonde_model_path=vandermonde_model_path,
+                    autofocus_object=autofocus_object,
+                    center=(cy, cx),
+                )
+            self.selection_results = {
+                "sources": sources,
+                "autofocus_p": autofocus_p,
+                "new_seq": new_seq,
+                "autofocus_object": autofocus_object,
+                "batch": False,
+            }
+            n_new = len(new_seq.stage_positions)
+            log.append("\n--- centering complete ---\n")
+            self.status.setText(
+                f"Status: centered {n_new} cell position(s) -- "
+                "then Run Raman MDA"
+            )
+        except Exception as e:
+            log.append(f"\n--- centering failed: {e} ---\n")
+            self.status.setText(f"Status: centering failed -- {e}")
+
     def run_grid_selection(self):
         """Build a grid of stage positions around the current stage XY, each
         carrying the same single fixed point (grid_point_selections). No
@@ -2482,11 +2601,6 @@ class HardwareWidget(QWidget):
             return
         if self.default_engine is None:
             self.status.setText("Status: no default engine -- reconnect")
-            return
-        if not self.grid_enable_check.isChecked():
-            self.status.setText(
-                "Status: tick 'Generate stage grid' first"
-            )
             return
 
         fov_x = int(self.grid_fovx_input.value())
@@ -2499,6 +2613,7 @@ class HardwareWidget(QWidget):
         preview_channel = self.grid_channel_combo.currentData()
         sq_size = float(self.sel_sqsize_input.value())
         sq_n = int(self.sel_sqn_input.value())
+        autofocus_object = self.grid_af_combo.currentText()
 
         log = LogWindow(title="Stage grid log")
         log.show()
@@ -2522,12 +2637,15 @@ class HardwareWidget(QWidget):
                     x_step=x_step, y_step=y_step,
                     repeats=repeats,
                     preview_channel=preview_channel,
+                    autofocus_object=autofocus_object,
                 )
 
             self.selection_results = {
                 "sources": sources,
                 "autofocus_p": autofocus_p,
                 "new_seq": new_seq,
+                "autofocus_object": autofocus_object,
+                "batch": False,
             }
             n_pos = len(autofocus_p)
             ready_detail = (
@@ -2603,11 +2721,15 @@ class HardwareWidget(QWidget):
                 return
             print(f"[image_p] manual override: {image_p.tolist()}")
 
-        af_choice = self.sel_af_combo.currentText()
-        autofocus_enabled = af_choice != "None"
+        af_choice = self.selection_results.get(
+            "autofocus_object", self.sel_af_combo.currentText()
+        )
+        autofocus_enabled = af_choice not in ("None", "none", "", None)
         autofocus_object = af_choice if autofocus_enabled else "laser"
         segment_and_track = self.mda_seg_track_check.isChecked()
-        batch = self.sel_batch_combo.currentText() == "True"
+        batch = self.selection_results.get(
+            "batch", self.sel_batch_combo.currentText() == "True"
+        )
         sq_size = float(self.sel_sqsize_input.value())
         sq_n = int(self.sel_sqn_input.value())
         if batch and self._make_point_transformer(sq_size, sq_n).multiplier < 2:
