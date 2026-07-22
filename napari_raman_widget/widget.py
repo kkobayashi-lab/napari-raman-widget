@@ -83,6 +83,7 @@ class HardwareWidget(QWidget):
         loading_layout.addWidget(QLabel("Vandermonde model (.json):"))
         vdm_row = QHBoxLayout()
         self.sel_vdm_path = QLineEdit()
+        self.sel_vdm_path.setText(r"C:\Users\spraman\Desktop\config\vandermonde_model_2026_07_20.json")
         self.sel_vdm_path.setPlaceholderText("vandermonde_model.json")
         vdm_browse = QPushButton("...")
         vdm_browse.setFixedWidth(30)
@@ -2755,6 +2756,12 @@ class HardwareWidget(QWidget):
         cellpose_model = self.mda_seg_model_combo.currentText() or "cyto2"
         segment_crop = self.mda_seg_crop_combo.currentText() == "True"
         tracking_config = self.mda_track_cfg_input.text().strip() or "particle_config.json"
+        cy = int(self.sel_cy_input.value())
+        cx = int(self.sel_cx_input.value())
+        circle_center=(cx,cy)
+        print(circle_center)
+        circle_radius = int(self.sel_r_input.value())
+        print(circle_radius)
 
         try:
             z_relative = self._parse_float_list(
@@ -2824,7 +2831,9 @@ class HardwareWidget(QWidget):
                     image_x=img_x,
                     image_y=img_y,
                     skip_imaging_for_same_pos=True,
-                    config_file = self.mm_config
+                    config_file = self.mm_config,
+                    circle_center=circle_center,
+                    circle_radius=circle_radius
                 )
 
                 self.core.register_mda_engine(engine)
