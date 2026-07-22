@@ -1,0 +1,534 @@
+\documentclass[11pt,oneside]{report}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern,geometry,microtype,xcolor,hyperref,enumitem,booktabs,longtable,array,fancyhdr,listings}
+\geometry{margin=0.9in}
+\definecolor{napariblue}{HTML}{2463A6}
+\hypersetup{colorlinks=true,linkcolor=napariblue,urlcolor=napariblue,pdftitle={napari-raman-widget Detailed Guide}}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.5em}
+\setlist{nosep,leftmargin=*}
+\pagestyle{fancy}\fancyhf{}\fancyhead[L]{\textit{napari-raman-widget}}\fancyhead[R]{\thepage}
+\newcommand{\ui}[1]{\textbf{#1}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\fieldtable}{\begin{longtable}{@{}>{\raggedright\arraybackslash}p{0.25\textwidth}>{\raggedright\arraybackslash}p{0.18\textwidth}>{\raggedright\arraybackslash}p{0.50\textwidth}@{}}\toprule\textbf{Control} & \textbf{Default / allowed} & \textbf{Meaning and use}\\\midrule\endhead}
+\newcommand{\endfieldtable}{\bottomrule\end{longtable}}
+
+\title{\textbf{napari-raman-widget}\\\Large Detailed User and Architecture Guide}
+\author{Raman Microscopy Software Documentation}
+\date{\today}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+\begin{abstract}
+This guide documents the current controls in the napari Raman sidebar. It explains what each editable field does,
+which napari layer is consumed, what must be prepared first, and which output is
+created. The widget controls a physical Raman microscopy rig; verify stage travel,
+focus range, shutter state, and sample clearance before running any automated motion.
+\end{abstract}
+\vfill
+{\footnotesize Documentation edition based on the public source; editorial revision by Jason W. Yu.}
+\clearpage
+\tableofcontents
+
+\chapter{Architecture and Workflow Dependencies}
+
+\section{Main components}
+The application combines napari visualization, Qt controls, Micro-Manager device
+control, Raman acquisition, coordinate transformation, autofocus, calibration,
+cell selection, stage positioning, and multidimensional acquisition. The sidebar
+organizes these capabilities into a sequence of expandable sections. Plot windows
+show spectra and calibration results, while the log window records acquisition progress.
+
+Begin each hardware session with \ui{Connect hardware}. The bottom status label
+reports the current action and confirms when each workflow is ready.
+
+\section{The selection-to-MDA contract}
+\ui{Run Raman MDA} uses three prepared variables: \code{sources},
+\code{autofocus\_p}, and \code{new\_seq}. Prepare these variables with one of the
+following selection workflows:
+\begin{itemize}
+  \item \ui{Run automated selection};
+  \item \ui{Manual selection} (after the user clicks points in the created layers);
+  \item \ui{Center clicked cells} (optional conversion of a non-batch manual selection);
+  \item \ui{Generate grid} in the stage-grid section.
+\end{itemize}
+
+Before selection begins, live acquisition stops and the napari-micromanager MDA
+settings are prepared with axis order \code{t,p,c,z} and a centered Z plan. The
+recommended sequence is:
+\begin{enumerate}
+  \item Connect hardware; this attempts to open the \code{napari-micromanager} dock.
+  \item In that MDA widget, define or verify stage positions and the basic sequence.
+  \item Use automated selection, manual selection, or stage-grid generation to
+        create the source layers and revised sequence.
+  \item For manual selection, finish clicking the intended cells in the layers.
+  \item Configure \ui{Run Raman MDA}, then start it.
+\end{enumerate}
+The MDA dock provides the underlying position and sequence information used by
+the selection controls.
+
+\section{Coordinate conventions}
+Point and shape workflows use the \emph{last} napari layer. Point workflows use
+the first point in that layer and its final two coordinates. For a point stored as
+(y, x), the transformer converts the normalized bright-field coordinate into
+galvanometer volts. Place the intended Points or Shapes layer last in the layer list.
+
+\chapter{Loading}
+This is the only section expanded at startup. Choose paths and the output folder
+before connecting, because connection loads the devices and changes the process
+working directory.
+
+\fieldtable
+Micro-Manager config (.cfg) & \code{test3.cfg} & Device configuration used for
+the device setup. The browse button filters for CFG files. During
+connection the widget also attempts a GFP-to-BF channel warm-up.\\
+Transformer model (.json) & blank; example \code{model\_2026-01-08.json} &
+Coordinate transformer used for bright-field pixel to Raman galvo conversion.
+Point collection, calibration, reference acquisition, mapping, and Raman MDA require it.\\
+Vandermonde model (.json) & blank; example \code{vandermonde\_model.json} &
+Pixel-to-stage model used only when cells are physically centered. Required by
+automated \ui{Center cell} and \ui{Center clicked cells}. It complements the Raman
+aiming transformer.\\
+Output folder & blank = current directory & Created if needed, then made the process
+working directory during connection. Relative reference, map, model, and MDA paths
+are resolved from here. Changing the text after connection does not change directory.\\
+Center wavelength (nm) & 785.00; 0--2000 & Desired spectrometer center wavelength.
+The bold label shows the hardware value. \ui{Update wavelength} is enabled only after
+connection and applies the displayed wavelength to the spectrometer.\\
+Grating & populated after connection & Lists the spectrometer gratings using 1-based
+indices. \ui{Update grating} moves the turret and reports groove density and center
+wavelength. Wait for motion to finish before acquiring.\\
+\endfieldtable
+
+\ui{Connect hardware} unloads old devices, loads the CFG, opens the
+napari-micromanager dock, creates the spectrum collector/DAQ, loads both models,
+and refreshes channels, wavelength, and gratings. \ui{Reload transformer} reloads
+the Raman transformer and Vandermonde model without reconnecting. \ui{Disconnect}
+unloads devices and clears all calibration, selection, writer, and model state;
+selection is prepared again after reconnecting.
+
+\section*{Saved paths}
+The CFG, transformer, and Vandermonde fields point to existing input files. The
+\ui{Output folder} becomes the base location for relative results. For example,
+\code{data/run} is resolved as \code{<Output folder>/data/run}.
+
+\section*{Options at a glance}
+\begin{longtable}{@{}p{0.31\textwidth}p{0.63\textwidth}@{}}
+\toprule\textbf{Option} & \textbf{Brief definition}\\\midrule
+Micro-Manager config & Hardware and device configuration file.\\
+Transformer model & Bright-field-pixel to Raman-galvo coordinate model.\\
+Vandermonde model & Image-pixel to stage-motion model for centering cells.\\
+Output folder & Working directory applied when hardware connects.\\
+Center wavelength & Spectrometer center wavelength setting.\\
+Grating & Installed spectrometer grating selection.\\
+Connect / Disconnect & Initializes or unloads the rig and session state.\\
+Reload transformer & Reloads the coordinate models without reconnecting.\\
+\bottomrule\end{longtable}
+
+\chapter{Collect Spectra Using Points Layer}
+
+\textbf{Preparation:} connect the collector and DAQ, load the transformer, and
+place a Points layer last. The first stored point is used for acquisition. Keeping
+one point in this layer makes the intended target clear.
+
+\fieldtable
+Exposure (ms) & 1000; 1--1,000,000 & Integration time used by the spectrum collector.\\
+N (repeats, at least 2) & 2; 2--1000 & Number of identical copies of the transformed
+galvo coordinate used for acquisition. The minimum of two is enforced.\\
+Save as & blank = display only & Optional filename. If the \code{.npy} suffix is
+provided, the widget adds it. A relative name is saved under the active working directory.\\
+\endfieldtable
+
+\ui{Collect spectra at last point} restarts the galvo, transforms the point,
+collects N spectra, optionally saves the NumPy array, and opens a spectrum plot.
+
+\section*{Saved output}
+When \ui{Save as} contains a name, spectra are saved as
+\code{<output folder>/<name>.npy}. With a blank name, the spectra are displayed
+without creating a data file.
+
+\section*{Options at a glance}
+\begin{longtable}{@{}p{0.31\textwidth}p{0.63\textwidth}@{}}
+\toprule\textbf{Option} & \textbf{Brief definition}\\\midrule
+Exposure & Integration time for each Raman acquisition.\\
+N (repeats) & Spectra acquired at the same transformed point.\\
+Save as & Optional NumPy filename; blank disables saving.\\
+Collect spectra & Transforms the point, acquires spectra, and displays them.\\
+\bottomrule\end{longtable}
+
+\chapter{Laser Aiming Calibration and Recalibration}
+
+\fieldtable
+N (repeats) & 20; 1--1000 & Spectra acquired per calibration target. More repeats
+increase acquisition time and can stabilize detection.\\
+Exposure (ms) & 1000; 1--1,000,000 & Raman exposure used by the calibrator.\\
+Max volts & 1.80; 0.01--10.00 & Galvanometer-voltage extent used by the
+calibration. Set it within the confirmed operating range of the rig.\\
+Grid size & 10; 2--100 & Controls calibration
+sampling density. Larger grids require substantially more measurements.\\
+Threshold & 1.00; 0--100 & Detection threshold used to accept/localize calibration
+responses. Its physical interpretation belongs to \code{cns-control.Calibrator}.\\
+Recalibration & off & Reveals the controls for correcting the current calibration.\\
+Model name & blank & Base filename for the corrected transformer. The save routine
+writes \code{<name>.json}, loads it immediately, and updates the Loading path.\\
+\endfieldtable
+
+\ui{Run calibration} uses the active transformer and stores the resulting dataset
+in memory. It opens a log and calibration plot. Recalibration uses the most recent
+calibration dataset produced in the connected session.
+
+For manual recalibration, check \ui{Recalibration}, click \ui{Open manual selector},
+and then work through the displayed calibration frames: click a point; press Enter
+to advance; Backspace to return; R to reset; or N to mark a frame as NaN. Close or
+finish the selector, enter \ui{Model name}, and click \ui{Save recalibrated model}.
+
+\section*{Saved output}
+The initial calibration remains in session memory for plotting and recalibration.
+\ui{Save recalibrated model} writes
+\code{<output folder>/<Model name>.json} and immediately activates that model.
+
+\section*{Options at a glance}
+\begin{longtable}{@{}p{0.31\textwidth}p{0.63\textwidth}@{}}
+\toprule\textbf{Option} & \textbf{Brief definition}\\\midrule
+N (repeats) & Spectra used at each calibration target.\\
+Exposure & Raman integration time during calibration.\\
+Max volts & Galvanometer-voltage extent of the calibration.\\
+Grid size & Sampling density of the calibration grid.\\
+Threshold & Response criterion used by the calibrator.\\
+Run calibration & Acquires and plots a new calibration dataset.\\
+Recalibration & Reveals the manual correction controls.\\
+Model name & Base filename for the corrected transformer JSON.\\
+Open manual selector & Opens the last calibration dataset for correction.\\
+Save recalibrated model & Saves, loads, and activates the corrected model.\\
+\bottomrule\end{longtable}
+
+\chapter{Axial Background Scan}
+
+This section collects an autofocus/background Z series at one Raman point. Put a
+single-point Points layer last; the first point is transformed to galvo volts and
+repeated N times at every Z sample.
+
+\fieldtable
+Name & required; example \code{testing} & Human-readable prefix for the output.\\
+Exposure (ms) & 1000; 1--1,000,000 & Exposure for each Raman spectrum.\\
+N (spectra per z) & 5; 1--1000 & Replicate spectra at each axial position.\\
+Search range (um) & 10; 0.1--1000 & Half-range around the starting Z; displayed
+coordinates span negative range to positive range. Verify objective clearance.\\
+Search pts & 20; 2--500 & Number of axial samples across the full search interval.\\
+\endfieldtable
+
+\ui{Collect reference spectra} performs the autofocus/background scan, moves the
+stage to the selected focus Z, plots all spectra, and writes
+\code{reference/<name>\_<uuid>.zarr}. The dataset contains \code{spec[z,n,pixel]}
+plus Z, point X/Y, and exposure metadata. The stage is intentionally left at the
+found focus position.
+
+\section*{Saved output}
+Each run is saved as
+\code{<output folder>/reference/<Name>\_<uuid>.zarr}. The Zarr dataset stores the
+spectra, Z coordinates, selected point coordinates, and exposure value.
+
+\section*{Options at a glance}
+\begin{longtable}{@{}p{0.31\textwidth}p{0.63\textwidth}@{}}
+\toprule\textbf{Option} & \textbf{Brief definition}\\\midrule
+Name & Prefix identifying the saved reference dataset.\\
+Exposure & Integration time for each reference spectrum.\\
+N (spectra per Z) & Replicate spectra acquired at every Z position.\\
+Search range & Positive and negative axial search extent.\\
+Search points & Number of evenly spaced Z samples.\\
+Collect reference spectra & Runs autofocus/background collection, plots, and saves.\\
+\bottomrule\end{longtable}
+
+\chapter{Spatial Mapping}
+
+Create a Shapes layer, draw a rectangle, and make that layer last. The code uses
+only the first shape and reduces it to its min/max bounds; a rotated rectangle or
+nonrectangular polygon is therefore scanned as its axis-aligned bounding box.
+
+\fieldtable
+File name & required; example \code{scan\_label} & Label inserted in the Zarr filename.\\
+Raman exposure (ms) & 1000; 1--1,000,000 & Exposure at every Raman grid coordinate.\\
+N (grid side) & 20; 2--500 & Produces an N by N grid, hence N squared Raman points
+per Z plane. Doubling N approximately quadruples point count.\\
+Z offset (um) & 4; -1000 to 1000 & The base Raman Z is current Z minus this
+offset. The stage returns to its original Z after a successful scan.\\
+Z-scan & off & When enabled, collects the full Raman grid at multiple Z planes.\\
+Z range (+/- um) & 5; 0.1--1000 & Half-range around the base Raman Z; visible only
+for Z-scan.\\
+Z steps & 10; 2--500 & Evenly spaced planes across the full Z range.\\
+Extra channel & none; 1--1,000,000 ms & \ui{+ Add channel} adds a Micro-Manager
+channel and exposure row; \ui{x} removes it. Duplicate channels are ignored. BF is
+excluded here because BF is always acquired before and after the scan.\\
+\endfieldtable
+
+At start the widget snaps BF at 10 ms and one image for each extra channel. It then
+switches to RM, opens \code{Fluoshutter}, collects the Raman grid, closes the shutter,
+restores Z, and snaps ending BF. A Z-scan also records BF at every plane. Outputs are
+\code{grid\_scan\_data\_<label>\_<uuid>.zarr} or
+\code{grid\_scan\_z\_<label>\_<uuid>.zarr}, followed by a plot window.
+
+\section*{Saved output}
+A single-plane map is saved as
+\code{<output folder>/grid\_scan\_data\_<File name>\_<uuid>.zarr}. A multi-plane
+map is saved as
+\code{<output folder>/grid\_scan\_z\_<File name>\_<uuid>.zarr}.
+
+\section*{Options at a glance}
+\begin{longtable}{@{}p{0.31\textwidth}p{0.63\textwidth}@{}}
+\toprule\textbf{Option} & \textbf{Brief definition}\\\midrule
+File name & Label inserted into the grid-scan filename.\\
+Raman exposure & Integration time at every grid coordinate.\\
+N (grid side) & X and Y sample count; total is N squared per plane.\\
+Z offset & Raman-plane displacement from the current Z.\\
+Z-scan & Enables multi-plane Raman acquisition.\\
+Z range / Z steps & Axial half-range and number of sampled planes.\\
+Add/remove channel & Manages fluorescence-channel and exposure pairs.\\
+Run grid scan & Acquires BF, fluorescence, Raman grid data, and ending BF.\\
+\bottomrule\end{longtable}
+
+\chapter{Generate Stage Grid}
+
+This section creates stage positions around the \emph{current} stage XY and stores
+the prepared variables for \ui{Run Raman MDA}.
+Every position carries the same fixed image point.
+
+\fieldtable
+Autofocus object & None, laser, software, quartz, glass, cell & Autofocus mode attached
+to the generated positions. The choice also controls which MDA autofocus fields are visible.\\
+FOV x / FOV y (px) & 740 / 540; 0--100000 & Fixed image coordinate used at every
+field of view. Note the UI labels X then Y; internal selection receives both separately.\\
+X range / Y range (+/- um) & 100 / 100 & Half-width of the stage grid about the
+current XY. Total spans are twice these values.\\
+X step / Y step (um) & 50 / 50; minimum 0.01 & Stage-position spacing. Confirm
+that all generated positions remain within stage and sample limits.\\
+Repeats (points per position) & 2; 2--1000 & Identical points at each stage position;
+minimum two is required by the DAQ.\\
+Skip BF pre-scan & on & Uses blank placeholder images to establish dimensions. Turn
+off when real per-position BF images are needed for setup.\\
+\endfieldtable
+
+\ui{Generate grid} stops live mode, prepares the napari-micromanager MDA sequence,
+builds the stage grid, and prepares \code{sources}, \code{autofocus\_p}, and
+\code{new\_seq}. After the status reports ``stage grid ready,'' proceed to
+\ui{Run Raman MDA}.
+
+\section*{Saved output}
+This section prepares variables in memory. The stage positions and Raman results
+are written later by \ui{Run Raman MDA} to its \ui{Writer output dir}.
+
+\section*{Options at a glance}
+\begin{longtable}{@{}p{0.31\textwidth}p{0.63\textwidth}@{}}
+\toprule\textbf{Option} & \textbf{Brief definition}\\\midrule
+Autofocus object & Focus strategy attached to generated positions.\\
+FOV X / FOV Y & Fixed pixel target repeated at every position.\\
+X/Y range & Grid half-widths around the current stage XY.\\
+X/Y step & Stage spacing between neighboring positions.\\
+Repeats & Identical aiming points carried by every position.\\
+Skip BF pre-scan & Uses blank placeholders instead of BF setup images.\\
+Generate grid & Creates positions and selection results for Raman MDA.\\
+\bottomrule\end{longtable}
+
+\chapter{Automated Cell Selection}
+
+\section{Mask controls}
+\fieldtable
+Center Y / Center X & 540 / 740; 0--100000 & Center of the circular permitted region
+in image pixels, in Y,X order.\\
+Radius & 100; 1--100000 & Radius of the permitted circular region. The same values
+are passed later to the Raman MDA engine.\\
+Add mask & button & Adds a red masked overlay, with a green 10-pixel center marker,
+to help inspect the permitted region before selection.\\
+Click to center & toggle button & Arms a one-shot viewer click that moves the stage
+so the clicked feature reaches Center Y/X. Requires a loaded Vandermonde model and
+connected hardware; use cautiously because it commands stage motion.\\
+\endfieldtable
+
+\section{Selection controls}
+\fieldtable
+Autofocus object & laser; choices laser, software, quartz, glass, cell, None &
+Autofocus strategy saved with the selection. None disables autofocus in the later MDA.\\
+N per FOV & 6; 1--1000 & Requested cell count. Automated selection passes
+\code{N+1} to its helper. In manual batch mode it is the exact click count per FOV.\\
+Center cell & off & Splits detections into one new stage position per cell and shifts
+each cell to the requested center. Requires the Loading Vandermonde model.\\
+Aiming pattern & Square or Circle & Shape of the Raman subpoint pattern placed around
+each selected cell.\\
+Pattern size (px) & 30; 0--10000 & Spatial extent of the point pattern.\\
+N\_x (subpoints) & 1; 1--100 & Pattern sampling parameter. Batch MDA requires the
+resulting pattern multiplier to be at least two.\\
+Background distance (px) & 80; 0--1,000,000 & Distance threshold used by automated selection.\\
+Integrated batch collection & False & In batch mode positions/click counts and Raman
+point handling differ; it must agree with dataset generation.\\
+Cellpose model & installed models; defaults to cyto2 if available & Segmentation model
+used to identify candidate cells.\\
+\endfieldtable
+
+\ui{Run automated selection} prepares the external MDA widget, performs Cellpose-based
+selection, creates source layers and a new sequence, and stores them for Raman MDA.
+
+\ui{Manual selection} creates empty point-source layers. In batch mode, click exactly
+\ui{N per FOV} cells per FOV; in non-batch mode, click freely. The button immediately
+stores references to those layers, so finish clicking before starting the Raman MDA.
+For non-batch manual results, \ui{Center clicked cells} uses the Vandermonde model to
+turn each clicked cell into a centered stage position, replacing the selection results.
+
+\section*{Saved output}
+Automated and manual selection prepare \code{sources}, \code{autofocus\_p}, and
+\code{new\_seq} in memory. \ui{Add mask} adds a napari layer in the current viewer.
+The subsequent Raman MDA writes the acquired data to \ui{Writer output dir}.
+
+\section*{Options at a glance}
+\begin{longtable}{@{}p{0.31\textwidth}p{0.63\textwidth}@{}}
+\toprule\textbf{Option} & \textbf{Brief definition}\\\midrule
+Center Y / Center X & Pixel center of the permitted mask and centering target.\\
+Radius & Radius of the circular permitted region.\\
+Add mask & Displays the configured circular selection region.\\
+Click to center & Moves a clicked feature to the configured center.\\
+Autofocus object & Focus strategy saved with the selected positions.\\
+N per FOV & Requested detections or manual batch clicks per field.\\
+Center cell & Produces one centered stage position per detected cell.\\
+Aiming pattern / size / N\_x & Shape, extent, and sampling of Raman subpoints.\\
+Background distance & Distance threshold for automated selection.\\
+Integrated batch collection & Selects batch or individual point handling.\\
+Cellpose model & Segmentation model used to detect cells.\\
+Run automated selection & Segments cells and prepares MDA selection results.\\
+Manual selection & Creates layers for hand-clicked cell selection.\\
+Center clicked cells & Converts non-batch clicks into centered positions.\\
+\bottomrule\end{longtable}
+
+\chapter{Run Raman MDA}
+
+\textbf{Preparation:} connect with both collector and transformer, then run
+automated selection, manual selection, centered-manual selection, or stage-grid
+generation. These workflows prepare the variables used by the MDA.
+
+\fieldtable
+Writer output dir & \code{data/run} & Directory where Raman TIFF and NumPy outputs
+are written; blank uses \code{data/run}.\\
+Autofocus positions & blank = selection & Optional comma-separated zero-based stage
+position indices, e.g. \code{0,2,5}. \code{None} behaves like blank. Out-of-range
+indices are rejected.\\
+Imaging positions & blank = autofocus positions & Optional comma-separated zero-based
+indices at which imaging occurs. The code initializes this from the original
+selection autofocus list before applying overrides, so set this explicitly when
+using a substantially different autofocus override.\\
+Raman glass offset (um) & 5; -1000 to 1000 & Axial offset used for the Raman measurement.\\
+Autofocus search range & 6; 0.1--1000 & Coarse autofocus range; hidden if autofocus is None.\\
+Autofocus search pts & 8; 2--500 & Coarse autofocus sample count.\\
+Laser fine search range (+/- um) & 1.5; 0.1--1000 & Fine range shown only for laser autofocus.\\
+Laser fine search pts & 8; 2--500 & Fine laser-autofocus sample count.\\
+Segment and track & off & Re-segments images and updates aiming during a time series.\\
+Segment channel & BF initially & Micro-Manager channel used for segmentation.\\
+Image rescale factor & 2.0; 0.1--100 & Image scale used during segmentation.\\
+Cellpose model & installed models; cyto2 preferred & Model for time-series re-segmentation.\\
+Crop image around mask & True & Whether segmentation is cropped to the circular mask region.\\
+Tracking config (.json) & \code{particle\_config.json} & Particle-tracking configuration.\\
+Exposure per cell (ms) & 1000; 1--1,000,000 & Total exposure supplied while building
+the Raman sequence. In non-batch mode it is multiplied by the aiming-pattern multiplier.\\
+Loops (time points) & 100; 1--1,000,000 & Number of temporal repetitions.\\
+Interval (s) & 600; 0--1,000,000 & Requested interval between time points.\\
+Refocus \& segment every & 1 & Cadence in time points; 1 means every time point.\\
+Z relative (comma-separated um) & \code{0, 4} & Relative Z planes used to replace
+the sequence Z plan. Values must parse as floats.\\
+Raman z indices & \code{0} & Zero-based indices into the Z list where Raman is
+requested. Ensure every index exists; e.g. with two Z values, valid indices are 0 and 1.\\
+Extra fluorescence channel & none; default row exposure 10 ms & \ui{+ Add channel}
+adds any Micro-Manager channel (including BF); \ui{x} removes it. Duplicate channel
+names are ignored. Added channels inherit the first sequence channel as a template.\\
+\endfieldtable
+
+The acquisition uses axis order \code{t,p,c,z}, assigns the selection's aiming-source
+layers, replaces the time and Z plans, adds unique fluorescence channels, and writes
+Raman metadata containing the requested Z indices. \ui{Stop} requests MDA cancellation
+and stops sequence acquisition; the current hardware event may finish before exit.
+
+\section{Generate dataset}
+\ui{Generate dataset} asks for a completed MDA run directory. It loads the experiment,
+using the current \ui{Integrated batch collection} value, and writes sibling outputs
+\code{data/dataset/ds\_<run>.zarr} and \code{df\_<run>.pkl}. It also opens the dataset
+viewer. Set the batch dropdown to match how that run was acquired before generating.
+
+\section{Pixel-to-stage calibration}
+Check \ui{Pixel-to-stage calibration} to reveal these controls:
+\fieldtable
+Dataset (.zarr) & required & Generated dataset containing a JSON
+\code{useq\_sequence} attribute and one image per stage position.\\
+Vandermonde degree & 1; 1--5 & Polynomial degree. Degree d needs at least
+(d+1)(d+2)/2 valid picked points. Prefer the lowest degree with adequate residuals.\\
+Pick points & button & Opens images position by position. Click the same recognizable
+feature in each frame; skipped/NaN frames are excluded.\\
+Model file & \code{vandermonde\_model.json} & Suggested save name. A save dialog still
+asks for the final location.\\
+Fit \& save model & button & Centers image and stage coordinates, reports degree 1--3
+RMSE where possible, fits the selected degree, and saves JSON. The saved path is also
+copied into Loading's Vandermonde field for immediate center-cell use.\\
+\endfieldtable
+
+\section*{Saved output}
+The Raman acquisition is saved under
+\code{<output folder>/<Writer output dir>/}. The writer creates the TIFF and NumPy
+files for the run. \ui{Generate dataset} saves
+\code{<run parent>/dataset/ds\_<run>.zarr} and
+\code{<run parent>/dataset/df\_<run>.pkl}. Pixel-to-stage calibration saves the
+chosen \ui{Model file} as JSON at the location selected in the save dialog.
+
+\section*{Options at a glance}
+\begin{longtable}{@{}p{0.31\textwidth}p{0.63\textwidth}@{}}
+\toprule\textbf{Option} & \textbf{Brief definition}\\\midrule
+Writer output directory & Destination used by the Raman TIFF/NumPy writer.\\
+Autofocus positions & Zero-based position indices that receive autofocus.\\
+Imaging positions & Zero-based position indices that receive imaging.\\
+Raman glass offset & Axial offset between glass focus and Raman measurement.\\
+Autofocus range / points & Extent and sampling count of the coarse focus search.\\
+Laser fine range / points & Extent and sampling count of laser fine focus.\\
+Segment and track & Re-detects cells and updates aiming during the time series.\\
+Segment channel & Image channel used for segmentation.\\
+Image rescale factor & Resampling factor supplied to segmentation.\\
+Cellpose model & Model used for repeated cell segmentation.\\
+Crop around mask & Restricts segmentation to the configured mask region.\\
+Tracking config & JSON settings used for cell/particle tracking.\\
+Exposure per cell & Raman exposure budget assigned to each selected cell.\\
+Loops / interval & Number of time points and requested spacing between them.\\
+Refocus \& segment every & Time-point cadence for focus and tracking updates.\\
+Z relative & Comma-separated relative Z planes in micrometres.\\
+Raman Z indices & Indices of relative Z planes receiving Raman acquisition.\\
+Add/remove fluorescence channel & Manages channel/exposure pairs in the sequence.\\
+Run Raman MDA & Builds and launches the final \code{t,p,c,z} acquisition.\\
+Stop & Requests MDA cancellation and stops sequence acquisition.\\
+Generate dataset & Converts a completed run into Zarr and pickled-table outputs.\\
+Pixel-to-stage calibration & Reveals the Vandermonde calibration workflow.\\
+Dataset & Zarr images and stage coordinates used for calibration.\\
+Vandermonde degree & Polynomial degree used for the pixel-to-stage fit.\\
+Pick points & Opens the common-feature picker for each stage position.\\
+Model file & Suggested JSON filename for the fitted model.\\
+Fit \& save model & Fits, reports residuals, saves, and activates the model.\\
+\bottomrule\end{longtable}
+
+\chapter{Session Checklist and Output Summary}
+\begin{enumerate}
+  \item Verify the CFG, Raman transformer, optional Vandermonde model, and output folder.
+  \item Connect; confirm the status, wavelength, grating, and available channels.
+  \item Verify the intended layer is last before point or shape operations.
+  \item For MDA work, configure the napari-micromanager MDA widget and run exactly one
+        selection-producing workflow. Finish manual clicks before continuing.
+  \item Check all physical motion ranges, point counts, Z planes, loops, and exposures.
+  \item Run a small pilot, inspect the log and plots, then scale to the full acquisition.
+\end{enumerate}
+
+\begin{longtable}{@{}p{0.32\textwidth}p{0.62\textwidth}@{}}
+\toprule\textbf{Workflow} & \textbf{Output}\\\midrule
+Point spectrum & Optional \code{<name>.npy}; plot window.\\
+Calibration & In-memory dataset and plot; recalibration saves \code{<model>.json}.\\
+Axial background scan & \code{reference/<name>\_<uuid>.zarr}.\\
+Spatial mapping & \code{grid\_scan\_data\_*.zarr} or \code{grid\_scan\_z\_*.zarr}.\\
+Selections / stage grid & In-memory source layers, autofocus indices, and MDA sequence.\\
+Raman MDA & TIFF/NumPy writer directory under \ui{Writer output dir}.\\
+Generate dataset & \code{ds\_<run>.zarr} and \code{df\_<run>.pkl}.\\
+Pixel-to-stage fit & Vandermonde JSON model.\\\bottomrule
+\end{longtable}
+
+Source: \url{https://github.com/JasonYu1/napari-raman-widget}. The project is
+distributed under the BSD 3-Clause license.
+\end{document}

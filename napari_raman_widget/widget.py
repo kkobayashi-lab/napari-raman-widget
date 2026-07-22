@@ -5,12 +5,12 @@ import uuid
 import xarray as xr
 import napari
 import numpy as np
-from qtpy.QtCore import Qt, QTimer
+from qtpy.QtCore import Qt, QTimer, QUrl
 from qtpy.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QLineEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget, QMessageBox
 )
-
+from .field_help import apply_tooltips
 from .log_window import LogWindow, _StdoutRedirector
 from .plot_windows import (
     CalibrationPlotWindow, GridScanPlotWindow, ReferenceSpectraWindow,
@@ -46,6 +46,18 @@ class HardwareWidget(QWidget):
         self.px2stage_xy = None
         self.mm_config = None
         outer = QVBoxLayout()
+
+        self.manual_link = QLabel(
+            '<a href="manual" '
+            'style="color:white; font-weight:bold; text-decoration:none;">'
+            'Help</a>'
+        )
+        self.manual_link.setAlignment(Qt.AlignRight)
+        self.manual_link.setOpenExternalLinks(False)
+        self.manual_link.setToolTip("Open the user manual")
+        self.manual_link.linkActivated.connect(self.open_user_manual)
+
+        outer.addWidget(self.manual_link)
 
         # ================= LOADING SECTION =================
         loading_box = make_collapsible("Loading", expanded=True)
@@ -983,6 +995,10 @@ class HardwareWidget(QWidget):
         for _box in (calib_box, scan_box, self.sel_box, mda_box):
             _box.toggled.connect(lambda checked: self._reapply_toggles())
 
+        from .chat_panel import ChatPanel
+        self.chat_panel = ChatPanel(self)
+        outer.addWidget(self.chat_panel)
+        
         outer.addStretch()
 
         # # ================= LIVE STAGE POSITION =================
@@ -1015,12 +1031,30 @@ class HardwareWidget(QWidget):
 
         # Keep references to pop-up windows so they don't get garbage collected.
         self._plot_windows = []
-
+        # attach hover help text to every field
+        apply_tooltips(self)
         # Temporarily disable the napari widget's live X/Y polling.
         # self._pos_timer = QTimer(self)
         # self._pos_timer.setInterval(500)  # ms
         # self._pos_timer.timeout.connect(self._update_position_label)
         # self._pos_timer.start()
+
+    def open_user_manual(self, _link=None):
+        pdf_path = (
+            Path(__file__).resolve().parent
+            / "resources"
+            / "napari-raman-widget-manual.pdf"
+        )
+
+        if not pdf_path.exists():
+            QMessageBox.warning(
+                self,
+                "Manual not found",
+                f"The user manual could not be found:\n{pdf_path}",
+            )
+            return
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf_path)))
 
     # -------- file pickers --------
     def browse_cfg(self):
@@ -1419,15 +1453,19 @@ class HardwareWidget(QWidget):
             return
 
         try:
-            from useq import ZRangeAround
+            from useq import ZRangeAround, TIntervalLoops
+            import datetime as _dt
             seq = mda_settings.value()
             new_seq = seq.replace(
                 axis_order=("t", "p", "c", "z"),
                 z_plan=ZRangeAround(range=0.0, step=1.0),
+                time_plan=TIntervalLoops(
+                    interval=_dt.timedelta(seconds=0), loops=1
+                ),
             )
             if hasattr(mda_settings, "setValue"):
                 mda_settings.setValue(new_seq)
-                print("[mda setup] axis_order=tpcz, z_plan=ZRangeAround OK")
+                print("[mda setup] axis_order=tpcz, z_plan, t=1loop OK")
             else:
                 print("[mda setup] no setValue method -- can't push sequence back")
                 print(
@@ -1757,21 +1795,24 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: wavelength update failed -- {e}")
 
     def refresh_gratings(self):
-        """Populate the grating dropdown from the spectrograph. Read-only --
-        this does NOT move the turret."""
         if self.collector is None:
             return
         try:
-            n = self.collector.get_number_gratings()
-            current = self.collector.get_grating()
+            n = int(self.collector.get_number_gratings())
+            current = int(self.collector.get_grating())
+            # ensure the list is at least long enough to hold `current`
+            n = max(n, current)
             self.grating_combo.blockSignals(True)
             self.grating_combo.clear()
             self.grating_combo.addItems([str(i) for i in range(1, n + 1)])
-            idx = current - 1                       # gratings are 1-indexed
-            if 0 <= idx < n:
+            self.grating_combo.blockSignals(False)
+            idx = current - 1
+            if 0 <= idx < self.grating_combo.count():
                 self.grating_combo.setCurrentIndex(idx)
             self.grating_combo.setEnabled(True)
-            self.grating_combo.blockSignals(False)
+            print(f"[gratings] n={n} current={current} "
+                  f"count={self.grating_combo.count()} "
+                  f"shown={self.grating_combo.currentText()}")
         except Exception as e:
             self.status.setText(f"Status: couldn't read gratings -- {e}")
 
@@ -2759,9 +2800,9 @@ class HardwareWidget(QWidget):
         cy = int(self.sel_cy_input.value())
         cx = int(self.sel_cx_input.value())
         circle_center=(cx,cy)
-        print(circle_center)
+        # print(circle_center)
         circle_radius = int(self.sel_r_input.value())
-        print(circle_radius)
+        # print(circle_radius)
 
         try:
             z_relative = self._parse_float_list(
