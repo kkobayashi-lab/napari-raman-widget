@@ -187,6 +187,17 @@ HELP = {
         "Show grid dimensions, resulting spacing, stage positions, and total "
         "acquisition points including repeats."
     ),
+    "grid_tilt_check": (
+        "Replace each generated position's default Z with a least-squares "
+        "plane fitted to focused XYZ references."
+    ),
+    "grid_tilt_capture_btn": (
+        "After moving to a grid location and focusing it, capture the current "
+        "stage X, Y, and Z into the editable reference table."
+    ),
+    "grid_tilt_add_btn": "Add a blank, manually editable XYZ reference row.",
+    "grid_tilt_remove_btn": "Remove the selected tilt-reference rows.",
+    "grid_tilt_clear_btn": "Remove all tilt-reference rows.",
     "grid_repeats_input": (
         "Identical points at each stage position. Minimum of 2 required by "
         "the DAQ."

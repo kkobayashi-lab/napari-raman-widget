@@ -11,7 +11,8 @@ from qtpy.QtCore import Qt, QTimer, QUrl
 from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget, QMessageBox
+    QLineEdit, QPushButton, QScrollArea, QSpinBox, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget, QMessageBox
 )
 from .field_help import apply_tooltips
 from .log_window import LogWindow, _StdoutRedirector
@@ -625,6 +626,66 @@ class HardwareWidget(QWidget):
         preview_row.addWidget(self.grid_size_label)
         preview_row.addWidget(self.grid_size_btn)
         grid_layout.addLayout(preview_row)
+
+        self.grid_tilt_check = QCheckBox(
+            "Correct sample tilt with a fitted Z plane"
+        )
+        self.grid_tilt_check.setChecked(False)
+        grid_layout.addWidget(self.grid_tilt_check)
+
+        self._grid_tilt_help = QLabel(
+            "Move to a grid location, focus Z, then capture XYZ. Use at least "
+            "3 non-collinear points (4 corners recommended). Table values are "
+            "editable. For centered grids, return to the intended center before "
+            "generating."
+        )
+        self._grid_tilt_help.setWordWrap(True)
+        grid_layout.addWidget(self._grid_tilt_help)
+
+        self.grid_tilt_table = QTableWidget(0, 3)
+        self.grid_tilt_table.setHorizontalHeaderLabels(["X", "Y", "Focused Z"])
+        self.grid_tilt_table.horizontalHeader().setStretchLastSection(True)
+        self.grid_tilt_table.setMaximumHeight(150)
+        grid_layout.addWidget(self.grid_tilt_table)
+
+        tilt_buttons = QHBoxLayout()
+        self.grid_tilt_capture_btn = QPushButton("Capture current XYZ")
+        self.grid_tilt_add_btn = QPushButton("Add row")
+        self.grid_tilt_remove_btn = QPushButton("Remove selected")
+        self.grid_tilt_clear_btn = QPushButton("Clear")
+        tilt_buttons.addWidget(self.grid_tilt_capture_btn)
+        tilt_buttons.addWidget(self.grid_tilt_add_btn)
+        tilt_buttons.addWidget(self.grid_tilt_remove_btn)
+        tilt_buttons.addWidget(self.grid_tilt_clear_btn)
+        grid_layout.addLayout(tilt_buttons)
+
+        self.grid_tilt_fit_label = QLabel("Tilt fit: need at least 3 points")
+        self.grid_tilt_fit_label.setWordWrap(True)
+        grid_layout.addWidget(self.grid_tilt_fit_label)
+
+        self._grid_tilt_widgets = [
+            self._grid_tilt_help, self.grid_tilt_table,
+            self.grid_tilt_capture_btn, self.grid_tilt_add_btn,
+            self.grid_tilt_remove_btn, self.grid_tilt_clear_btn,
+            self.grid_tilt_fit_label,
+        ]
+        self.grid_tilt_check.toggled.connect(self._toggle_grid_tilt_fields)
+        self.grid_tilt_capture_btn.clicked.connect(
+            self._capture_grid_tilt_point
+        )
+        self.grid_tilt_add_btn.clicked.connect(
+            lambda _checked=False: self._add_grid_tilt_row()
+        )
+        self.grid_tilt_remove_btn.clicked.connect(
+            self._remove_selected_grid_tilt_rows
+        )
+        self.grid_tilt_clear_btn.clicked.connect(
+            self._clear_grid_tilt_rows
+        )
+        self.grid_tilt_table.itemChanged.connect(
+            self._update_grid_tilt_fit_preview
+        )
+        self._toggle_grid_tilt_fields(False)
 
         for control in (
             self.grid_definition_combo,
@@ -1409,6 +1470,83 @@ class HardwareWidget(QWidget):
             f"Y span: {y_span:.3f} um; spacing: {y_spacing:.3f} um",
         )
 
+    def _toggle_grid_tilt_fields(self, checked):
+        """Show or hide the grid tilt-reference workflow."""
+        for widget in self._grid_tilt_widgets:
+            widget.setVisible(checked)
+        if checked:
+            self._update_grid_tilt_fit_preview()
+
+    def _add_grid_tilt_row(self, xyz=None):
+        """Append an editable XYZ reference row."""
+        row = self.grid_tilt_table.rowCount()
+        self.grid_tilt_table.insertRow(row)
+        values = ("", "", "") if xyz is None else xyz
+        for column, value in enumerate(values):
+            text = "" if value == "" else f"{float(value):.4f}"
+            self.grid_tilt_table.setItem(row, column, QTableWidgetItem(text))
+        self._update_grid_tilt_fit_preview()
+
+    def _capture_grid_tilt_point(self):
+        """Capture the current focused stage XYZ as a tilt reference."""
+        if self.core is None:
+            self.status.setText("Status: not connected")
+            return
+        try:
+            x, y = self.core.getXYPosition()
+            z = self.core.getPosition()
+            self._add_grid_tilt_row((x, y, z))
+            self.status.setText(
+                f"Status: captured tilt reference X {x:.3f}, "
+                f"Y {y:.3f}, Z {z:.3f}"
+            )
+        except Exception as e:
+            self.status.setText(f"Status: couldn't capture tilt point -- {e}")
+
+    def _remove_selected_grid_tilt_rows(self):
+        """Remove selected tilt-reference rows from bottom to top."""
+        rows = {index.row() for index in self.grid_tilt_table.selectedIndexes()}
+        for row in sorted(rows, reverse=True):
+            self.grid_tilt_table.removeRow(row)
+        self._update_grid_tilt_fit_preview()
+
+    def _clear_grid_tilt_rows(self):
+        """Remove every tilt reference and reset the fit readout."""
+        self.grid_tilt_table.setRowCount(0)
+        self._update_grid_tilt_fit_preview()
+
+    def _grid_tilt_reference_points(self):
+        """Read and validate the editable XYZ reference table."""
+        points = []
+        for row in range(self.grid_tilt_table.rowCount()):
+            values = []
+            for column in range(3):
+                item = self.grid_tilt_table.item(row, column)
+                if item is None or not item.text().strip():
+                    raise ValueError(f"tilt reference row {row + 1} is incomplete")
+                values.append(float(item.text()))
+            points.append(values)
+        return np.asarray(points, dtype=float)
+
+    def _update_grid_tilt_fit_preview(self, _item=None):
+        """Fit the current reference table and report plane slopes/RMSE."""
+        try:
+            points = self._grid_tilt_reference_points()
+            if len(points) < 3:
+                self.grid_tilt_fit_label.setText(
+                    f"Tilt fit: need at least 3 points ({len(points)} defined)"
+                )
+                return
+            from cns_control.utils import _fit_tilt_plane
+            _origin, coefficients, rmse = _fit_tilt_plane(points)
+            self.grid_tilt_fit_label.setText(
+                "Tilt fit: "
+                f"dZ/dX {coefficients[0]:.6f}, "
+                f"dZ/dY {coefficients[1]:.6f}; RMSE {rmse:.4f} um"
+            )
+        except Exception as e:
+            self.grid_tilt_fit_label.setText(f"Tilt fit: {e}")
+
     def _capture_grid_corner(self, corner):
         """Copy the current stage XY into one of the corner input pairs."""
         if self.core is None:
@@ -1463,6 +1601,7 @@ class HardwareWidget(QWidget):
         self._toggle_recal_fields(self.recal_check.isChecked())
         self._toggle_grid_definition_fields()
         self._toggle_grid_sampling_fields()
+        self._toggle_grid_tilt_fields(self.grid_tilt_check.isChecked())
 
     # -------- channel row helpers --------
     def _available_channels(self):
@@ -2785,6 +2924,15 @@ class HardwareWidget(QWidget):
         sq_size = float(self.sel_sqsize_input.value())
         sq_n = int(self.sel_sqn_input.value())
         autofocus_object = self.grid_af_combo.currentText()
+        tilt_reference_points = None
+        if self.grid_tilt_check.isChecked():
+            try:
+                tilt_reference_points = self._grid_tilt_reference_points()
+                from cns_control.utils import _fit_tilt_plane
+                _fit_tilt_plane(tilt_reference_points)
+            except Exception as e:
+                self.status.setText(f"Status: {e}")
+                return
         corner_positions = None
         if self.grid_definition_combo.currentData() == "corners":
             try:
@@ -2828,6 +2976,7 @@ class HardwareWidget(QWidget):
                     use_placeholder=use_placeholder,
                     corner_positions=corner_positions,
                     x_count=x_count, y_count=y_count,
+                    tilt_reference_points=tilt_reference_points,
                     autofocus_object=autofocus_object,
                 )
 
@@ -2836,6 +2985,7 @@ class HardwareWidget(QWidget):
                 "autofocus_p": autofocus_p,
                 "new_seq": new_seq,
                 "autofocus_object": autofocus_object,
+                "tilt_reference_points": tilt_reference_points,
                 "batch": False,
             }
             n_pos = len(autofocus_p)
@@ -2848,7 +2998,9 @@ class HardwareWidget(QWidget):
             log.append(f"\n--- grid ready {ready_detail} ---\n")
             self.status.setText(
                 f"Status: grid ready {ready_detail} ({n_pos} positions, "
-                f"{repeats} pts each at ({fov_x},{fov_y})) -- then Run Raman MDA"
+                f"{repeats} pts each at ({fov_x},{fov_y}), "
+                f"Z={'tilt plane' if tilt_reference_points is not None else 'default'}"
+                ") -- then Run Raman MDA"
             )
         except Exception as e:
             log.append(f"\n--- stage grid failed: {e} ---\n")
