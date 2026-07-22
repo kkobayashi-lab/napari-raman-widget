@@ -2330,7 +2330,7 @@ class HardwareWidget(QWidget):
             add_mask_with_hole(
                 self.viewer,
                 image_size=(Y, X),
-                circle_center=(cy, cx),
+                circle_center=(cx, cy),
                 circle_radius=r,
                 small_circle_radius=10,
                 color=(255, 0, 0),
@@ -2339,7 +2339,7 @@ class HardwareWidget(QWidget):
                 small_circle_alpha=255,
             )
             self.status.setText(
-                f"Status: mask added at ({cy},{cx}) r={r} OK"
+                f"Status: mask added at ({cx},{cy}) r={r} OK"
             )
         except Exception as e:
             self.status.setText(f"Status: add_mask failed -- {e}")
