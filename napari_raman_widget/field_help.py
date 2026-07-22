@@ -31,23 +31,9 @@ HELP = {
         "result paths resolve from here. Editing after connection has no "
         "effect."
     ),
-    "wl_input": (
-        "Desired spectrometer center wavelength (nm). The bold label shows "
-        "the hardware value. Update is enabled only after connecting."
-    ),
-    "wl_update_btn": "Apply the wavelength above to the spectrometer.",
-    "grating_combo": (
-        "Installed gratings (1-based), populated after connecting. The "
-        "current grating is pre-selected."
-    ),
-    "grating_update_btn": (
-        "Move the turret to the selected grating and report groove density "
-        "and center wavelength. Wait for motion to finish before acquiring."
-    ),
     "connect_btn": (
         "Unload old devices, load the CFG, open the napari-micromanager dock, "
-        "create the collector/DAQ, load both models, and refresh channels, "
-        "wavelength and gratings."
+        "create the collector/DAQ, load both models, and refresh channels."
     ),
     "disconnect_btn": (
         "Unload devices and clear all calibration, selection, writer and "
@@ -157,6 +143,22 @@ HELP = {
         "Autofocus mode attached to the generated positions. Also controls "
         "which MDA autofocus fields are visible."
     ),
+    "grid_channel_combo": (
+        "Choose a hardware channel for a per-position preview, or choose "
+        "Raman for a full pre-scan or a hidden placeholder without a pre-scan."
+    ),
+    "grid_definition_combo": (
+        "Use the current stage XY as the grid center, or define the bounds "
+        "with top-left and bottom-right stage positions."
+    ),
+    "grid_sampling_combo": (
+        "Define each axis by a maximum stage spacing or by an exact number "
+        "of positions including the two endpoints."
+    ),
+    "grid_capture_tl_btn": "Copy the current stage XY into the top-left fields.",
+    "grid_capture_br_btn": (
+        "Copy the current stage XY into the bottom-right fields."
+    ),
     "grid_fovx_input": (
         "Fixed image X pixel used at every field of view (paired with FOV y)."
     ),
@@ -172,20 +174,22 @@ HELP = {
         "span is twice this."
     ),
     "grid_xstep_input": (
-        "Stage spacing in X (um). Confirm positions stay within stage/sample "
-        "limits."
+        "Maximum stage spacing in X (um). The actual uniform spacing may be "
+        "smaller so both grid boundaries are included."
     ),
     "grid_ystep_input": (
-        "Stage spacing in Y (um). Confirm positions stay within stage/sample "
-        "limits."
+        "Maximum stage spacing in Y (um). The actual uniform spacing may be "
+        "smaller so both grid boundaries are included."
+    ),
+    "grid_xcount_input": "Exact number of X positions, including endpoints.",
+    "grid_ycount_input": "Exact number of Y positions, including endpoints.",
+    "grid_size_btn": (
+        "Show grid dimensions, resulting spacing, stage positions, and total "
+        "acquisition points including repeats."
     ),
     "grid_repeats_input": (
         "Identical points at each stage position. Minimum of 2 required by "
         "the DAQ."
-    ),
-    "grid_blank_check": (
-        "Use blank placeholder images to establish dimensions. Turn off when "
-        "real per-position BF images are needed."
     ),
     "run_grid_sel_btn": (
         "Stop live mode, prepare the MDA sequence, build the stage grid, and "

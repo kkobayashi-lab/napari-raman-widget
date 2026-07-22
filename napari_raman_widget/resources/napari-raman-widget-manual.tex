@@ -290,23 +290,35 @@ Run grid scan & Acquires BF, fluorescence, Raman grid data, and ending BF.\\
 
 \chapter{Generate Stage Grid}
 
-This section creates stage positions around the \emph{current} stage XY and stores
-the prepared variables for \ui{Run Raman MDA}.
+This section creates stage positions around the \emph{current} stage XY or
+between two captured stage-space corners, and stores the prepared variables for
+\ui{Run Raman MDA}.
 Every position carries the same fixed image point.
 
 \fieldtable
+Grid definition & Centered on current XY or Top-left + bottom-right & The centered
+mode uses the current stage position and X/Y half-ranges. Corner mode accepts typed
+coordinates or captures the current stage XY at each opposite corner.\\
 Autofocus object & None, laser, software, quartz, glass, cell & Autofocus mode attached
 to the generated positions. The choice also controls which MDA autofocus fields are visible.\\
+Grid setup channel & Raman (pre-scan), Raman (placeholder, no pre-scan), or a hardware
+channel & Controls whether grid setup runs the normal sequence, uses a hidden placeholder
+layer, or runs a one-channel hardware preview.\\
 FOV x / FOV y (px) & 740 / 540; 0--100000 & Fixed image coordinate used at every
 field of view. Note the UI labels X then Y; internal selection receives both separately.\\
 X range / Y range (+/- um) & 100 / 100 & Half-width of the stage grid about the
 current XY. Total spans are twice these values.\\
-X step / Y step (um) & 50 / 50; minimum 0.01 & Stage-position spacing. Confirm
-that all generated positions remain within stage and sample limits.\\
+Grid sampling & Maximum spacing or Point count (including endpoints) & Choose
+whether each axis is derived from a spacing limit or an exact number of stage
+positions.\\
+X/Y maximum spacing (um) & 50 / 50; minimum 0.01 & Maximum stage-position spacing.
+Uniform spacing may be smaller so both grid boundaries are included.\\
+X points / Y points & 5 / 5; minimum 1 & Exact positions along each axis in
+point-count mode. Two or more include both boundaries; one uses the axis midpoint.\\
 Repeats (points per position) & 2; 2--1000 & Identical points at each stage position;
 minimum two is required by the DAQ.\\
-Skip BF pre-scan & on & Uses blank placeholder images to establish dimensions. Turn
-off when real per-position BF images are needed for setup.\\
+Grid details & button & Shows X/Y dimensions, total stage positions, total acquisition
+points including repeats, spans, and resulting spacing without moving the stage.\\
 \endfieldtable
 
 \ui{Generate grid} stops live mode, prepares the napari-micromanager MDA sequence,
@@ -322,11 +334,15 @@ are written later by \ui{Run Raman MDA} to its \ui{Writer output dir}.
 \begin{longtable}{@{}p{0.31\textwidth}p{0.63\textwidth}@{}}
 \toprule\textbf{Option} & \textbf{Brief definition}\\\midrule
 Autofocus object & Focus strategy attached to generated positions.\\
+Grid definition & Choose a current-stage-centered grid or two opposite corners.\\
+Grid setup channel & Runs a Raman pre-scan, uses placeholders without a pre-scan,
+or runs a hardware-channel preview.\\
 FOV X / FOV Y & Fixed pixel target repeated at every position.\\
-X/Y range & Grid half-widths around the current stage XY.\\
-X/Y step & Stage spacing between neighboring positions.\\
+X/Y range & Grid half-widths around the current stage XY in centered mode.\\
+X/Y maximum spacing & Largest allowed spacing between neighboring positions.\\
+X/Y points & Exact axis sizes when point-count sampling is selected.\\
 Repeats & Identical aiming points carried by every position.\\
-Skip BF pre-scan & Uses blank placeholders instead of BF setup images.\\
+Grid details & Calculates the current grid size and sampling summary.\\
 Generate grid & Creates positions and selection results for Raman MDA.\\
 \bottomrule\end{longtable}
 

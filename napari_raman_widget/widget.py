@@ -2,10 +2,13 @@
 import os
 import time
 import uuid
+from pathlib import Path
+
 import xarray as xr
 import napari
 import numpy as np
 from qtpy.QtCore import Qt, QTimer, QUrl
+from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget, QMessageBox
@@ -116,39 +119,6 @@ class HardwareWidget(QWidget):
         out_row.addWidget(self.out_path)
         out_row.addWidget(out_browse)
         loading_layout.addLayout(out_row)
-
-        # Wavelength control
-        wl_row = QHBoxLayout()
-        wl_row.addWidget(QLabel("Center \u03bb (nm):"))
-        self.wl_current_label = QLabel("\u2014")
-        self.wl_current_label.setStyleSheet("font-weight: bold;")
-        wl_row.addWidget(self.wl_current_label)
-        loading_layout.addLayout(wl_row)
-
-        wl_set_row = QHBoxLayout()
-        self.wl_input = QDoubleSpinBox()
-        self.wl_input.setRange(0, 2000)
-        self.wl_input.setDecimals(2)
-        self.wl_input.setValue(785.0)
-        self.wl_input.setSuffix(" nm")
-        self.wl_update_btn = QPushButton("Update \u03bb")
-        self.wl_update_btn.setEnabled(False)
-        self.wl_update_btn.clicked.connect(self.update_wavelength)
-        wl_set_row.addWidget(self.wl_input, 2)
-        wl_set_row.addWidget(self.wl_update_btn, 1)
-        loading_layout.addLayout(wl_set_row)
-
-        # Grating control
-        grating_row = QHBoxLayout()
-        grating_row.addWidget(QLabel("Grating:"))
-        self.grating_combo = QComboBox()
-        self.grating_combo.setEnabled(False)
-        self.grating_update_btn = QPushButton("Update grating")
-        self.grating_update_btn.setEnabled(False)
-        self.grating_update_btn.clicked.connect(self.update_grating)
-        grating_row.addWidget(self.grating_combo, 2)
-        grating_row.addWidget(self.grating_update_btn, 1)
-        loading_layout.addLayout(grating_row)
 
         self.connect_btn = QPushButton("Connect hardware")
         self.disconnect_btn = QPushButton("Disconnect")
@@ -443,9 +413,19 @@ class HardwareWidget(QWidget):
         grid_layout = QVBoxLayout()
 
         grid_layout.addWidget(QLabel(
-            "Creates a grid of stage positions around the CURRENT stage XY,\n"
+            "Creates a grid from the current center or two captured corners,\n"
             "each carrying the same single fixed point (non-batch)."
         ))
+
+        definition_row = QHBoxLayout()
+        definition_row.addWidget(QLabel("Grid definition:"))
+        self.grid_definition_combo = QComboBox()
+        self.grid_definition_combo.addItem("Centered on current XY", "center")
+        self.grid_definition_combo.addItem(
+            "Top-left + bottom-right", "corners"
+        )
+        definition_row.addWidget(self.grid_definition_combo)
+        grid_layout.addLayout(definition_row)
 
         grid_af_row = QHBoxLayout()
         grid_af_row.addWidget(QLabel("Autofocus object:"))
@@ -461,7 +441,12 @@ class HardwareWidget(QWidget):
         channel_row = QHBoxLayout()
         channel_row.addWidget(QLabel("Grid setup channel:"))
         self.grid_channel_combo = QComboBox()
-        self.grid_channel_combo.addItem("Raman (no preview)", None)
+        self.grid_channel_combo.addItem(
+            "Raman (pre-scan)", (None, False)
+        )
+        self.grid_channel_combo.addItem(
+            "Raman (placeholder, no pre-scan)", (None, True)
+        )
         channel_row.addWidget(self.grid_channel_combo)
         grid_layout.addLayout(channel_row)
 
@@ -482,9 +467,10 @@ class HardwareWidget(QWidget):
         fovy_row.addWidget(self.grid_fovy_input)
         grid_layout.addLayout(fovy_row)
 
-        # Stage grid extent / spacing (real stage units, +/- range about current).
+        # Stage grid extent / spacing (real stage units).
         xr_row = QHBoxLayout()
-        xr_row.addWidget(QLabel("X range (+/- um):"))
+        self._grid_xrange_label = QLabel("X range (+/- um):")
+        xr_row.addWidget(self._grid_xrange_label)
         self.grid_xrange_input = QDoubleSpinBox()
         self.grid_xrange_input.setRange(0.0, 1_000_000)
         self.grid_xrange_input.setValue(100.0)
@@ -494,7 +480,8 @@ class HardwareWidget(QWidget):
         grid_layout.addLayout(xr_row)
 
         yr_row = QHBoxLayout()
-        yr_row.addWidget(QLabel("Y range (+/- um):"))
+        self._grid_yrange_label = QLabel("Y range (+/- um):")
+        yr_row.addWidget(self._grid_yrange_label)
         self.grid_yrange_input = QDoubleSpinBox()
         self.grid_yrange_input.setRange(0.0, 1_000_000)
         self.grid_yrange_input.setValue(100.0)
@@ -503,8 +490,72 @@ class HardwareWidget(QWidget):
         yr_row.addWidget(self.grid_yrange_input)
         grid_layout.addLayout(yr_row)
 
+        self._grid_corner_help = QLabel(
+            "Move to each corner and capture its XY, or type the coordinates."
+        )
+        grid_layout.addWidget(self._grid_corner_help)
+
+        tl_row = QHBoxLayout()
+        self._grid_tl_label = QLabel("Top-left (X, Y):")
+        tl_row.addWidget(self._grid_tl_label)
+        self.grid_tl_x_input = QLineEdit()
+        self.grid_tl_x_input.setPlaceholderText("X")
+        self.grid_tl_y_input = QLineEdit()
+        self.grid_tl_y_input.setPlaceholderText("Y")
+        self.grid_capture_tl_btn = QPushButton("Capture current XY")
+        self.grid_capture_tl_btn.clicked.connect(
+            lambda _checked=False: self._capture_grid_corner("top_left")
+        )
+        tl_row.addWidget(self.grid_tl_x_input)
+        tl_row.addWidget(self.grid_tl_y_input)
+        tl_row.addWidget(self.grid_capture_tl_btn)
+        grid_layout.addLayout(tl_row)
+
+        br_row = QHBoxLayout()
+        self._grid_br_label = QLabel("Bottom-right (X, Y):")
+        br_row.addWidget(self._grid_br_label)
+        self.grid_br_x_input = QLineEdit()
+        self.grid_br_x_input.setPlaceholderText("X")
+        self.grid_br_y_input = QLineEdit()
+        self.grid_br_y_input.setPlaceholderText("Y")
+        self.grid_capture_br_btn = QPushButton("Capture current XY")
+        self.grid_capture_br_btn.clicked.connect(
+            lambda _checked=False: self._capture_grid_corner("bottom_right")
+        )
+        br_row.addWidget(self.grid_br_x_input)
+        br_row.addWidget(self.grid_br_y_input)
+        br_row.addWidget(self.grid_capture_br_btn)
+        grid_layout.addLayout(br_row)
+
+        self._grid_center_widgets = [
+            self._grid_xrange_label, self.grid_xrange_input,
+            self._grid_yrange_label, self.grid_yrange_input,
+        ]
+        self._grid_corner_widgets = [
+            self._grid_corner_help,
+            self._grid_tl_label, self.grid_tl_x_input, self.grid_tl_y_input,
+            self.grid_capture_tl_btn,
+            self._grid_br_label, self.grid_br_x_input, self.grid_br_y_input,
+            self.grid_capture_br_btn,
+        ]
+        self.grid_definition_combo.currentIndexChanged.connect(
+            self._toggle_grid_definition_fields
+        )
+        self._toggle_grid_definition_fields()
+
+        sampling_row = QHBoxLayout()
+        sampling_row.addWidget(QLabel("Grid sampling:"))
+        self.grid_sampling_combo = QComboBox()
+        self.grid_sampling_combo.addItem("Maximum spacing", "spacing")
+        self.grid_sampling_combo.addItem(
+            "Point count (including endpoints)", "count"
+        )
+        sampling_row.addWidget(self.grid_sampling_combo)
+        grid_layout.addLayout(sampling_row)
+
         xs_row = QHBoxLayout()
-        xs_row.addWidget(QLabel("X step (um):"))
+        self._grid_xstep_label = QLabel("X max spacing (um):")
+        xs_row.addWidget(self._grid_xstep_label)
         self.grid_xstep_input = QDoubleSpinBox()
         self.grid_xstep_input.setRange(0.01, 1_000_000)
         self.grid_xstep_input.setValue(50.0)
@@ -514,7 +565,8 @@ class HardwareWidget(QWidget):
         grid_layout.addLayout(xs_row)
 
         ys_row = QHBoxLayout()
-        ys_row.addWidget(QLabel("Y step (um):"))
+        self._grid_ystep_label = QLabel("Y max spacing (um):")
+        ys_row.addWidget(self._grid_ystep_label)
         self.grid_ystep_input = QDoubleSpinBox()
         self.grid_ystep_input.setRange(0.01, 1_000_000)
         self.grid_ystep_input.setValue(50.0)
@@ -522,6 +574,37 @@ class HardwareWidget(QWidget):
         self.grid_ystep_input.setSingleStep(5.0)
         ys_row.addWidget(self.grid_ystep_input)
         grid_layout.addLayout(ys_row)
+
+        xcount_row = QHBoxLayout()
+        self._grid_xcount_label = QLabel("X points:")
+        xcount_row.addWidget(self._grid_xcount_label)
+        self.grid_xcount_input = QSpinBox()
+        self.grid_xcount_input.setRange(1, 100000)
+        self.grid_xcount_input.setValue(5)
+        xcount_row.addWidget(self.grid_xcount_input)
+        grid_layout.addLayout(xcount_row)
+
+        ycount_row = QHBoxLayout()
+        self._grid_ycount_label = QLabel("Y points:")
+        ycount_row.addWidget(self._grid_ycount_label)
+        self.grid_ycount_input = QSpinBox()
+        self.grid_ycount_input.setRange(1, 100000)
+        self.grid_ycount_input.setValue(5)
+        ycount_row.addWidget(self.grid_ycount_input)
+        grid_layout.addLayout(ycount_row)
+
+        self._grid_spacing_widgets = [
+            self._grid_xstep_label, self.grid_xstep_input,
+            self._grid_ystep_label, self.grid_ystep_input,
+        ]
+        self._grid_count_widgets = [
+            self._grid_xcount_label, self.grid_xcount_input,
+            self._grid_ycount_label, self.grid_ycount_input,
+        ]
+        self.grid_sampling_combo.currentIndexChanged.connect(
+            self._toggle_grid_sampling_fields
+        )
+        self._toggle_grid_sampling_fields()
 
         # Number of identical points placed per position (>=2 for the DAQ,
         # which needs at least 2 samples per channel).
@@ -533,12 +616,34 @@ class HardwareWidget(QWidget):
         reps_row.addWidget(self.grid_repeats_input)
         grid_layout.addLayout(reps_row)
 
-        # Skip the slow per-position BF pre-scan; use a zero-memory blank
-        # placeholder layer to establish dims instead.
-        self.grid_blank_check = QCheckBox("Skip BF pre-scan (use blank images)")
-        self.grid_blank_check.setChecked(True)
-        grid_layout.addWidget(self.grid_blank_check)
-        self.run_grid_sel_btn = QPushButton("Generate grid")
+        preview_row = QHBoxLayout()
+        self.grid_size_label = QLabel()
+        self.grid_size_label.setStyleSheet("font-weight: bold;")
+        self.grid_size_label.setWordWrap(True)
+        self.grid_size_btn = QPushButton("Grid details...")
+        self.grid_size_btn.clicked.connect(self._show_grid_size_preview)
+        preview_row.addWidget(self.grid_size_label)
+        preview_row.addWidget(self.grid_size_btn)
+        grid_layout.addLayout(preview_row)
+
+        for control in (
+            self.grid_definition_combo,
+            self.grid_sampling_combo,
+        ):
+            control.currentIndexChanged.connect(self._update_grid_size_preview)
+        for control in (
+            self.grid_xrange_input, self.grid_yrange_input,
+            self.grid_xstep_input, self.grid_ystep_input,
+            self.grid_xcount_input, self.grid_ycount_input,
+            self.grid_repeats_input,
+        ):
+            control.valueChanged.connect(self._update_grid_size_preview)
+        for control in (
+            self.grid_tl_x_input, self.grid_tl_y_input,
+            self.grid_br_x_input, self.grid_br_y_input,
+        ):
+            control.textChanged.connect(self._update_grid_size_preview)
+        self._update_grid_size_preview()
 
         self.run_grid_sel_btn = QPushButton("Generate grid")
         self.run_grid_sel_btn.clicked.connect(self.run_grid_selection)
@@ -995,9 +1100,9 @@ class HardwareWidget(QWidget):
         for _box in (calib_box, scan_box, self.sel_box, mda_box):
             _box.toggled.connect(lambda checked: self._reapply_toggles())
 
-        from .chat_panel import ChatPanel
-        self.chat_panel = ChatPanel(self)
-        outer.addWidget(self.chat_panel)
+        # from .chat_panel import ChatPanel
+        # self.chat_panel = ChatPanel(self)
+        # outer.addWidget(self.chat_panel)
         
         outer.addStretch()
 
@@ -1226,6 +1331,107 @@ class HardwareWidget(QWidget):
         for w in self._recal_widgets:
             w.setVisible(checked)
 
+    def _toggle_grid_definition_fields(self, _index=None):
+        """Show only the controls used by the selected grid definition."""
+        use_corners = self.grid_definition_combo.currentData() == "corners"
+        for widget in self._grid_center_widgets:
+            widget.setVisible(not use_corners)
+        for widget in self._grid_corner_widgets:
+            widget.setVisible(use_corners)
+
+    def _toggle_grid_sampling_fields(self, _index=None):
+        """Show spacing or point-count controls for the selected grid mode."""
+        use_count = self.grid_sampling_combo.currentData() == "count"
+        for widget in self._grid_spacing_widgets:
+            widget.setVisible(not use_count)
+        for widget in self._grid_count_widgets:
+            widget.setVisible(use_count)
+
+    def _grid_size_preview(self):
+        """Calculate grid dimensions without moving hardware or running MDA."""
+        if self.grid_definition_combo.currentData() == "corners":
+            x1 = float(self.grid_tl_x_input.text())
+            y1 = float(self.grid_tl_y_input.text())
+            x2 = float(self.grid_br_x_input.text())
+            y2 = float(self.grid_br_y_input.text())
+            x_span, y_span = abs(x2 - x1), abs(y2 - y1)
+        else:
+            x_span = 2.0 * float(self.grid_xrange_input.value())
+            y_span = 2.0 * float(self.grid_yrange_input.value())
+
+        if self.grid_sampling_combo.currentData() == "count":
+            nx = int(self.grid_xcount_input.value())
+            ny = int(self.grid_ycount_input.value())
+        else:
+            x_step = float(self.grid_xstep_input.value())
+            y_step = float(self.grid_ystep_input.value())
+            nx = 1 if x_span == 0 else int(np.ceil(x_span / x_step)) + 1
+            ny = 1 if y_span == 0 else int(np.ceil(y_span / y_step)) + 1
+
+        x_spacing = 0.0 if nx == 1 else x_span / (nx - 1)
+        y_spacing = 0.0 if ny == 1 else y_span / (ny - 1)
+        positions = nx * ny
+        repeats = int(self.grid_repeats_input.value())
+        return nx, ny, positions, repeats, x_span, y_span, x_spacing, y_spacing
+
+    def _update_grid_size_preview(self, _value=None):
+        """Refresh the compact grid-size readout as controls change."""
+        try:
+            nx, ny, positions, repeats, *_rest = self._grid_size_preview()
+            self.grid_size_label.setText(
+                f"Grid: {nx} x {ny} = {positions:,} positions; "
+                f"{positions * repeats:,} acquisition points"
+            )
+        except ValueError:
+            self.grid_size_label.setText(
+                "Grid: enter or capture both corner positions"
+            )
+
+    def _show_grid_size_preview(self):
+        """Open a quick summary of the currently defined grid."""
+        try:
+            (nx, ny, positions, repeats, x_span, y_span,
+             x_spacing, y_spacing) = self._grid_size_preview()
+        except ValueError:
+            QMessageBox.warning(
+                self, "Grid details",
+                "Enter or capture both top-left and bottom-right positions."
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Grid details",
+            f"Grid shape: {nx} x {ny}\n"
+            f"Stage positions: {positions:,}\n"
+            f"Points per position: {repeats}\n"
+            f"Total acquisition points: {positions * repeats:,}\n\n"
+            f"X span: {x_span:.3f} um; spacing: {x_spacing:.3f} um\n"
+            f"Y span: {y_span:.3f} um; spacing: {y_spacing:.3f} um",
+        )
+
+    def _capture_grid_corner(self, corner):
+        """Copy the current stage XY into one of the corner input pairs."""
+        if self.core is None:
+            self.status.setText("Status: not connected")
+            return
+        try:
+            x, y = self.core.getXYPosition()
+            if corner == "top_left":
+                x_input, y_input, name = (
+                    self.grid_tl_x_input, self.grid_tl_y_input, "top-left"
+                )
+            else:
+                x_input, y_input, name = (
+                    self.grid_br_x_input, self.grid_br_y_input, "bottom-right"
+                )
+            x_input.setText(f"{x:.3f}")
+            y_input.setText(f"{y:.3f}")
+            self.status.setText(
+                f"Status: captured {name} at X {x:.3f}, Y {y:.3f}"
+            )
+        except Exception as e:
+            self.status.setText(f"Status: couldn't capture grid corner -- {e}")
+
     def _toggle_autofocus_fields(self, method):
         """Show/hide the MDA autofocus fields based on the chosen object.
 
@@ -1255,6 +1461,8 @@ class HardwareWidget(QWidget):
         self._toggle_autofocus_fields(self.sel_af_combo.currentText())
         self._toggle_px2stage_fields(self.px2stage_check.isChecked())
         self._toggle_recal_fields(self.recal_check.isChecked())
+        self._toggle_grid_definition_fields()
+        self._toggle_grid_sampling_fields()
 
     # -------- channel row helpers --------
     def _available_channels(self):
@@ -1367,14 +1575,18 @@ class HardwareWidget(QWidget):
         current = self.grid_channel_combo.currentData()
         self.grid_channel_combo.blockSignals(True)
         self.grid_channel_combo.clear()
-        self.grid_channel_combo.addItem("Raman (no preview)", None)
+        self.grid_channel_combo.addItem(
+            "Raman (pre-scan)", (None, False)
+        )
+        self.grid_channel_combo.addItem(
+            "Raman (placeholder, no pre-scan)", (None, True)
+        )
         for channel in available_channels:
-            self.grid_channel_combo.addItem(channel, channel)
+            self.grid_channel_combo.addItem(channel, (channel, False))
 
-        if current is not None:
-            index = self.grid_channel_combo.findData(current)
-            if index >= 0:
-                self.grid_channel_combo.setCurrentIndex(index)
+        index = self.grid_channel_combo.findData(current)
+        if index >= 0:
+            self.grid_channel_combo.setCurrentIndex(index)
         self.grid_channel_combo.setEnabled(True)
         self.grid_channel_combo.blockSignals(False)
 
@@ -1737,13 +1949,6 @@ class HardwareWidget(QWidget):
             vdm_msg = self._load_vandermonde()
 
             self._refresh_channel_combos()
-            self.wl_current_label.setText("Set in LightField")
-            self.wl_update_btn.setEnabled(False)
-            self.grating_combo.clear()
-            self.grating_combo.addItem("Set in LightField")
-            self.grating_combo.setEnabled(False)
-            self.grating_update_btn.setEnabled(False)
-
             msg = "Status: connected OK (Princeton/LightField)"
             if not cfg:
                 msg += " (no cfg loaded)"
@@ -1769,77 +1974,6 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: transformer reloaded OK{vdm_msg}")
         except Exception as e:
             self.status.setText(f"Status: transformer reload failed -- {e}")
-
-    def refresh_wavelength(self):
-        """Read and display the current center wavelength."""
-        if self.collector is None:
-            return
-        try:
-            wl = self.collector.get_wavelength()
-            self.wl_current_label.setText(f"{wl:.2f} nm")
-            self.wl_input.setValue(wl)
-        except Exception as e:
-            self.wl_current_label.setText(f"error: {e}")
-
-    def update_wavelength(self):
-        """Set a new center wavelength on the spectrometer."""
-        if self.collector is None:
-            self.status.setText("Status: not connected")
-            return
-        wl = float(self.wl_input.value())
-        try:
-            self.collector.set_wavelength(wl)
-            self.refresh_wavelength()
-            self.status.setText(f"Status: wavelength set to {wl:.2f} nm")
-        except Exception as e:
-            self.status.setText(f"Status: wavelength update failed -- {e}")
-
-    def refresh_gratings(self):
-        if self.collector is None:
-            return
-        try:
-            n = int(self.collector.get_number_gratings())
-            current = int(self.collector.get_grating())
-            # ensure the list is at least long enough to hold `current`
-            n = max(n, current)
-            self.grating_combo.blockSignals(True)
-            self.grating_combo.clear()
-            self.grating_combo.addItems([str(i) for i in range(1, n + 1)])
-            self.grating_combo.blockSignals(False)
-            idx = current - 1
-            if 0 <= idx < self.grating_combo.count():
-                self.grating_combo.setCurrentIndex(idx)
-            self.grating_combo.setEnabled(True)
-            print(f"[gratings] n={n} current={current} "
-                  f"count={self.grating_combo.count()} "
-                  f"shown={self.grating_combo.currentText()}")
-        except Exception as e:
-            self.status.setText(f"Status: couldn't read gratings -- {e}")
-
-    def update_grating(self):
-        """Move the turret to the selected grating, then report groove
-        density and center wavelength in the status bar."""
-        if self.collector is None:
-            self.status.setText("Status: not connected")
-            return
-        text = self.grating_combo.currentText()
-        if not text:
-            self.status.setText("Status: no grating selected")
-            return
-        grating = int(text)
-        self.status.setText(f"Status: moving to grating {grating}...")
-        self.repaint()
-        try:
-            self.collector.set_grating(grating)
-            lines, blaze, home, offset = self.collector.get_grating_info(grating)
-            wl = self.collector.get_wavelength()
-            self.refresh_wavelength()               # keep lambda display in sync
-            self.status.setText(
-                f"Status: grating {grating} set -- {lines:.0f} grooves/mm, "
-                f"center {wl:.2f} nm"
-            )
-        except Exception as e:
-            self.status.setText(f"Status: grating update failed -- {e}")
 
     def disconnect(self):
         try:
@@ -1873,12 +2007,6 @@ class HardwareWidget(QWidget):
         self.connect_btn.setEnabled(True)
         self.disconnect_btn.setEnabled(False)
         self.reload_tf_btn.setEnabled(False)
-        self.wl_update_btn.setEnabled(False)
-        self.grating_update_btn.setEnabled(False)
-        self.grating_combo.setEnabled(False)
-        self.grating_combo.clear()
-        self.wl_current_label.setText("\u2014")
-
     # -------- raman collection --------
     def collect_raman(self):
         if self.collector is None or self.daq is None:
@@ -2634,10 +2762,7 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: centering failed -- {e}")
 
     def run_grid_selection(self):
-        """Build a grid of stage positions around the current stage XY, each
-        carrying the same single fixed point (grid_point_selections). No
-        autofocus, non-batch. Stores the (sources, autofocus_p, new_seq) that
-        Run Raman MDA consumes."""
+        """Build a centered or corner-defined grid of stage positions."""
         if self.core is None:
             self.status.setText("Status: not connected")
             return
@@ -2651,11 +2776,32 @@ class HardwareWidget(QWidget):
         y_range = float(self.grid_yrange_input.value())
         x_step = float(self.grid_xstep_input.value())
         y_step = float(self.grid_ystep_input.value())
+        x_count = y_count = None
+        if self.grid_sampling_combo.currentData() == "count":
+            x_count = int(self.grid_xcount_input.value())
+            y_count = int(self.grid_ycount_input.value())
         repeats = int(self.grid_repeats_input.value())
-        preview_channel = self.grid_channel_combo.currentData()
+        preview_channel, use_placeholder = self.grid_channel_combo.currentData()
         sq_size = float(self.sel_sqsize_input.value())
         sq_n = int(self.sel_sqn_input.value())
         autofocus_object = self.grid_af_combo.currentText()
+        corner_positions = None
+        if self.grid_definition_combo.currentData() == "corners":
+            try:
+                top_left = (
+                    float(self.grid_tl_x_input.text()),
+                    float(self.grid_tl_y_input.text()),
+                )
+                bottom_right = (
+                    float(self.grid_br_x_input.text()),
+                    float(self.grid_br_y_input.text()),
+                )
+                corner_positions = (top_left, bottom_right)
+            except ValueError:
+                self.status.setText(
+                    "Status: enter or capture both grid-corner X/Y positions"
+                )
+                return
 
         log = LogWindow(title="Stage grid log")
         log.show()
@@ -2679,6 +2825,9 @@ class HardwareWidget(QWidget):
                     x_step=x_step, y_step=y_step,
                     repeats=repeats,
                     preview_channel=preview_channel,
+                    use_placeholder=use_placeholder,
+                    corner_positions=corner_positions,
+                    x_count=x_count, y_count=y_count,
                     autofocus_object=autofocus_object,
                 )
 
@@ -2690,11 +2839,12 @@ class HardwareWidget(QWidget):
                 "batch": False,
             }
             n_pos = len(autofocus_p)
-            ready_detail = (
-                "using Raman placeholders"
-                if preview_channel is None
-                else f"after {preview_channel} preview"
-            )
+            if preview_channel is not None:
+                ready_detail = f"after {preview_channel} preview"
+            elif use_placeholder:
+                ready_detail = "using Raman placeholders"
+            else:
+                ready_detail = "after Raman pre-scan"
             log.append(f"\n--- grid ready {ready_detail} ---\n")
             self.status.setText(
                 f"Status: grid ready {ready_detail} ({n_pos} positions, "
