@@ -607,6 +607,15 @@ class HardwareWidget(QWidget):
         )
         self._toggle_grid_sampling_fields()
 
+        order_row = QHBoxLayout()
+        order_row.addWidget(QLabel("Scan order:"))
+        self.grid_scan_order_combo = QComboBox()
+        self.grid_scan_order_combo.addItem("Raster", None)
+        self.grid_scan_order_combo.addItem("Snake (X fast)", "x")
+        self.grid_scan_order_combo.addItem("Snake (Y fast)", "y")
+        order_row.addWidget(self.grid_scan_order_combo)
+        grid_layout.addLayout(order_row)
+
         # Number of identical points placed per position (>=2 for the DAQ,
         # which needs at least 2 samples per channel).
         reps_row = QHBoxLayout()
@@ -690,6 +699,7 @@ class HardwareWidget(QWidget):
         for control in (
             self.grid_definition_combo,
             self.grid_sampling_combo,
+            self.grid_scan_order_combo,
         ):
             control.currentIndexChanged.connect(self._update_grid_size_preview)
         for control in (
@@ -1439,9 +1449,10 @@ class HardwareWidget(QWidget):
         """Refresh the compact grid-size readout as controls change."""
         try:
             nx, ny, positions, repeats, *_rest = self._grid_size_preview()
+            order = self.grid_scan_order_combo.currentText()
             self.grid_size_label.setText(
                 f"Grid: {nx} x {ny} = {positions:,} positions; "
-                f"{positions * repeats:,} acquisition points"
+                f"{positions * repeats:,} acquisition points; {order}"
             )
         except ValueError:
             self.grid_size_label.setText(
@@ -1463,6 +1474,7 @@ class HardwareWidget(QWidget):
             self,
             "Grid details",
             f"Grid shape: {nx} x {ny}\n"
+            f"Scan order: {self.grid_scan_order_combo.currentText()}\n"
             f"Stage positions: {positions:,}\n"
             f"Points per position: {repeats}\n"
             f"Total acquisition points: {positions * repeats:,}\n\n"
@@ -2924,6 +2936,7 @@ class HardwareWidget(QWidget):
         sq_size = float(self.sel_sqsize_input.value())
         sq_n = int(self.sel_sqn_input.value())
         autofocus_object = self.grid_af_combo.currentText()
+        snake_axis = self.grid_scan_order_combo.currentData()
         tilt_reference_points = None
         if self.grid_tilt_check.isChecked():
             try:
@@ -2977,6 +2990,7 @@ class HardwareWidget(QWidget):
                     corner_positions=corner_positions,
                     x_count=x_count, y_count=y_count,
                     tilt_reference_points=tilt_reference_points,
+                    snake_axis=snake_axis,
                     autofocus_object=autofocus_object,
                 )
 
@@ -2986,6 +3000,7 @@ class HardwareWidget(QWidget):
                 "new_seq": new_seq,
                 "autofocus_object": autofocus_object,
                 "tilt_reference_points": tilt_reference_points,
+                "snake_axis": snake_axis,
                 "batch": False,
             }
             n_pos = len(autofocus_p)
@@ -2999,6 +3014,7 @@ class HardwareWidget(QWidget):
             self.status.setText(
                 f"Status: grid ready {ready_detail} ({n_pos} positions, "
                 f"{repeats} pts each at ({fov_x},{fov_y}), "
+                f"{self.grid_scan_order_combo.currentText()}, "
                 f"Z={'tilt plane' if tilt_reference_points is not None else 'default'}"
                 ") -- then Run Raman MDA"
             )

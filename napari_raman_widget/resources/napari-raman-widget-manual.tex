@@ -315,6 +315,10 @@ X/Y maximum spacing (um) & 50 / 50; minimum 0.01 & Maximum stage-position spacin
 Uniform spacing may be smaller so both grid boundaries are included.\\
 X points / Y points & 5 / 5; minimum 1 & Exact positions along each axis in
 point-count mode. Two or more include both boundaries; one uses the axis midpoint.\\
+Scan order & Raster, Snake (X fast), or Snake (Y fast) & Raster preserves the
+original Y-fast position order. X-fast snake reverses X on alternating Y rows;
+Y-fast snake reverses Y on alternating X columns. This shared stage-position
+order is used by Raman and every configured imaging channel.\\
 Repeats (points per position) & 2; 2--1000 & Identical points at each stage position;
 minimum two is required by the DAQ.\\
 Grid details & button & Shows X/Y dimensions, total stage positions, total acquisition
@@ -366,6 +370,7 @@ FOV X / FOV Y & Fixed pixel target repeated at every position.\\
 X/Y range & Grid half-widths around the current stage XY in centered mode.\\
 X/Y maximum spacing & Largest allowed spacing between neighboring positions.\\
 X/Y points & Exact axis sizes when point-count sampling is selected.\\
+Scan order & Raster or axis-selected snake traversal for all channels.\\
 Repeats & Identical aiming points carried by every position.\\
 Grid details & Calculates the current grid size and sampling summary.\\
 Tilt correction & Fits focused XYZ references and predicts Z across the grid.\\

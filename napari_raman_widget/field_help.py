@@ -155,6 +155,11 @@ HELP = {
         "Define each axis by a maximum stage spacing or by an exact number "
         "of positions including the two endpoints."
     ),
+    "grid_scan_order_combo": (
+        "Raster preserves the original Y-fast ordering. Snake X-fast reverses "
+        "X on alternating Y rows; Snake Y-fast reverses Y on alternating X "
+        "columns. The position order applies to every acquisition channel."
+    ),
     "grid_capture_tl_btn": "Copy the current stage XY into the top-left fields.",
     "grid_capture_br_btn": (
         "Copy the current stage XY into the bottom-right fields."
