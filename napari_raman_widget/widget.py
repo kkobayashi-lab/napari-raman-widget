@@ -28,6 +28,26 @@ DEFAULT_LIGHTFIELD_CONFIG = (
 )
 
 
+def _parse_raman_z_indices(text):
+    """Parse Raman Z indices, with ``None``/``Off`` disabling spectra."""
+    stripped = text.strip()
+    if stripped.lower() in {"none", "off"}:
+        return []
+    parts = [part.strip() for part in stripped.split(",") if part.strip()]
+    if not parts:
+        raise ValueError("Raman z indices is empty")
+    try:
+        return [int(part) for part in parts]
+    except ValueError:
+        raise ValueError(
+            f"Raman z indices contains non-integer entries: {text!r}"
+        )
+
+
+def _raman_free_autofocus_allowed(autofocus_enabled, autofocus_object):
+    return not autofocus_enabled or autofocus_object == "software"
+
+
 class HardwareWidget(QWidget):
     def __init__(self, viewer: napari.Viewer):
         super().__init__()
@@ -46,6 +66,12 @@ class HardwareWidget(QWidget):
         self.selection_results = None
         self.mda_channel_rows = []
         self.mda_writer = None
+        self._mda_completion_events = None
+        self._raman_mda_pending = False
+        self._raman_mda_canceled = False
+        self._raman_mda_writer = None
+        self._raman_mda_batch = False
+        self._raman_mda_has_raman = False
         self.px2stage_picker = None
         self.px2stage_xy = None
         self.mm_config = None
@@ -1062,10 +1088,10 @@ class HardwareWidget(QWidget):
         mda_layout.addLayout(zrel_row)
 
         rz_row = QHBoxLayout()
-        rz_row.addWidget(QLabel("Raman z indices:"))
+        rz_row.addWidget(QLabel("Raman z indices (None = off):"))
         self.mda_rz_input = QLineEdit()
         self.mda_rz_input.setText("0")
-        self.mda_rz_input.setPlaceholderText("e.g. 0, 1")
+        self.mda_rz_input.setPlaceholderText("e.g. 0, 1 or None")
         rz_row.addWidget(self.mda_rz_input)
         mda_layout.addLayout(rz_row)
 
@@ -1090,6 +1116,12 @@ class HardwareWidget(QWidget):
         mda_btns_row.addWidget(self.stop_mda_btn, 1)
 
         mda_layout.addLayout(mda_btns_row)
+
+        self.auto_dataset_check = QCheckBox(
+            "Generate dataset automatically after a successful run"
+        )
+        self.auto_dataset_check.setChecked(False)
+        mda_layout.addWidget(self.auto_dataset_check)
  
         # --- separator ---
         sep = QLabel("-" * 45)
@@ -1850,6 +1882,11 @@ class HardwareWidget(QWidget):
 
         batch = self.sel_batch_combo.currentText() == "True"
 
+        self._generate_dataset(run_dir, batch)
+
+    def _generate_dataset(self, run_dir, batch):
+        """Generate and display a dataset for an explicit MDA run folder."""
+
         log = LogWindow(title="Dataset generation log")
         log.show()
         self._plot_windows.append(log)
@@ -1892,6 +1929,77 @@ class HardwareWidget(QWidget):
         except Exception as e:
             log.append(f"\n--- generation failed: {e} ---\n")
             self.status.setText(f"Status: dataset generation failed - {e}")
+
+    def _connect_mda_completion_events(self):
+        """Connect completion handling once for the active MDA event source."""
+        events = self.core.mda.events
+        if events is self._mda_completion_events:
+            return
+        if self._mda_completion_events is not None:
+            try:
+                self._mda_completion_events.sequenceFinished.disconnect(
+                    self._on_raman_mda_finished
+                )
+                self._mda_completion_events.sequenceCanceled.disconnect(
+                    self._on_raman_mda_canceled
+                )
+            except Exception:
+                pass
+        events.sequenceCanceled.connect(self._on_raman_mda_canceled)
+        events.sequenceFinished.connect(self._on_raman_mda_finished)
+        self._mda_completion_events = events
+
+    def _on_raman_mda_canceled(self, _sequence):
+        """Remember cancellation before the ensuing sequenceFinished signal."""
+        if self._raman_mda_pending:
+            self._raman_mda_canceled = True
+
+    def _on_raman_mda_finished(self, _sequence):
+        """Generate the just-finished Raman run when the user opted in."""
+        if not self._raman_mda_pending:
+            return
+
+        writer = self._raman_mda_writer
+        batch = self._raman_mda_batch
+        has_raman = self._raman_mda_has_raman
+        self._raman_mda_pending = False
+        self._raman_mda_writer = None
+
+        reason = "canceled" if self._raman_mda_canceled else "completed"
+        self._raman_mda_canceled = False
+        status = getattr(self.core.mda, "status", None)
+        if callable(status):
+            finish_reason = getattr(status(), "finish_reason", None)
+            if finish_reason is not None:
+                reason = str(finish_reason)
+        if reason != "completed":
+            suffix = (
+                " -- automatic dataset generation skipped"
+                if self.auto_dataset_check.isChecked() else ""
+            )
+            self.status.setText(f"Status: MDA {reason}{suffix}")
+            return
+
+        if not self.auto_dataset_check.isChecked():
+            self.status.setText("Status: MDA finished OK")
+            return
+
+        if not has_raman:
+            self.status.setText(
+                "Status: Raman-free MDA finished -- automatic dataset "
+                "generation skipped (no Raman spectra)"
+            )
+            return
+
+        run_dir = getattr(writer, "_path", None)
+        if run_dir is None:
+            self.status.setText(
+                "Status: MDA finished -- automatic dataset generation failed "
+                "(run folder unavailable)"
+            )
+            return
+
+        self._generate_dataset(str(run_dir), batch)
 
     
     def browse_px2stage_ds(self):
@@ -3090,9 +3198,34 @@ class HardwareWidget(QWidget):
         batch = self.selection_results.get(
             "batch", self.sel_batch_combo.currentText() == "True"
         )
+
+        try:
+            z_relative = self._parse_float_list(
+                self.mda_zrel_input.text(), "Z relative"
+            )
+            raman_z_indices = _parse_raman_z_indices(
+                self.mda_rz_input.text()
+            )
+        except ValueError as e:
+            self.status.setText(f"Status: {e}")
+            return
+
+        raman_enabled = bool(raman_z_indices)
+        if not raman_enabled and not _raman_free_autofocus_allowed(
+            autofocus_enabled, autofocus_object
+        ):
+            self.status.setText(
+                "Status: Raman-free MDA requires Software or None autofocus"
+            )
+            return
+
         sq_size = float(self.sel_sqsize_input.value())
         sq_n = int(self.sel_sqn_input.value())
-        if batch and self._make_point_transformer(sq_size, sq_n).multiplier < 2:
+        if (
+            raman_enabled
+            and batch
+            and self._make_point_transformer(sq_size, sq_n).multiplier < 2
+        ):
             self.status.setText(
                 "Status: batch mode needs a pattern with >= 2 points "
                 "(increase N)"
@@ -3121,17 +3254,6 @@ class HardwareWidget(QWidget):
         # print(circle_center)
         circle_radius = int(self.sel_r_input.value())
         # print(circle_radius)
-
-        try:
-            z_relative = self._parse_float_list(
-                self.mda_zrel_input.text(), "Z relative"
-            )
-            raman_z_indices = self._parse_int_list(
-                self.mda_rz_input.text(), "Raman z indices"
-            )
-        except ValueError as e:
-            self.status.setText(f"Status: {e}")
-            return
 
         extra_channels = []
         seen = set()
@@ -3200,22 +3322,30 @@ class HardwareWidget(QWidget):
                 self.mda_writer = RamanTiffAndNumpyWriter(out_dir)
                 engine.aiming_sources = sources
 
-                point_transformer = self._make_point_transformer(sq_size, sq_n)
-
-                if batch:
-                    final_seq = set_up_new_seq(
-                        self.main_window, point_transformer, engine,
-                        seq=new_seq, total_exposure=total_exp,
-                        batch=batch, z_plan="middle",
+                if raman_enabled:
+                    point_transformer = self._make_point_transformer(
+                        sq_size, sq_n
                     )
+                    if batch:
+                        final_seq = set_up_new_seq(
+                            self.main_window, point_transformer, engine,
+                            seq=new_seq, total_exposure=total_exp,
+                            batch=batch, z_plan="middle",
+                        )
+                    else:
+                        final_seq = set_up_new_seq(
+                            self.main_window, point_transformer, engine,
+                            seq=new_seq,
+                            total_exposure=(
+                                total_exp * point_transformer.multiplier
+                            ),
+                            batch=batch, z_plan="middle",
+                        )
                 else:
-                    final_seq = set_up_new_seq(
-                        self.main_window, point_transformer, engine,
-                        seq=new_seq,
-                        total_exposure=(
-                            total_exp * point_transformer.multiplier
-                        ),
-                        batch=batch, z_plan="middle",
+                    metadata = dict(new_seq.metadata)
+                    metadata.pop("raman", None)
+                    final_seq = new_seq.replace(
+                        metadata=metadata,
                     )
 
                 time_interval = _dt.timedelta(seconds=interval)
@@ -3252,9 +3382,9 @@ class HardwareWidget(QWidget):
                     channels=final_seq.channels + extra_channel_objs,
                 )
 
-                if "raman" in final_seq.metadata:
+                if raman_enabled and "raman" in final_seq.metadata:
                     final_seq.metadata["raman"]["z"] = raman_z_indices
-                else:
+                elif raman_enabled:
                     print(
                         "[warn] final_seq.metadata has no 'raman' key; "
                         "skipping raman['z']"
@@ -3274,11 +3404,20 @@ class HardwareWidget(QWidget):
                     f"[debug] engine._autofocus={engine._autofocus}, "
                     f"engine._segment_and_track={engine._segment_and_track}"
                 )
+                self._connect_mda_completion_events()
+                self._raman_mda_pending = True
+                self._raman_mda_canceled = False
+                self._raman_mda_writer = self.mda_writer
+                self._raman_mda_batch = batch
+                self._raman_mda_has_raman = raman_enabled
                 self.core.run_mda(final_seq)
 
             log.append("\n--- MDA started ---\n")
-            self.status.setText("Status: Raman MDA started OK")
+            mode = "Raman MDA" if raman_enabled else "Raman-free MDA"
+            self.status.setText(f"Status: {mode} started OK")
         except Exception as e:
+            self._raman_mda_pending = False
+            self._raman_mda_writer = None
             log.append(f"\n--- MDA failed: {e} ---\n")
             self.status.setText(f"Status: MDA failed -- {e}")
 

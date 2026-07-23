@@ -328,7 +328,8 @@ HELP = {
     ),
     "mda_rz_input": (
         "0-based indices into the Z list where Raman is requested. Every "
-        "index must exist (two Z values -> valid indices 0 and 1)."
+        "index must exist (two Z values -> valid indices 0 and 1). Enter "
+        "None or Off to skip Raman spectra; use Software or None autofocus."
     ),
     "mda_add_channel_btn": (
         "Add any Micro-Manager channel (incl. BF) to the sequence. Duplicates "
@@ -341,6 +342,11 @@ HELP = {
     "stop_mda_btn": (
         "Request MDA cancellation and stop sequence acquisition; the current "
         "hardware event may finish before exit."
+    ),
+    "auto_dataset_check": (
+        "After a Raman MDA completes successfully, convert its saved run folder "
+        "to Zarr and a pickled spectra table automatically. Canceled, errored, "
+        "and Raman-free runs are skipped."
     ),
     "gen_dataset_btn": (
         "Load a completed run directory (using the current batch value) and "
