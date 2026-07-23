@@ -1,7 +1,10 @@
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
+from qtpy.QtCore import QEvent
+from qtpy.QtWidgets import QMessageBox
 from napari_raman_widget.widget import (
     HardwareWidget,
     _parse_raman_z_indices,
@@ -38,6 +41,79 @@ class TestRamanFreeAutofocus(unittest.TestCase):
                 self.assertFalse(
                     _raman_free_autofocus_allowed(True, autofocus_object)
                 )
+
+
+class TestAutomaticHardwareDisconnect(unittest.TestCase):
+    def test_disconnects_connected_hardware_on_shutdown(self):
+        for core, collector in ((object(), None), (None, object())):
+            with self.subTest(core=core, collector=collector):
+                disconnected = []
+                widget = SimpleNamespace(
+                    core=core,
+                    collector=collector,
+                    disconnect=lambda: disconnected.append(True),
+                )
+
+                HardwareWidget._disconnect_on_shutdown(widget)
+
+                self.assertEqual(disconnected, [True])
+
+    def test_does_nothing_when_already_disconnected(self):
+        disconnected = []
+        widget = SimpleNamespace(
+            core=None,
+            collector=None,
+            disconnect=lambda: disconnected.append(True),
+        )
+
+        HardwareWidget._disconnect_on_shutdown(widget)
+
+        self.assertEqual(disconnected, [])
+
+    def test_close_prompt_can_cancel_shutdown(self):
+        window = object()
+        disconnected = []
+        event = SimpleNamespace(
+            type=lambda: QEvent.Close,
+            ignore=lambda: setattr(event, "ignored", True),
+            ignored=False,
+        )
+        widget = SimpleNamespace(
+            _napari_window=window,
+            core=object(),
+            collector=None,
+            disconnect=lambda: disconnected.append(True),
+        )
+
+        with patch(
+            "napari_raman_widget.widget.QMessageBox.question",
+            return_value=QMessageBox.No,
+        ):
+            handled = HardwareWidget.eventFilter(widget, window, event)
+
+        self.assertTrue(handled)
+        self.assertTrue(event.ignored)
+        self.assertEqual(disconnected, [])
+
+    def test_confirming_close_disconnects_and_allows_shutdown(self):
+        window = object()
+        disconnected = []
+        event = SimpleNamespace(type=lambda: QEvent.Close)
+        widget = SimpleNamespace(
+            _napari_window=window,
+            core=None,
+            collector=object(),
+            disconnect=lambda: disconnected.append(True),
+        )
+
+        with patch(
+            "napari_raman_widget.widget.QMessageBox.question",
+            return_value=QMessageBox.Yes,
+        ):
+            handled = HardwareWidget.eventFilter(widget, window, event)
+
+        self.assertFalse(handled)
+        self.assertEqual(disconnected, [True])
 
 
 class _FakeStatusLabel:

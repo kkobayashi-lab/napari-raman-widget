@@ -7,12 +7,12 @@ from pathlib import Path
 import xarray as xr
 import napari
 import numpy as np
-from qtpy.QtCore import Qt, QTimer, QUrl
+from qtpy.QtCore import QEvent, Qt, QTimer, QUrl
 from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QScrollArea, QSpinBox, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget, QMessageBox
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QSpinBox,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QMessageBox
 )
 from .field_help import apply_tooltips
 from .log_window import LogWindow, _StdoutRedirector
@@ -1241,6 +1241,12 @@ class HardwareWidget(QWidget):
         self._plot_windows = []
         # attach hover help text to every field
         apply_tooltips(self)
+        self._napari_window = getattr(self.viewer.window, "_qt_window", None)
+        if self._napari_window is not None:
+            self._napari_window.installEventFilter(self)
+        QApplication.instance().aboutToQuit.connect(
+            self._disconnect_on_shutdown
+        )
         # Temporarily disable the napari widget's live X/Y polling.
         # self._pos_timer = QTimer(self)
         # self._pos_timer.setInterval(500)  # ms
@@ -2266,6 +2272,31 @@ class HardwareWidget(QWidget):
         self.connect_btn.setEnabled(True)
         self.disconnect_btn.setEnabled(False)
         self.reload_tf_btn.setEnabled(False)
+
+    def _disconnect_on_shutdown(self):
+        if self.core is not None or self.collector is not None:
+            self.disconnect()
+
+    def eventFilter(self, watched, event):
+        if (
+            watched is self._napari_window
+            and event.type() == QEvent.Close
+            and (self.core is not None or self.collector is not None)
+        ):
+            reply = QMessageBox.question(
+                self,
+                "Hardware connected",
+                "Hardware is still connected. Close napari and disconnect it?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return True
+            self.disconnect()
+            return False
+        return super().eventFilter(watched, event)
+
     # -------- raman collection --------
     def collect_raman(self):
         if self.collector is None or self.daq is None:
