@@ -323,12 +323,15 @@ Repeats (points per position) & 2; 2--1000 & Identical points at each stage posi
 minimum two is required by the DAQ.\\
 Grid details & button & Shows X/Y dimensions, total stage positions, total acquisition
 points including repeats, spans, and resulting spacing without moving the stage.\\
-Tilt correction & off & Fits a plane through focused XYZ references and writes the
+Tilt correction & off & Fits a centered/scaled 2D Vandermonde surface through focused
+XYZ references and writes the
 predicted Z into every generated stage position instead of using the sequence's
 default Z.\\
-Tilt reference table & empty; editable X, Y, Focused Z & At least three non-collinear
-references are required. Four corners are recommended so the least-squares fit has
-redundancy and reports a meaningful residual.\\
+Vandermonde degree & 1; range 1--3 & Degree 1 is planar and requires at least 3
+references; degree 2 models curvature and requires 6; degree 3 requires 10. More
+than the minimum is recommended.\\
+Tilt reference table & empty; editable X, Y, Focused Z & References must be
+well-distributed across X and Y so they constrain every polynomial term.\\
 Capture current XYZ & button & After moving to a grid location and focusing it,
 adds the current stage X, Y, and Z to the reference table.\\
 \endfieldtable
@@ -336,19 +339,19 @@ adds the current stage X, Y, and Z to the reference table.\\
 \section*{Tilt-correction workflow}
 \begin{enumerate}
   \item Define the grid bounds and sampling.
-  \item Enable \ui{Correct sample tilt with a fitted Z plane}.
+  \item Enable \ui{Correct sample tilt with a fitted Z surface} and select the
+  Vandermonde degree.
   \item Move to a corner or other well-separated grid location and focus Z.
-  \item Click \ui{Capture current XYZ}; repeat for at least three non-collinear
-  locations. Four corners are recommended.
-  \item Inspect the fitted X/Y slopes and RMSE below the table. Table values can
-  be edited manually.
+  \item Click \ui{Capture current XYZ}; repeat at well-distributed locations.
+  Degree 1 needs at least 3 references, degree 2 needs 6, and degree 3 needs 10.
+  \item Inspect the fit RMSE below the table. Table values can be edited manually.
   \item For a centered grid, return the stage to the intended grid center, then
   click \ui{Generate grid}.
 \end{enumerate}
-The fitted model is a plane,
-\code{z = a(x-x0) + b(y-y0) + c}. The predicted Z is stored separately at every
-grid position. Collinear references are rejected because they cannot determine a
-two-dimensional plane.
+The fitted model contains all two-dimensional polynomial terms through the selected
+total degree. X and Y are centered and scaled before fitting. The predicted Z is
+stored separately at every grid position. Reference layouts that do not constrain
+the selected degree are rejected.
 
 \ui{Generate grid} stops live mode, prepares the napari-micromanager MDA sequence,
 builds the stage grid, and prepares \code{sources}, \code{autofocus\_p}, and
@@ -373,7 +376,7 @@ X/Y points & Exact axis sizes when point-count sampling is selected.\\
 Scan order & Raster or axis-selected snake traversal for all channels.\\
 Repeats & Identical aiming points carried by every position.\\
 Grid details & Calculates the current grid size and sampling summary.\\
-Tilt correction & Fits focused XYZ references and predicts Z across the grid.\\
+Tilt correction & Fits a degree 1--3 Vandermonde Z surface across the grid.\\
 Generate grid & Creates positions and selection results for Raman MDA.\\
 \bottomrule\end{longtable}
 

@@ -48,6 +48,16 @@ def _raman_free_autofocus_allowed(autofocus_enabled, autofocus_object):
     return not autofocus_enabled or autofocus_object == "software"
 
 
+def _spatial_yx(point):
+    """Return the final Y/X coordinates from one napari point."""
+    point = np.asarray(point)
+    if point.ndim != 1 or point.size < 2:
+        raise ValueError(
+            "Expected one napari point with at least Y and X coordinates"
+        )
+    return point[-2:]
+
+
 class HardwareWidget(QWidget):
     def __init__(self, viewer: napari.Viewer):
         super().__init__()
@@ -663,19 +673,28 @@ class HardwareWidget(QWidget):
         grid_layout.addLayout(preview_row)
 
         self.grid_tilt_check = QCheckBox(
-            "Correct sample tilt with a fitted Z plane"
+            "Correct sample tilt with a fitted Z surface"
         )
         self.grid_tilt_check.setChecked(False)
         grid_layout.addWidget(self.grid_tilt_check)
 
         self._grid_tilt_help = QLabel(
             "Move to a grid location, focus Z, then capture XYZ. Use at least "
-            "3 non-collinear points (4 corners recommended). Table values are "
-            "editable. For centered grids, return to the intended center before "
-            "generating."
+            "3, 6, or 10 well-distributed points for degree 1, 2, or 3. Table "
+            "values are editable. For centered grids, return to the intended "
+            "center before generating."
         )
         self._grid_tilt_help.setWordWrap(True)
         grid_layout.addWidget(self._grid_tilt_help)
+
+        tilt_degree_row = QHBoxLayout()
+        self._grid_tilt_degree_label = QLabel("Vandermonde degree:")
+        tilt_degree_row.addWidget(self._grid_tilt_degree_label)
+        self.grid_tilt_degree_input = QSpinBox()
+        self.grid_tilt_degree_input.setRange(1, 3)
+        self.grid_tilt_degree_input.setValue(1)
+        tilt_degree_row.addWidget(self.grid_tilt_degree_input)
+        grid_layout.addLayout(tilt_degree_row)
 
         self.grid_tilt_table = QTableWidget(0, 3)
         self.grid_tilt_table.setHorizontalHeaderLabels(["X", "Y", "Focused Z"])
@@ -699,7 +718,9 @@ class HardwareWidget(QWidget):
         grid_layout.addWidget(self.grid_tilt_fit_label)
 
         self._grid_tilt_widgets = [
-            self._grid_tilt_help, self.grid_tilt_table,
+            self._grid_tilt_help,
+            self._grid_tilt_degree_label, self.grid_tilt_degree_input,
+            self.grid_tilt_table,
             self.grid_tilt_capture_btn, self.grid_tilt_add_btn,
             self.grid_tilt_remove_btn, self.grid_tilt_clear_btn,
             self.grid_tilt_fit_label,
@@ -718,6 +739,9 @@ class HardwareWidget(QWidget):
             self._clear_grid_tilt_rows
         )
         self.grid_tilt_table.itemChanged.connect(
+            self._update_grid_tilt_fit_preview
+        )
+        self.grid_tilt_degree_input.valueChanged.connect(
             self._update_grid_tilt_fit_preview
         )
         self._toggle_grid_tilt_fields(False)
@@ -1360,9 +1384,24 @@ class HardwareWidget(QWidget):
 
     def _pt_to_volts(self, pt):
         X, Y = self._get_image_xy()
+        pt = _spatial_yx(pt)
         return self.transformer.BF_to_volts(
             (pt.reshape(1, -1)) / np.array([Y, X]),
             max_volts=1.6,
+        )
+
+    def _find_points_layer(self):
+        """Return the active Points layer, or the most recent one."""
+        active = self.viewer.layers.selection.active
+        if isinstance(active, napari.layers.Points):
+            return active
+        return next(
+            (
+                layer
+                for layer in reversed(self.viewer.layers)
+                if isinstance(layer, napari.layers.Points)
+            ),
+            None,
         )
 
     def _parse_float_list(self, text, label="list"):
@@ -1579,20 +1618,23 @@ class HardwareWidget(QWidget):
         return np.asarray(points, dtype=float)
 
     def _update_grid_tilt_fit_preview(self, _item=None):
-        """Fit the current reference table and report plane slopes/RMSE."""
+        """Fit the current reference table and report degree-aware RMSE."""
         try:
             points = self._grid_tilt_reference_points()
-            if len(points) < 3:
+            degree = int(self.grid_tilt_degree_input.value())
+            required = (degree + 1) * (degree + 2) // 2
+            if len(points) < required:
                 self.grid_tilt_fit_label.setText(
-                    f"Tilt fit: need at least 3 points ({len(points)} defined)"
+                    f"Degree {degree} fit: need at least {required} points "
+                    f"({len(points)} defined)"
                 )
                 return
-            from cns_control.utils import _fit_tilt_plane
-            _origin, coefficients, rmse = _fit_tilt_plane(points)
+            from cns_control.utils import _fit_tilt_surface
+            _origin, _scale, _coefficients, rmse = _fit_tilt_surface(
+                points, degree
+            )
             self.grid_tilt_fit_label.setText(
-                "Tilt fit: "
-                f"dZ/dX {coefficients[0]:.6f}, "
-                f"dZ/dY {coefficients[1]:.6f}; RMSE {rmse:.4f} um"
+                f"Degree {degree} tilt fit: RMSE {rmse:.4f} um"
             )
         except Exception as e:
             self.grid_tilt_fit_label.setText(f"Tilt fit: {e}")
@@ -1914,8 +1956,13 @@ class HardwareWidget(QWidget):
             pkl_path = str(dataset_dir / f"df_{run_name}.pkl")
 
             with _StdoutRedirector(log):
+                wavenumbers = (
+                    self.collector.get_wavenumbers()
+                    if self.collector is not None else None
+                )
                 df, df_locs, da = load_experiment(
                     run_dir, zarr_output=zarr_path, batch=batch,
+                    wavenumbers=wavenumbers,
                 )
                 df.to_pickle(pkl_path)
                 print(f"Saved DataFrame to {pkl_path}")
@@ -2306,16 +2353,7 @@ class HardwareWidget(QWidget):
             self.status.setText("Status: no transformer loaded")
             return
 
-        points_layer = self.viewer.layers.selection.active
-        if not isinstance(points_layer, napari.layers.Points):
-            points_layer = next(
-                (
-                    layer
-                    for layer in reversed(self.viewer.layers)
-                    if isinstance(layer, napari.layers.Points)
-                ),
-                None,
-            )
+        points_layer = self._find_points_layer()
         if points_layer is None:
             self.status.setText("Status: no Points layer available")
             return
@@ -2336,11 +2374,12 @@ class HardwareWidget(QWidget):
             self.daq.galvo.stop()
             self.daq.galvo.start()
 
-            pt = points[-1, -2:]
+            pt = _spatial_yx(points[-1])
             volts = self._pt_to_volts(pt)
             spec = self.collector.collect_spectra_pts(
                 np.tile(volts[0], (N, 1)), exposure
             )
+            wavenumbers = self.collector.get_wavenumbers(spec.shape[-1])
         except Exception as e:
             self.status.setText(f"Status: collection failed -- {e}")
             return
@@ -2353,6 +2392,10 @@ class HardwareWidget(QWidget):
                 if not save_name.lower().endswith(".npy"):
                     save_name += ".npy"
                 np.save(save_name, spec)
+                axis_name = str(Path(save_name).with_suffix("")) + (
+                    "_wavenumbers.npy"
+                )
+                np.save(axis_name, wavenumbers)
                 saved_msg = f" -> {save_name}"
                 print(f"Saved spectrum to {save_name}")
             except Exception as e:
@@ -2360,7 +2403,9 @@ class HardwareWidget(QWidget):
 
         plot_error = None
         try:
-            win = SpectrumWindow(spec, title="Raman spectra")
+            win = SpectrumWindow(
+                spec, wavenumbers=wavenumbers, title="Raman spectra"
+            )
             win.show()
             self._plot_windows.append(win)
         except Exception as e:
@@ -2490,8 +2535,15 @@ class HardwareWidget(QWidget):
         if self.transformer is None:
             self.status.setText("Status: no transformer loaded")
             return
-        if len(self.viewer.layers) == 0:
-            self.status.setText("Status: no layer to read point from")
+        points_layer = self._find_points_layer()
+        if points_layer is None:
+            self.status.setText("Status: no Points layer available")
+            return
+        points = np.asarray(points_layer.data)
+        if len(points) == 0:
+            self.status.setText(
+                f"Status: Points layer '{points_layer.name}' is empty"
+            )
             return
 
         name = self.ref_name_input.text().strip()
@@ -2514,7 +2566,7 @@ class HardwareWidget(QWidget):
         try:
             from cns_control.autofocus import autofocus_w_bkd
 
-            pt = self.viewer.layers[-1].data[0, -2:]
+            pt = _spatial_yx(points[-1])
             volts = self._pt_to_volts(pt)
             volts_tiled = np.array([volts[0] for _ in range(N)])
 
@@ -2528,9 +2580,13 @@ class HardwareWidget(QWidget):
             self.core.setZPosition(focusZ)
 
             zs = np.linspace(-search_range, search_range, search_pts)
+            wavenumbers = self.collector.get_wavenumbers(
+                all_raman.shape[-1]
+            )
 
             win = ReferenceSpectraWindow(
-                all_raman, zs, title=f"Reference spectra: {name}"
+                all_raman, zs, wavenumbers=wavenumbers,
+                title=f"Reference spectra: {name}",
             )
             win.show()
             self._plot_windows.append(win)
@@ -2540,14 +2596,18 @@ class HardwareWidget(QWidget):
 
             ds = xr.Dataset(
                 {
-                    "spec": (["z", "n", "pixel"], all_raman),
+                    "spec": (["z", "n", "wavenumber"], all_raman),
                 },
                 coords={
                     "z":        ("z",  zs),
+                    "wavenumber": ("wavenumber", wavenumbers),
                     "x":        pt[1],
                     "y":        pt[0],
                     "exposure": exp,
                 },
+            )
+            ds["wavenumber"].attrs.update(
+                units="cm^-1", long_name="Raman shift"
             )
 
             zarr_path = f"reference/{name}_{uid}.zarr"
@@ -2691,6 +2751,9 @@ class HardwareWidget(QWidget):
                 self.core.setConfig("Channel", "BF")
                 self.core.setExposure(10)
                 end_BF = self.core.snap()
+                wavenumbers = self.collector.get_wavenumbers(
+                    all_specs[0].shape[-1]
+                )
 
                 if do_zscan:
                     specs_stack = np.stack(all_specs, axis=0)
@@ -2703,7 +2766,7 @@ class HardwareWidget(QWidget):
                             grid, dims=("idx", "xy")
                         ),
                         "specs": xr.DataArray(
-                            specs_stack, dims=("z", "idx", "spec_dim")
+                            specs_stack, dims=("z", "idx", "wavenumber")
                         ),
                         "z_range": xr.DataArray(
                             z_range, dims=("z",)
@@ -2717,7 +2780,9 @@ class HardwareWidget(QWidget):
                     for ch, img in extra_imgs.items():
                         data_vars[ch] = xr.DataArray(img, dims=("Y", "X"))
 
-                    ds = xr.Dataset(data_vars)
+                    ds = xr.Dataset(
+                        data_vars, coords={"wavenumber": wavenumbers}
+                    )
                     ds.attrs["time"] = str(datetime.now())
                     ds.attrs["raman_exposure_ms"] = exp
                     ds.attrs["z_offset"] = z_offset
@@ -2739,7 +2804,7 @@ class HardwareWidget(QWidget):
                             grid, dims=("idx", "volt")
                         ),
                         "specs": xr.DataArray(
-                            all_specs[0], dims=("N", "spec_dim")
+                            all_specs[0], dims=("N", "wavenumber")
                         ),
                         "BF": xr.DataArray(BF, dims=("Y", "X")),
                         "end_BF": xr.DataArray(end_BF, dims=("Y", "X")),
@@ -2747,7 +2812,9 @@ class HardwareWidget(QWidget):
                     for ch, img in extra_imgs.items():
                         data_vars[ch] = xr.DataArray(img, dims=("Y", "X"))
 
-                    ds = xr.Dataset(data_vars)
+                    ds = xr.Dataset(
+                        data_vars, coords={"wavenumber": wavenumbers}
+                    )
                     ds.attrs["time"] = str(datetime.now())
                     ds.attrs["raman_exposure_ms"] = exp
                     ds.attrs["channel_exposures_ms"] = {
@@ -2757,6 +2824,9 @@ class HardwareWidget(QWidget):
                     uid = uuid.uuid4().hex[:8]
                     zarr_name = f"grid_scan_data_{file_name}_{uid}.zarr"
 
+                ds["wavenumber"].attrs.update(
+                    units="cm^-1", long_name="Raman shift"
+                )
                 ds.to_zarr(zarr_name)
                 print(f"Saved grid scan to {zarr_name}")
 
@@ -3076,12 +3146,13 @@ class HardwareWidget(QWidget):
         sq_n = int(self.sel_sqn_input.value())
         autofocus_object = self.grid_af_combo.currentText()
         snake_axis = self.grid_scan_order_combo.currentData()
+        tilt_degree = int(self.grid_tilt_degree_input.value())
         tilt_reference_points = None
         if self.grid_tilt_check.isChecked():
             try:
                 tilt_reference_points = self._grid_tilt_reference_points()
-                from cns_control.utils import _fit_tilt_plane
-                _fit_tilt_plane(tilt_reference_points)
+                from cns_control.utils import _fit_tilt_surface
+                _fit_tilt_surface(tilt_reference_points, tilt_degree)
             except Exception as e:
                 self.status.setText(f"Status: {e}")
                 return
@@ -3129,6 +3200,7 @@ class HardwareWidget(QWidget):
                     corner_positions=corner_positions,
                     x_count=x_count, y_count=y_count,
                     tilt_reference_points=tilt_reference_points,
+                    tilt_degree=tilt_degree,
                     snake_axis=snake_axis,
                     autofocus_object=autofocus_object,
                 )
@@ -3139,6 +3211,7 @@ class HardwareWidget(QWidget):
                 "new_seq": new_seq,
                 "autofocus_object": autofocus_object,
                 "tilt_reference_points": tilt_reference_points,
+                "tilt_degree": tilt_degree,
                 "snake_axis": snake_axis,
                 "batch": False,
             }
@@ -3149,12 +3222,16 @@ class HardwareWidget(QWidget):
                 ready_detail = "using Raman placeholders"
             else:
                 ready_detail = "after Raman pre-scan"
+            z_detail = (
+                f"degree {tilt_degree} surface"
+                if tilt_reference_points is not None else "default"
+            )
             log.append(f"\n--- grid ready {ready_detail} ---\n")
             self.status.setText(
                 f"Status: grid ready {ready_detail} ({n_pos} positions, "
                 f"{repeats} pts each at ({fov_x},{fov_y}), "
                 f"{self.grid_scan_order_combo.currentText()}, "
-                f"Z={'tilt plane' if tilt_reference_points is not None else 'default'}"
+                f"Z={z_detail}"
                 ") -- then Run Raman MDA"
             )
         except Exception as e:
@@ -3350,7 +3427,10 @@ class HardwareWidget(QWidget):
 
                 self.core.register_mda_engine(engine)
 
-                self.mda_writer = RamanTiffAndNumpyWriter(out_dir)
+                self.mda_writer = RamanTiffAndNumpyWriter(
+                    out_dir,
+                    wavenumbers=self.collector.get_wavenumbers(),
+                )
                 engine.aiming_sources = sources
 
                 if raman_enabled:

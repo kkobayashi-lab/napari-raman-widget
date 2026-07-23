@@ -9,7 +9,9 @@ import tifffile
 import xarray as xr
 
 
-def load_experiment(path, zarr_output="image_data.zarr", batch=None):
+def load_experiment(
+    path, zarr_output="image_data.zarr", batch=None, wavenumbers=None
+):
     """Load raman spectra, locations, metadata, and tiff images from an MDA run.
 
     Parameters
@@ -20,6 +22,9 @@ def load_experiment(path, zarr_output="image_data.zarr", batch=None):
         Where to save the assembled image zarr.
     batch : bool or None
         Whether the raman data is batch mode. Auto-detected if None.
+    wavenumbers : array-like or None
+        Optional current LightField relative-wavenumber calibration. A saved
+        ``raman/wavenumbers.npy`` axis takes precedence when present.
 
     Returns
     -------
@@ -46,7 +51,9 @@ def load_experiment(path, zarr_output="image_data.zarr", batch=None):
     # -- RAMAN --
     df, df_locs, max_p = None, None, None
     try:
-        df, df_locs, max_p = _load_raman(raman_path, img_x, img_y, batch)
+        df, df_locs, max_p = _load_raman(
+            raman_path, img_x, img_y, batch, wavenumbers
+        )
     except Exception as e:
         warnings.warn(
             f"Raman loading failed ({type(e).__name__}: {e}). "
@@ -125,7 +132,7 @@ def load_experiment(path, zarr_output="image_data.zarr", batch=None):
     return df, df_locs, da
 
 
-def _load_raman(raman_path, img_x, img_y, batch):
+def _load_raman(raman_path, img_x, img_y, batch, wavenumbers=None):
     """Assemble raman spectra + locations + times. Returns (df, df_locs, max_p)."""
     data_pat = re.compile(r"raman_p(\d+)_t(\d+)_z(\d+)_data\.npy")
     loc_pat = re.compile(r"raman_p(\d+)_t(\d+)_z(\d+)_locations\.npy")
@@ -138,6 +145,9 @@ def _load_raman(raman_path, img_x, img_y, batch):
     if batch is None:
         sample = np.load(data_files[0])
         batch = sample.squeeze().ndim == 1
+    saved_axis = raman_path / "wavenumbers.npy"
+    if saved_axis.exists():
+        wavenumbers = np.load(saved_axis)
     records, index = [], []
     for file in data_files:
         p, t, z = map(int, data_pat.search(file.name).groups())
@@ -149,8 +159,19 @@ def _load_raman(raman_path, img_x, img_y, batch):
             for pt, acc_spec in enumerate(spec):
                 records.append(acc_spec)
                 index.append((t, p, z, pt))
+    spectrum_length = len(records[0])
+    if wavenumbers is not None:
+        wavenumbers = np.asarray(wavenumbers, dtype=float)
+        if wavenumbers.ndim != 1 or len(wavenumbers) != spectrum_length:
+            raise ValueError(
+                "Wavenumber calibration length does not match Raman spectra"
+            )
+        columns = wavenumbers
+    else:
+        columns = None
     df = pd.DataFrame(
         records,
+        columns=columns,
         index=pd.MultiIndex.from_tuples(index, names=["t", "p", "z", "pt"]),
     )
     records_locs, index_locs = [], []
@@ -191,5 +212,8 @@ def _load_raman(raman_path, img_x, img_y, batch):
             meta = json.load(f)
         time_dict[(t, p, z)] = pd.to_datetime(meta["time"])
     df["time"] = df.index.droplevel("pt").map(time_dict)
+    if wavenumbers is not None:
+        df.attrs["spectral_axis"] = "wavenumber"
+        df.attrs["spectral_axis_units"] = "cm^-1"
     max_p = int(df.index.get_level_values("p").max())
     return df, df_locs, max_p

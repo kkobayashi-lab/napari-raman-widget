@@ -3,12 +3,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 from qtpy.QtCore import QEvent
 from qtpy.QtWidgets import QMessageBox
 from napari_raman_widget.widget import (
     HardwareWidget,
     _parse_raman_z_indices,
     _raman_free_autofocus_allowed,
+    _spatial_yx,
 )
 
 
@@ -26,6 +28,17 @@ class TestRamanZIndices(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "Raman z indices"):
                     _parse_raman_z_indices(value)
+
+
+class TestSpatialPointExtraction(unittest.TestCase):
+    def test_uses_final_yx_coordinates_from_nd_point(self):
+        point = np.arange(8)
+
+        np.testing.assert_array_equal(_spatial_yx(point), [6, 7])
+
+    def test_rejects_non_point_arrays(self):
+        with self.assertRaisesRegex(ValueError, "one napari point"):
+            _spatial_yx(np.zeros((2, 4)))
 
 
 class TestRamanFreeAutofocus(unittest.TestCase):

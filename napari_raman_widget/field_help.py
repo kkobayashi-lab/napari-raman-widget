@@ -193,8 +193,13 @@ HELP = {
         "acquisition points including repeats."
     ),
     "grid_tilt_check": (
-        "Replace each generated position's default Z with a least-squares "
-        "plane fitted to focused XYZ references."
+        "Replace each generated position's default Z with a centered/scaled "
+        "2D Vandermonde surface fitted to focused XYZ references."
+    ),
+    "grid_tilt_degree_input": (
+        "Total degree of the centered/scaled 2D Vandermonde Z fit. Degree 1 "
+        "requires at least 3 references, degree 2 requires 6, and degree 3 "
+        "requires 10. Use the lowest degree that removes systematic residuals."
     ),
     "grid_tilt_capture_btn": (
         "After moving to a grid location and focusing it, capture the current "

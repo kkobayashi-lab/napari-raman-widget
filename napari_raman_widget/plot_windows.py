@@ -6,6 +6,26 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+RAMAN_SHIFT_LABEL = r"Raman shift (cm$^{-1}$)"
+
+
+def _spectral_axis(wavenumbers, length):
+    """Validate an optional wavenumber axis, retaining legacy pixel fallback."""
+    if wavenumbers is None:
+        return np.arange(length), "Pixel"
+    axis = np.asarray(wavenumbers, dtype=float)
+    if axis.ndim != 1 or len(axis) != length:
+        raise ValueError(
+            f"Expected {length} wavenumbers, received shape {axis.shape}"
+        )
+    return axis, RAMAN_SHIFT_LABEL
+
+
+def _dataset_wavenumbers(ds, length):
+    if "wavenumber" not in ds.coords:
+        return _spectral_axis(None, length)
+    return _spectral_axis(ds.coords["wavenumber"].values, length)
+
 
 class CalibrationPlotWindow(QMainWindow):
     """Pop-up showing max projection of calibration images with point overlay."""
@@ -48,11 +68,14 @@ class CalibrationPlotWindow(QMainWindow):
 class SpectrumWindow(QMainWindow):
     """Pop-up plot window with a toggle between mean and all-traces views."""
 
-    def __init__(self, spec, title="Spectrum"):
+    def __init__(self, spec, wavenumbers=None, title="Spectrum"):
         super().__init__()
         self.setWindowTitle(title)
         self.resize(700, 550)
         self.spec = np.asarray(spec)
+        self.x_axis, self.x_label = _spectral_axis(
+            wavenumbers, self.spec.shape[-1]
+        )
         self._show_mean = True
 
         import matplotlib
@@ -104,13 +127,16 @@ class SpectrumWindow(QMainWindow):
 
         self.ax.clear()
         if self._show_mean:
-            self.ax.plot(self.filter_mean(self.spec))
+            self.ax.plot(self.x_axis, self.filter_mean(self.spec))
         else:
             n = self.spec.shape[0]
             colors = cm.viridis(np.linspace(0, 1, n))
             for i in range(n):
-                self.ax.plot(self.spec[i], color=colors[i], linewidth=0.8)
-        self.ax.set_xlabel("Pixels")
+                self.ax.plot(
+                    self.x_axis, self.spec[i],
+                    color=colors[i], linewidth=0.8,
+                )
+        self.ax.set_xlabel(self.x_label)
         self.ax.set_ylabel("Intensity (a.u.)")
         self.ax.set_title(self.windowTitle())
         self.fig.tight_layout()
@@ -120,7 +146,9 @@ class SpectrumWindow(QMainWindow):
 class ReferenceSpectraWindow(QMainWindow):
     """Pop-up showing reference spectra colored by z, with a colorbar."""
 
-    def __init__(self, all_raman, zs, title="Reference spectra"):
+    def __init__(
+        self, all_raman, zs, wavenumbers=None, title="Reference spectra"
+    ):
         super().__init__()
         self.setWindowTitle(title)
         self.resize(800, 600)
@@ -143,15 +171,22 @@ class ReferenceSpectraWindow(QMainWindow):
         ax = self.fig.add_subplot(111)
 
         zs = np.asarray(zs)
+        all_raman = np.asarray(all_raman)
+        x_axis, x_label = _spectral_axis(
+            wavenumbers, all_raman.shape[-1]
+        )
         n = len(zs)
         norm = Normalize(vmin=float(zs.min()), vmax=float(zs.max()))
         cmap = cm.viridis
 
         for i in range(n):
             color = cmap(norm(zs[i]))
-            ax.plot(filter_mean(all_raman[i]), color=color, linewidth=0.9)
+            ax.plot(
+                x_axis, filter_mean(all_raman[i]),
+                color=color, linewidth=0.9,
+            )
 
-        ax.set_xlabel("Pixels")
+        ax.set_xlabel(x_label)
         ax.set_ylabel("Intensity (a.u.)")
         ax.set_title(title)
 
@@ -229,8 +264,9 @@ class GridScanPlotWindow(QMainWindow):
 
         ax_spec = self.fig.add_subplot(gs[1, :])
         specs = np.asarray(ds["specs"].values)
-        ax_spec.plot(specs.mean(axis=0))
-        ax_spec.set_xlabel("Pixels")
+        x_axis, x_label = _dataset_wavenumbers(ds, specs.shape[-1])
+        ax_spec.plot(x_axis, specs.mean(axis=0))
+        ax_spec.set_xlabel(x_label)
         ax_spec.set_ylabel("Mean intensity (a.u.)")
         ax_spec.set_title(f"Mean spectrum ({specs.shape[0]} points)")
 
@@ -251,6 +287,9 @@ class GridScanPlotWindow(QMainWindow):
         # Grab the data arrays we need.
         self._bf_z = np.asarray(ds["BF_z"].values)     # (n_z, Y, X)
         self._specs = np.asarray(ds["specs"].values)    # (n_z, n_pts, spec_dim)
+        self._spec_x, self._spec_x_label = _dataset_wavenumbers(
+            ds, self._specs.shape[-1]
+        )
         self._z_vals = np.asarray(ds["z_range"].values) # (n_z,)
         self._n_z = len(self._z_vals)
 
@@ -307,8 +346,8 @@ class GridScanPlotWindow(QMainWindow):
         # Spectrum (updates with slider)
         self._ax_spec = self.fig.add_subplot(gs[1, :])
         mean_spec = self._specs[0].mean(axis=0)
-        self._spec_line, = self._ax_spec.plot(mean_spec)
-        self._ax_spec.set_xlabel("Pixels")
+        self._spec_line, = self._ax_spec.plot(self._spec_x, mean_spec)
+        self._ax_spec.set_xlabel(self._spec_x_label)
         self._ax_spec.set_ylabel("Mean intensity (a.u.)")
         self._ax_spec.set_title(
             f"Mean spectrum  z={self._z_vals[0]:+.2f} um  "
@@ -336,7 +375,7 @@ class GridScanPlotWindow(QMainWindow):
         mean_spec = self._specs[idx].mean(axis=0)
         self._spec_line.set_ydata(mean_spec)
         if len(mean_spec) != len(self._spec_line.get_xdata()):
-            self._spec_line.set_xdata(np.arange(len(mean_spec)))
+            self._spec_line.set_xdata(self._spec_x)
         self._ax_spec.relim()
         self._ax_spec.autoscale_view()
         self._ax_spec.set_title(
@@ -359,6 +398,15 @@ class DatasetViewerWindow(QMainWindow):
         self.da = da
         self.bf = da.sel(c=0).values  # (t, p, z, y, x)
         self._pt_selected = 0
+        self._spec_columns = [
+            column for column in df.columns
+            if column not in {"X", "Y", "time"}
+        ]
+        axis_is_wavenumber = df.attrs.get("spectral_axis") == "wavenumber"
+        self._spec_x, self._spec_x_label = _spectral_axis(
+            self._spec_columns if axis_is_wavenumber else None,
+            len(self._spec_columns),
+        )
 
         import matplotlib
         matplotlib.use("QtAgg")
@@ -439,14 +487,14 @@ class DatasetViewerWindow(QMainWindow):
 
         # Spectrum line
         try:
-            spec0 = df.loc[t0, p0, z0, 0].values[:-3]
+            spec0 = df.loc[t0, p0, z0, 0][self._spec_columns].to_numpy()
         except KeyError:
-            spec0 = np.zeros(100)
+            spec0 = np.zeros(len(self._spec_columns))
         colors = self._pt_colors(max(n, 1))
         (self.spec_line,) = self.ax_spec.plot(
-            spec0, color=colors[0] if n else "C0"
+            self._spec_x, spec0, color=colors[0] if n else "C0"
         )
-        self.ax_spec.set_xlabel("pixel")
+        self.ax_spec.set_xlabel(self._spec_x_label)
         self.ax_spec.set_ylabel("intensity (a.u.)")
         self.ax_spec.set_title(f"pt={self._pt_selected}")
 
@@ -521,13 +569,13 @@ class DatasetViewerWindow(QMainWindow):
         t, p, z, _, _, _ = self._current_tpz()
         pt = self._pt_selected
         try:
-            y = self.df.loc[t, p, z, pt].values[:-3]
+            y = self.df.loc[t, p, z, pt][self._spec_columns].to_numpy()
             n = len(self.df.loc[t, p, z])
         except KeyError:
             return
         self.spec_line.set_ydata(y)
         if len(y) != len(self.spec_line.get_xdata()):
-            self.spec_line.set_xdata(np.arange(len(y)))
+            self.spec_line.set_xdata(self._spec_x)
         self.spec_line.set_color(self._pt_colors(n)[min(pt, n - 1)])
         self.ax_spec.relim()
         self.ax_spec.autoscale_view()
