@@ -88,9 +88,12 @@ Transformer model (.json) & blank; example \code{model\_2026-01-08.json} &
 Coordinate transformer used for bright-field pixel to Raman galvo conversion.
 Point collection, calibration, reference acquisition, mapping, and Raman MDA require it.\\
 Vandermonde model (.json) & blank; example \code{vandermonde\_model.json} &
-Pixel-to-stage model used only when cells are physically centered. Required by
-automated \ui{Center cell} and \ui{Center clicked cells}. It complements the Raman
-aiming transformer.\\
+Multi-objective pixel-to-stage model used when cells are physically centered.
+Required by automated \ui{Center cell} and \ui{Center clicked cells}. It
+complements the Raman aiming transformer.\\
+Objective index & populated after connection; read-only & Numeric state read
+directly from Micro-Manager's \code{Objective} device. The index selects the
+matching Vandermonde calibration. The widget does not command the turret.\\
 Output folder & blank = current directory & Created if needed, then made the process
 working directory during connection. Relative reference, map, model, and MDA paths
 are resolved from here. Changing the text after connection does not change directory.\\
@@ -120,6 +123,7 @@ The CFG, transformer, and Vandermonde fields point to existing input files. The
 Micro-Manager config & Hardware and device configuration file.\\
 Transformer model & Bright-field-pixel to Raman-galvo coordinate model.\\
 Vandermonde model & Image-pixel to stage-motion model for centering cells.\\
+Objective index & Read-only Vandermonde key from the objective device state.\\
 Output folder & Working directory applied when hardware connects.\\
 Center wavelength & Spectrometer center wavelength setting.\\
 Grating & Installed spectrometer grating selection.\\
@@ -301,9 +305,9 @@ mode uses the current stage position and X/Y half-ranges. Corner mode accepts ty
 coordinates or captures the current stage XY at each opposite corner.\\
 Autofocus object & None, laser, software, quartz, glass, cell & Autofocus mode attached
 to the generated positions. The choice also controls which MDA autofocus fields are visible.\\
-Grid setup channel & Raman (pre-scan), Raman (placeholder, no pre-scan), or a hardware
-channel & Controls whether grid setup runs the normal sequence, uses a hidden placeholder
-layer, or runs a one-channel hardware preview.\\
+Grid setup channel & Raman (pre-scan), Raman (compact, no pre-scan), or a hardware
+channel & Controls whether grid setup runs the normal sequence, uses compact procedural
+points without per-position napari layers, or runs a one-channel hardware preview.\\
 FOV x / FOV y (px) & 740 / 540; 0--100000 & Fixed image coordinate used at every
 field of view. Note the UI labels X then Y; internal selection receives both separately.\\
 X range / Y range (+/- um) & 100 / 100 & Half-width of the stage grid about the
@@ -367,7 +371,7 @@ are written later by \ui{Run Raman MDA} to its \ui{Writer output dir}.
 \toprule\textbf{Option} & \textbf{Brief definition}\\\midrule
 Autofocus object & Focus strategy attached to generated positions.\\
 Grid definition & Choose a current-stage-centered grid or two opposite corners.\\
-Grid setup channel & Runs a Raman pre-scan, uses placeholders without a pre-scan,
+Grid setup channel & Runs a Raman pre-scan, uses compact procedural points without a pre-scan,
 or runs a hardware-channel preview.\\
 FOV X / FOV Y & Fixed pixel target repeated at every position.\\
 X/Y range & Grid half-widths around the current stage XY in centered mode.\\
@@ -512,9 +516,16 @@ feature in each frame; skipped/NaN frames are excluded.\\
 Model file & \code{vandermonde\_model.json} & Suggested save name. A save dialog still
 asks for the final location.\\
 Fit \& save model & button & Centers image and stage coordinates, reports degree 1--3
-RMSE where possible, fits the selected degree, and saves JSON. The saved path is also
-copied into Loading's Vandermonde field for immediate center-cell use.\\
+RMSE where possible, fits the selected degree, and updates the active objective
+inside the JSON while preserving calibrations for other objectives. The saved path
+is also copied into Loading's Vandermonde field for immediate center-cell use.\\
 \endfieldtable
+
+Connect and verify the \ui{Objective index} in \ui{Loading} before opening
+\ui{Pick points}. The picker records that index, and saving is refused if the
+device index changes before the fit completes. To calibrate another objective,
+physically change objectives, verify the new index, acquire or choose its
+calibration dataset, repeat \ui{Pick points}, and save to the same JSON file.
 
 \section*{Saved output}
 The Raman acquisition is saved under
@@ -523,6 +534,7 @@ files for the run. \ui{Generate dataset} saves
 \code{<run parent>/dataset/ds\_<run>.zarr} and
 \code{<run parent>/dataset/df\_<run>.pkl}. Pixel-to-stage calibration saves the
 chosen \ui{Model file} as JSON at the location selected in the save dialog.
+Each save replaces only the active objective's entry.
 
 \section*{Options at a glance}
 \begin{longtable}{@{}p{0.31\textwidth}p{0.63\textwidth}@{}}

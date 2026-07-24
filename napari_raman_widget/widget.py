@@ -26,6 +26,7 @@ from .ui_helpers import make_collapsible
 DEFAULT_LIGHTFIELD_CONFIG = (
     r"C:\Users\spraman\Documents\LightField\Experiments\RamanConfocal.lfe"
 )
+DEFAULT_BEAM_CENTER_XY = (512.0, 512.0)
 
 
 def _parse_raman_z_indices(text):
@@ -66,7 +67,9 @@ class HardwareWidget(QWidget):
         self.collector = None
         self.daq = None
         self.transformer = None
-        self.vandermonde = None 
+        self.vandermonde = None
+        self.vandermonde_objective = None
+        self.vandermonde_path = None
         self.default_engine = None
         self.calibration_ds = None
         self.calibrator = None
@@ -84,6 +87,7 @@ class HardwareWidget(QWidget):
         self._raman_mda_has_raman = False
         self.px2stage_picker = None
         self.px2stage_xy = None
+        self.px2stage_objective = None
         self.mm_config = None
         outer = QVBoxLayout()
 
@@ -135,7 +139,7 @@ class HardwareWidget(QWidget):
         loading_layout.addWidget(QLabel("Vandermonde model (.json):"))
         vdm_row = QHBoxLayout()
         self.sel_vdm_path = QLineEdit()
-        self.sel_vdm_path.setText(r"C:\Users\spraman\Desktop\config\vandermonde_model_2026_07_20.json")
+        self.sel_vdm_path.setText(r"C:\Users\spraman\Desktop\config\2026_07_23_vandermonde_model.json")
         self.sel_vdm_path.setPlaceholderText("vandermonde_model.json")
         vdm_browse = QPushButton("...")
         vdm_browse.setFixedWidth(30)
@@ -143,6 +147,14 @@ class HardwareWidget(QWidget):
         vdm_row.addWidget(self.sel_vdm_path)
         vdm_row.addWidget(vdm_browse)
         loading_layout.addLayout(vdm_row)
+
+        objective_row = QHBoxLayout()
+        objective_row.addWidget(QLabel("Objective index:"))
+        self.objective_combo = QComboBox()
+        self.objective_combo.addItem("(connect first)")
+        self.objective_combo.setEnabled(False)
+        objective_row.addWidget(self.objective_combo)
+        loading_layout.addLayout(objective_row)
 
         loading_layout.addWidget(
             QLabel("Output folder (optional, applied on connect):")
@@ -482,7 +494,7 @@ class HardwareWidget(QWidget):
             "Raman (pre-scan)", (None, False)
         )
         self.grid_channel_combo.addItem(
-            "Raman (placeholder, no pre-scan)", (None, True)
+            "Raman (compact, no pre-scan)", (None, True)
         )
         channel_row.addWidget(self.grid_channel_combo)
         grid_layout.addLayout(channel_row)
@@ -1325,6 +1337,11 @@ class HardwareWidget(QWidget):
         )
         if path:
             self.sel_vdm_path.setText(path)
+            if self.core is not None:
+                self.status.setText(
+                    f"Status: Vandermonde path changed"
+                    f"{self._load_vandermonde()}"
+                )
 
     def browse_tracking_cfg(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1352,21 +1369,103 @@ class HardwareWidget(QWidget):
                 return int(X), int(Y)
         return 1344, 1024
     
+    def _set_objective_combo(
+        self, objectives, current=None,
+        placeholder="(no objective choices)",
+    ):
+        """Replace objective choices without moving hardware."""
+        self.objective_combo.blockSignals(True)
+        try:
+            self.objective_combo.clear()
+            if objectives:
+                self.objective_combo.addItems(objectives)
+                if current in objectives:
+                    self.objective_combo.setCurrentText(current)
+                self.objective_combo.setEnabled(True)
+            else:
+                self.objective_combo.addItem(placeholder)
+                self.objective_combo.setEnabled(False)
+        finally:
+            self.objective_combo.blockSignals(False)
+
+    def _refresh_objective_combo(self):
+        """Display the current objective device state index."""
+        if self.core is None:
+            self._set_objective_combo(
+                [], placeholder="(connect first)"
+            )
+            return None
+        objective = self._current_objective()
+        if objective is None:
+            self._set_objective_combo(
+                [], placeholder="(index unavailable)"
+            )
+            return None
+        self._set_objective_combo([objective], current=objective)
+        self.objective_combo.setEnabled(False)
+        return objective
+
+    def _current_objective(self):
+        """Read the objective's numeric state without moving the turret."""
+        if self.core is None:
+            return None
+        try:
+            objective = str(int(self.core.getState("Objective")))
+        except Exception as e:
+            print(f"[objective index] {e}")
+            return None
+
+        if self.objective_combo.currentText() != objective:
+            self._set_objective_combo([objective], current=objective)
+            self.objective_combo.setEnabled(False)
+        return objective
+
     def _load_vandermonde(self):
-        """Load the Vandermonde model from the path in the selection section.
-        Stores (C, degree) on self.vandermonde. Returns a status fragment."""
+        """Load the model entry for the current objective state index."""
         path = self.sel_vdm_path.text().strip()
         if not path:
             self.vandermonde = None
+            self.vandermonde_objective = None
+            self.vandermonde_path = None
             return " (no vandermonde)"
+        objective = self._current_objective()
+        if not objective:
+            self.vandermonde = None
+            self.vandermonde_objective = None
+            self.vandermonde_path = None
+            return " (no objective selected)"
         try:
-            from cns_control.utils import load_vandermonde_model
-            C, degree = load_vandermonde_model(path)
+            from cns_control.vandermonde import load_vandermonde_model
+            C, degree = load_vandermonde_model(
+                path, objective=objective
+            )
             self.vandermonde = (C, degree)
-            return f" (vandermonde deg={degree} OK)"
+            self.vandermonde_objective = objective
+            self.vandermonde_path = path
+            return (
+                f" (vandermonde {objective}, deg={degree} OK)"
+            )
         except Exception as e:
             self.vandermonde = None
+            self.vandermonde_objective = None
+            self.vandermonde_path = None
             return f" (vandermonde load failed: {e})"
+
+    def _ensure_current_vandermonde(self):
+        """Reload whenever hardware and cached objective identities differ."""
+        objective = self._current_objective()
+        if not objective:
+            self.vandermonde = None
+            self.vandermonde_objective = None
+            self.vandermonde_path = None
+            return None
+        if (
+            self.vandermonde is None
+            or self.vandermonde_objective != objective
+            or self.vandermonde_path != self.sel_vdm_path.text().strip()
+        ):
+            self._load_vandermonde()
+        return objective
 
     def _make_point_transformer(self, size_px, n):
         """Build the selected aiming transformer from a pixel size.
@@ -1389,6 +1488,27 @@ class HardwareWidget(QWidget):
             (pt.reshape(1, -1)) / np.array([Y, X]),
             max_volts=1.6,
         )
+
+    def _aim_beam_at_pixel(self, x, y):
+        """Move the galvos to one calibrated camera pixel and hold there."""
+        if self.daq is None or self.transformer is None:
+            raise RuntimeError("DAQ and transformer must be connected")
+
+        volts = np.asarray(
+            self._pt_to_volts(np.array([y, x], dtype=float)),
+            dtype=float,
+        )
+        if volts.shape != (1, 2) or not np.all(np.isfinite(volts)):
+            raise ValueError(
+                "Transformer must return one finite X/Y voltage pair"
+            )
+
+        self.daq.galvo.stop()
+        self.daq.galvo.write(
+            np.ascontiguousarray(volts[0]),
+            auto_start=True,
+        )
+        return volts[0]
 
     def _find_points_layer(self):
         """Return the active Points layer, or the most recent one."""
@@ -1810,7 +1930,7 @@ class HardwareWidget(QWidget):
             "Raman (pre-scan)", (None, False)
         )
         self.grid_channel_combo.addItem(
-            "Raman (placeholder, no pre-scan)", (None, True)
+            "Raman (compact, no pre-scan)", (None, True)
         )
         for channel in available_channels:
             self.grid_channel_combo.addItem(channel, (channel, False))
@@ -2070,6 +2190,12 @@ class HardwareWidget(QWidget):
         if not path:
             self.status.setText("Status: select a dataset (.zarr) first")
             return
+        objective = self._current_objective()
+        if not objective:
+            self.status.setText(
+                "Status: objective state index unavailable -- connect first"
+            )
+            return
         try:
             ds = xr.open_zarr(path)
             if "useq_sequence" not in ds.attrs:
@@ -2095,10 +2221,11 @@ class HardwareWidget(QWidget):
             from cns_control.calibration import StagePointPicker
             plt.ion()
             self.px2stage_picker = StagePointPicker(imgs)
+            self.px2stage_objective = objective
             plt.show()
             self.status.setText(
-                f"Status: picker open ({len(imgs)} frames) -- click through, "
-                "then Fit & save"
+                f"Status: picker open ({len(imgs)} frames, "
+                f"objective {objective}) -- click through, then Fit & save"
             )
         except Exception as e:
             self.status.setText(f"Status: picker failed -- {e}")
@@ -2107,6 +2234,14 @@ class HardwareWidget(QWidget):
         """Fit the centered Vandermonde model on picked points and save it."""
         if self.px2stage_picker is None or self.px2stage_xy is None:
             self.status.setText("Status: no picked points -- pick points first")
+            return
+        objective = self.px2stage_objective
+        current_objective = self._current_objective()
+        if not objective or current_objective != objective:
+            self.status.setText(
+                "Status: objective index changed after points were opened -- "
+                "restore the calibration objective and Pick points again"
+            )
             return
         log = LogWindow(title="Pixel-to-stage fit log")
         log.show()
@@ -2167,14 +2302,16 @@ class HardwareWidget(QWidget):
             save_vandermonde_model(
                 save_path, C, degree,
                 img_center=img_center, xy_center=xy_center,
+                objective=objective,
             )
             self.px2stage_name_input.setText(save_path)
             # make it immediately usable by center-cell mode
             self.sel_vdm_path.setText(save_path)
+            vdm_msg = self._load_vandermonde()
             log.append(f"\n--- saved {save_path} ---\n")
             self.status.setText(
-                f"Status: Vandermonde model (degree={degree}) saved -> "
-                f"{save_path}"
+                f"Status: Vandermonde model ({objective}, degree={degree}) "
+                f"saved -> {save_path}{vdm_msg}"
             )
         except Exception as e:
             log.append(f"\n--- fit failed: {e} ---\n")
@@ -2258,6 +2395,7 @@ class HardwareWidget(QWidget):
             if tf:
                 self.transformer = CoordTransformer.from_json(tf)
 
+            objective = self._refresh_objective_combo()
             vdm_msg = self._load_vandermonde()
 
             self._refresh_channel_combos()
@@ -2266,6 +2404,19 @@ class HardwareWidget(QWidget):
                 msg += " (no cfg loaded)"
             if not tf:
                 msg += " (no transformer)"
+            else:
+                center_x, center_y = DEFAULT_BEAM_CENTER_XY
+                try:
+                    self._aim_beam_at_pixel(center_x, center_y)
+                    msg += (
+                        f" (beam centered at "
+                        f"{center_x:.0f}, {center_y:.0f})"
+                    )
+                except Exception as e:
+                    print(f"[beam centering] {e}")
+                    msg += f" (beam centering failed: {e})"
+            if not objective:
+                msg += " (objective index unavailable)"
             msg += vdm_msg
             self.status.setText(msg)
             self.connect_btn.setEnabled(False)
@@ -2314,7 +2465,11 @@ class HardwareWidget(QWidget):
         self.mda_writer = None
         self.px2stage_picker = None
         self.px2stage_xy = None
+        self.px2stage_objective = None
         self.vandermonde = None
+        self.vandermonde_objective = None
+        self.vandermonde_path = None
+        self._set_objective_combo([], placeholder="(connect first)")
         self.status.setText("Status: disconnected")
         self.connect_btn.setEnabled(True)
         self.disconnect_btn.setEnabled(False)
@@ -2894,10 +3049,16 @@ class HardwareWidget(QWidget):
         center_cell = self.sel_center_cell_check.isChecked()
         vandermonde_model_path = self.sel_vdm_path.text().strip()
         cellpose_model = self.sel_cellpose_combo.currentText() or "cyto2"
+        objective = self._current_objective() if center_cell else None
 
         if center_cell and not vandermonde_model_path:
             self.status.setText(
                 "Status: Center cell mode requires a Vandermonde model (.json)"
+            )
+            return
+        if center_cell and not objective:
+            self.status.setText(
+                "Status: Center cell mode requires an active objective"
             )
             return
 
@@ -2929,6 +3090,7 @@ class HardwareWidget(QWidget):
                         vandermonde_model_path if center_cell else None
                     ),
                     cellpose_model=cellpose_model,
+                    objective=objective,
                 )
 
             self.selection_results = {
@@ -2975,11 +3137,15 @@ class HardwareWidget(QWidget):
         if self.core is None:
             self.status.setText("Status: not connected")
             return
-        if self.vandermonde is None:
-            self._load_vandermonde()
+        objective = self._ensure_current_vandermonde()
+        if not objective:
+            self.status.setText(
+                "Status: objective state index unavailable"
+            )
+            return
         if self.vandermonde is None:
             self.status.setText(
-                "Status: no Vandermonde model loaded (set it in Loading)"
+                f"Status: no Vandermonde calibration loaded for {objective}"
             )
             return
         try:
@@ -3082,6 +3248,12 @@ class HardwareWidget(QWidget):
                 "Status: set a Vandermonde model (.json) in Loading first"
             )
             return
+        objective = self._current_objective()
+        if not objective:
+            self.status.setText(
+                "Status: objective state index unavailable"
+            )
+            return
         autofocus_object = self.sel_af_combo.currentText()
         cy = int(self.sel_cy_input.value())
         cx = int(self.sel_cx_input.value())
@@ -3103,6 +3275,7 @@ class HardwareWidget(QWidget):
                     vandermonde_model_path=vandermonde_model_path,
                     autofocus_object=autofocus_object,
                     center=(cy, cx),
+                    objective=objective,
                 )
             self.selection_results = {
                 "sources": sources,
@@ -3219,7 +3392,7 @@ class HardwareWidget(QWidget):
             if preview_channel is not None:
                 ready_detail = f"after {preview_channel} preview"
             elif use_placeholder:
-                ready_detail = "using Raman placeholders"
+                ready_detail = "using compact Raman grid"
             else:
                 ready_detail = "after Raman pre-scan"
             z_detail = (

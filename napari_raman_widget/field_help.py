@@ -23,8 +23,13 @@ HELP = {
         "mapping and Raman MDA."
     ),
     "sel_vdm_path": (
-        "Pixel-to-stage Vandermonde model (.json). Used only when cells are "
-        "physically centered -- required by Center cell and Click to center."
+        "Multi-objective pixel-to-stage Vandermonde model (.json). Used when "
+        "cells are physically centered."
+    ),
+    "objective_combo": (
+        "Read-only numeric state from Micro-Manager's Objective device. This "
+        "index selects the matching JSON calibration; the widget never "
+        "commands the objective turret."
     ),
     "out_path": (
         "Working directory applied on Connect (created if needed). Relative "
@@ -145,7 +150,8 @@ HELP = {
     ),
     "grid_channel_combo": (
         "Choose a hardware channel for a per-position preview, or choose "
-        "Raman for a full pre-scan or a hidden placeholder without a pre-scan."
+        "Raman for a full pre-scan or a compact procedural grid without a "
+        "pre-scan or per-position napari layers."
     ),
     "grid_definition_combo": (
         "Use the current stage XY as the grid center, or define the bounds "
@@ -377,7 +383,8 @@ HELP = {
     ),
     "px2stage_save_btn": (
         "Center coordinates, report degree 1-3 RMSE, fit the selected degree, "
-        "and save JSON (also copied into Loading's Vandermonde field)."
+        "and update the active objective in the shared JSON without replacing "
+        "other objective calibrations."
     ),
 }
 
