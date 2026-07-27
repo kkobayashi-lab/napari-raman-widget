@@ -12,7 +12,8 @@ dependencies = [
     "numpy>=2.0,<2.1",
     "qtpy",
     "matplotlib",
-    "tifffile",
+    "h5py",
+    "tifffile>=2024.8.30,<2025",
     "xarray",
     "zarr",
 ]

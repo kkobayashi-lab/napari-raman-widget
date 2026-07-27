@@ -17,14 +17,15 @@ def load_experiment(
     Parameters
     ----------
     path : str or Path
-        Path to the MDA output folder (contains tiffs and a raman/ subfolder).
+        Path to an MDA run containing ``images/`` and ``raman.h5``, or a
+        legacy run containing plane TIFFs and a ``raman/`` subfolder.
     zarr_output : str
         Where to save the assembled image zarr.
     batch : bool or None
         Whether the raman data is batch mode. Auto-detected if None.
     wavenumbers : array-like or None
-        Optional current LightField relative-wavenumber calibration. A saved
-        ``raman/wavenumbers.npy`` axis takes precedence when present.
+        Optional current LightField relative-wavenumber calibration for legacy
+        runs. A spectral axis saved with the acquisition takes precedence.
 
     Returns
     -------
@@ -39,21 +40,36 @@ def load_experiment(
     """
     path = Path(path)
     raman_path = path / "raman"
-    tiff_folder = path
+    streaming_layout = (path / "raman.h5").is_file()
+    acquisition = None
+    if streaming_layout:
+        from .large_dataset_viewing import AcquisitionIndex
+
+        acquisition = AcquisitionIndex.build(path)
+        sample_img = acquisition.load_image(acquisition.image_keys[0])
+        tiff_folder = path / "images"
+    else:
+        tiff_folder = path
 
     # --- Get image dimensions from first tiff ---
-    sample_tiff = next(tiff_folder.glob("*.tiff"), None)
-    if sample_tiff is None:
-        raise FileNotFoundError(f"No tiff files found in {tiff_folder}")
-    sample_img = tifffile.imread(sample_tiff)
+    if acquisition is None:
+        sample_tiff = next(tiff_folder.glob("*.tiff"), None)
+        if sample_tiff is None:
+            raise FileNotFoundError(f"No tiff files found in {tiff_folder}")
+        sample_img = tifffile.imread(sample_tiff)
     img_y, img_x = sample_img.shape[-2:]
 
     # -- RAMAN --
     df, df_locs, max_p = None, None, None
     try:
-        df, df_locs, max_p = _load_raman(
-            raman_path, img_x, img_y, batch, wavenumbers
-        )
+        if acquisition is not None:
+            df, df_locs, max_p = _load_raman_index(
+                acquisition, img_x, img_y, batch
+            )
+        else:
+            df, df_locs, max_p = _load_raman(
+                raman_path, img_x, img_y, batch, wavenumbers
+            )
     except Exception as e:
         warnings.warn(
             f"Raman loading failed ({type(e).__name__}: {e}). "
@@ -61,13 +77,18 @@ def load_experiment(
         )
 
     # -- TIFF -> xarray --
-    tiff_pat = re.compile(r"t(\d+)_p(\d+)_c(\d+)_z(\d+)\.tiff")
     tiff_records, tiff_coords = [], []
-    for file in sorted(tiff_folder.glob("*.tiff")):
-        if (match := tiff_pat.search(file.name)):
-            t, p, c, z = map(int, match.groups())
-            tiff_records.append(tifffile.imread(file))
-            tiff_coords.append((t, p, c, z))
+    if acquisition is not None:
+        for key in acquisition.image_keys:
+            tiff_records.append(acquisition.load_image(key))
+            tiff_coords.append(tuple(key))
+    else:
+        tiff_pat = re.compile(r"t(\d+)_p(\d+)_c(\d+)_z(\d+)\.tiff")
+        for file in sorted(tiff_folder.glob("*.tiff")):
+            if (match := tiff_pat.search(file.name)):
+                t, p, c, z = map(int, match.groups())
+                tiff_records.append(tifffile.imread(file))
+                tiff_coords.append((t, p, c, z))
     if not tiff_records:
         raise FileNotFoundError(
             f"No tiffs matching t*_p*_c*_z*.tiff found in {tiff_folder}"
@@ -130,6 +151,80 @@ def load_experiment(
     ds.to_zarr(zarr_output, mode="w")
     print(f"Saved Zarr to {zarr_output}")
     return df, df_locs, da
+
+
+def _load_raman_index(acquisition, img_x, img_y, batch):
+    """Assemble the streaming HDF5 records without loading the full run."""
+    records, index = [], []
+    location_records, location_index, designations = [], [], []
+    time_by_event = {}
+
+    for key in sorted(acquisition.raman_files):
+        spectra = acquisition.load_spectra(key)
+        locations = acquisition.load_locations(key)
+        labels = acquisition.load_designations(key)
+        metadata = acquisition.load_raman_metadata(key)
+        timestamp_ns = metadata.get("timestamp_ns")
+        time_by_event[tuple(key)] = (
+            pd.to_datetime(timestamp_ns, unit="ns", utc=True)
+            if timestamp_ns is not None
+            else pd.NaT
+        )
+
+        for point, spectrum in enumerate(spectra):
+            records.append(spectrum)
+            index.append((key.t, key.p, key.z, point))
+        pixel_locations = locations * [img_y, img_x]
+        # Stored points are y/x; the legacy DataFrame exposes X/Y.
+        for point, (row, column) in enumerate(pixel_locations):
+            location_records.append((column, row))
+            location_index.append((key.t, key.p, key.z, point))
+            designations.append(labels[point] if point < len(labels) else "")
+
+    if not records:
+        raise FileNotFoundError(
+            f"No committed Raman events found in {acquisition.raman_folder}"
+        )
+    columns, _ = acquisition.spectral_axis(len(records[0]))
+    df = pd.DataFrame(
+        records,
+        columns=columns,
+        index=pd.MultiIndex.from_tuples(index, names=["t", "p", "z", "pt"]),
+    )
+    df_locs = pd.DataFrame(
+        location_records,
+        index=pd.MultiIndex.from_tuples(
+            location_index, names=["t", "p", "z", "pt"]
+        ),
+        columns=["X", "Y"],
+    )
+    df_locs["designation"] = designations
+
+    if batch is None:
+        import h5py
+
+        with h5py.File(acquisition.raman_folder, "r") as handle:
+            batch = bool(handle.attrs.get("batch", False))
+
+    if batch:
+        if len(df_locs):
+            loc_summary = (
+                df_locs.groupby(level=["t", "p", "z"])[["X", "Y"]]
+                .mean()
+                .assign(pt=0)
+                .reset_index()
+                .set_index(["t", "p", "z", "pt"])
+            )
+            df = df.merge(loc_summary, left_index=True, right_index=True, how="left")
+    elif len(df_locs):
+        df = df.merge(
+            df_locs[["X", "Y"]], left_index=True, right_index=True, how="left"
+        )
+    df["time"] = df.index.droplevel("pt").map(time_by_event)
+    df.attrs["spectral_axis"] = "wavenumber"
+    df.attrs["spectral_axis_units"] = "cm^-1"
+    max_p = int(df.index.get_level_values("p").max())
+    return df, df_locs, max_p
 
 
 def _load_raman(raman_path, img_x, img_y, batch, wavenumbers=None):

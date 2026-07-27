@@ -321,16 +321,21 @@ class TestObjectiveSelection(unittest.TestCase):
 class TestAutomaticDatasetGeneration(unittest.TestCase):
     def _widget(
         self, *, reason="completed", checked=True, has_raman=True,
-        status_api=True,
+        status_api=True, writer_status="completed",
     ):
         generated = []
         mda = SimpleNamespace()
         if status_api:
             mda.status = lambda: SimpleNamespace(finish_reason=reason)
+        writer = SimpleNamespace(
+            path=Path("data/run_1"),
+            close=lambda status=None: None,
+            completion_status=writer_status,
+        )
         widget = SimpleNamespace(
             _raman_mda_pending=True,
             _raman_mda_canceled=False,
-            _raman_mda_writer=SimpleNamespace(_path=Path("data/run_1")),
+            _raman_mda_writer=writer,
             _raman_mda_batch=True,
             _raman_mda_has_raman=has_raman,
             auto_dataset_check=_FakeCheckBox(checked),
@@ -369,6 +374,14 @@ class TestAutomaticDatasetGeneration(unittest.TestCase):
                 self.assertIn(
                     "automatic dataset generation skipped", widget.status.text
                 )
+
+    def test_writer_failure_prevents_export_even_if_core_reports_completion(self):
+        widget, generated = self._widget(writer_status="failed")
+
+        HardwareWidget._on_raman_mda_finished(widget, None)
+
+        self.assertEqual(generated, [])
+        self.assertIn("MDA failed", widget.status.text)
 
     def test_raman_free_run_does_not_generate(self):
         widget, generated = self._widget(has_raman=False)

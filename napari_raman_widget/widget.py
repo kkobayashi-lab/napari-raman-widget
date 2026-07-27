@@ -2091,14 +2091,29 @@ class HardwareWidget(QWidget):
     # -------- dataset generation --------
     def open_acquisition_viewer(self):
         """Open the offline indexed viewer without querying hardware."""
+        active_writer = getattr(self, "mda_writer", None)
+        if active_writer is not None and not getattr(
+            active_writer, "closed", True
+        ):
+            self.status.setText(
+                "Status: finish or stop the active MDA before offline viewing"
+            )
+            return
         imaging_folder = self.mda_dir_input.text().strip()
+        active_path = getattr(active_writer, "path", None)
+        if active_path is not None:
+            imaging_folder = str(active_path)
         imaging_path = Path(imaging_folder) if imaging_folder else None
         raman_folder = ""
         sequence_file = ""
         if imaging_path is not None:
-            candidate = imaging_path / "raman"
-            if candidate.is_dir():
+            candidate = imaging_path / "raman.h5"
+            if candidate.is_file():
                 raman_folder = str(candidate)
+            else:
+                candidate = imaging_path / "raman"
+                if candidate.is_dir():
+                    raman_folder = str(candidate)
             candidate = imaging_path / "useq-sequence.json"
             if candidate.is_file():
                 sequence_file = str(candidate)
@@ -2119,6 +2134,14 @@ class HardwareWidget(QWidget):
         self._plot_windows.append(window)
 
     def generate_dataset(self):
+        active_writer = getattr(self, "mda_writer", None)
+        if active_writer is not None and not getattr(
+            active_writer, "closed", True
+        ):
+            self.status.setText(
+                "Status: finish or stop the active MDA before legacy export"
+            )
+            return
         # Let the user pick which run folder to load.
         default_dir = self.mda_dir_input.text().strip() or "data/run"
         run_dir = QFileDialog.getExistingDirectory(
@@ -2256,7 +2279,20 @@ class HardwareWidget(QWidget):
         if callable(status):
             finish_reason = getattr(status(), "finish_reason", None)
             if finish_reason is not None:
-                reason = str(finish_reason)
+                reason = str(getattr(finish_reason, "value", finish_reason))
+        reason_text = reason.casefold()
+        if "cancel" in reason_text:
+            reason = "canceled"
+        elif "fail" in reason_text or "error" in reason_text:
+            reason = "failed"
+        else:
+            reason = "completed"
+
+        if writer is not None:
+            writer.close(status=reason)
+            writer_status = getattr(writer, "completion_status", reason)
+            if writer_status != "completed":
+                reason = writer_status
         if reason != "completed":
             suffix = (
                 " -- automatic dataset generation skipped"
@@ -2276,7 +2312,7 @@ class HardwareWidget(QWidget):
             )
             return
 
-        run_dir = getattr(writer, "_path", None)
+        run_dir = getattr(writer, "path", None)
         if run_dir is None:
             self.status.setText(
                 "Status: MDA finished -- automatic dataset generation failed "
@@ -2554,6 +2590,11 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: transformer reload failed -- {e}")
 
     def disconnect(self):
+        writer = self._raman_mda_writer or self.mda_writer
+        if writer is not None and not getattr(writer, "closed", True):
+            writer.disconnect()
+        self._raman_mda_writer = None
+        self._raman_mda_pending = False
         if self._raman_visualization_engine is not None:
             try:
                 self._raman_visualization_engine.raman_events.ramanSpectraReady.disconnect(
@@ -3608,6 +3649,20 @@ class HardwareWidget(QWidget):
             "batch", self.sel_batch_combo.currentText() == "True"
         )
         pre_acq = self.selection_results.get("pre_acq", True)
+        stage_centering_model = None
+        if autofocus_enabled and autofocus_object == "laser":
+            objective = self._ensure_current_vandermonde()
+            if objective is None or self.vandermonde is None:
+                self.status.setText(
+                    "Status: laser autofocus requires a valid "
+                    "pixel-to-stage Vandermonde model for the current objective"
+                )
+                return
+            coefficients, degree = self.vandermonde
+            stage_centering_model = (
+                np.asarray(coefficients, dtype=float).copy(),
+                int(degree),
+            )
 
         try:
             z_relative = self._parse_float_list(
@@ -3712,9 +3767,7 @@ class HardwareWidget(QWidget):
         try:
             import datetime as _dt
             from useq import Channel, TIntervalLoops, ZRelativePositions
-            from raman_mda_engine import (
-                RamanEngine, RamanTiffAndNumpyWriter,
-            )
+            from raman_mda_engine import RamanAcquisitionWriter, RamanEngine
             from cns_control.utils import set_up_new_seq
 
             try:
@@ -3751,15 +3804,24 @@ class HardwareWidget(QWidget):
                     skip_imaging_for_same_pos=True,
                     config_file = self.mm_config,
                     circle_center=circle_center,
-                    circle_radius=circle_radius
+                    circle_radius=circle_radius,
+                    stage_centering_model=stage_centering_model,
                 )
 
                 self.core.register_mda_engine(engine)
                 self._connect_raman_visualization(engine)
 
-                self.mda_writer = RamanTiffAndNumpyWriter(
+                previous_writer = self.mda_writer
+                if previous_writer is not None and not getattr(
+                    previous_writer, "closed", True
+                ):
+                    previous_writer.disconnect()
+                self.mda_writer = RamanAcquisitionWriter(
                     out_dir,
+                    core=self.core,
                     wavenumbers=self.collector.get_wavenumbers(),
+                    image_positions=image_p,
+                    batch=batch,
                 )
                 engine.aiming_sources = sources
 
@@ -3858,6 +3920,10 @@ class HardwareWidget(QWidget):
             mode = "Raman MDA" if raman_enabled else "Raman-free MDA"
             self.status.setText(f"Status: {mode} started OK")
         except Exception as e:
+            if self.mda_writer is not None and not getattr(
+                self.mda_writer, "closed", True
+            ):
+                self.mda_writer.close(status="failed")
             self._raman_mda_pending = False
             self._raman_mda_writer = None
             log.append(f"\n--- MDA failed: {e} ---\n")

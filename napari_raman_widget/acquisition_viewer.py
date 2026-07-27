@@ -79,7 +79,7 @@ class LargeAcquisitionViewerWindow(QMainWindow):
         layout = QVBoxLayout(central)
 
         intro = QLabel(
-            "Index imaging and Raman folders separately. Only the requested "
+            "Index a run folder (or legacy imaging/Raman sources). Only the requested "
             "spectrum and image tiles are read from disk."
         )
         intro.setWordWrap(True)
@@ -102,7 +102,7 @@ class LargeAcquisitionViewerWindow(QMainWindow):
         self._add_path_row(
             source_grid,
             1,
-            "Raman folder:",
+            "Raman source:",
             self.raman_path,
             self._browse_raman,
         )
@@ -134,10 +134,20 @@ class LargeAcquisitionViewerWindow(QMainWindow):
         layout.addLayout(source_actions)
 
         view_row = QHBoxLayout()
-        view_row.addWidget(QLabel("Raman index / p:"))
+        view_row.addWidget(QLabel("Raman t:"))
+        self.raman_t_combo = QComboBox()
+        view_row.addWidget(self.raman_t_combo)
+        view_row.addWidget(QLabel("Raman p/FOV:"))
         self.raman_index = QSpinBox()
         self.raman_index.setRange(0, 2_147_483_647)
         view_row.addWidget(self.raman_index)
+        view_row.addWidget(QLabel("Raman z:"))
+        self.raman_z_combo = QComboBox()
+        view_row.addWidget(self.raman_z_combo)
+        view_row.addWidget(QLabel("Cell index:"))
+        self.cell_index = QSpinBox()
+        self.cell_index.setRange(0, 0)
+        view_row.addWidget(self.cell_index)
         view_row.addWidget(QLabel("Imaging channel:"))
         self.channel_combo = QComboBox()
         view_row.addWidget(self.channel_combo)
@@ -158,6 +168,13 @@ class LargeAcquisitionViewerWindow(QMainWindow):
         self.show_btn.clicked.connect(self.show_selection)
         view_row.addWidget(self.show_btn)
         layout.addLayout(view_row)
+        self.raman_index.valueChanged.connect(self._update_raman_axes)
+        self.raman_t_combo.currentIndexChanged.connect(
+            self._update_raman_z_and_cells
+        )
+        self.raman_z_combo.currentIndexChanged.connect(
+            self._update_cell_range
+        )
 
         self.status_label = QLabel(
             "Choose folders and a Vandermonde objective, then index."
@@ -190,7 +207,10 @@ class LargeAcquisitionViewerWindow(QMainWindow):
 
     def _set_view_controls_enabled(self, enabled):
         for widget in (
+            self.raman_t_combo,
             self.raman_index,
+            self.raman_z_combo,
+            self.cell_index,
             self.channel_combo,
             self.stitched_check,
             self.preview_size,
@@ -203,14 +223,18 @@ class LargeAcquisitionViewerWindow(QMainWindow):
         if not imaging_text:
             return
         imaging = Path(imaging_text)
+        run_folder = imaging.parent if imaging.name == "images" else imaging
         if not self.sequence_path.text().strip():
-            sequence = imaging / "useq-sequence.json"
+            sequence = run_folder / "useq-sequence.json"
             if sequence.exists():
                 self.sequence_path.setText(str(sequence))
         if not self.raman_path.text().strip():
-            raman = imaging / "raman"
-            if raman.is_dir():
-                self.raman_path.setText(str(raman))
+            h5_path = run_folder / "raman.h5"
+            legacy_path = run_folder / "raman"
+            if h5_path.is_file():
+                self.raman_path.setText(str(h5_path))
+            elif legacy_path.is_dir():
+                self.raman_path.setText(str(legacy_path))
 
     def _browse_imaging(self):
         path = QFileDialog.getExistingDirectory(
@@ -223,11 +247,18 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             self._infer_related_paths()
 
     def _browse_raman(self):
-        path = QFileDialog.getExistingDirectory(
+        path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select Raman folder",
+            "Select Raman HDF5",
             self.raman_path.text().strip(),
+            "Raman HDF5 (*.h5);;All files (*)",
         )
+        if not path:
+            path = QFileDialog.getExistingDirectory(
+                self,
+                "Select legacy Raman folder",
+                self.raman_path.text().strip(),
+            )
         if path:
             self.raman_path.setText(path)
 
@@ -297,10 +328,8 @@ class LargeAcquisitionViewerWindow(QMainWindow):
                 sequence_file=sequence,
             )
             geometry = load_vandermonde_geometry(model, objective)
-            raman_positions = sorted(
-                {key.p for key in acquisition.raman_files}
-            )
-            if not raman_positions:
+            raman_fovs = acquisition.raman_fov_source_positions
+            if not raman_fovs:
                 raise FileNotFoundError(
                     f"No Raman data files found in {acquisition.raman_folder}"
                 )
@@ -317,24 +346,39 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             for channel in channels:
                 label = _image_channel_label(acquisition, channel)
                 self.channel_combo.addItem(f"{label} (c={channel})", channel)
-            self.raman_index.setRange(
-                int(raman_positions[0]), int(raman_positions[-1])
-            )
-            self.raman_index.setValue(int(raman_positions[0]))
             self.acquisition = acquisition
             self.geometry = geometry
+            self.raman_index.setRange(0, len(raman_fovs) - 1)
+            self.raman_index.setValue(0)
+            self._update_raman_axes()
             self._set_view_controls_enabled(True)
 
             summary = acquisition.summary()
+            cell_count = sum(
+                len(
+                    acquisition.raman_cells(
+                        index,
+                        time_index=time_index,
+                        z_index=z_index,
+                    )
+                )
+                for index in range(len(raman_fovs))
+                for time_index in acquisition.raman_times(index)
+                for z_index in acquisition.raman_z_indices(
+                    index, time_index
+                )
+            )
             elapsed = time.perf_counter() - started
             self.summary_label.setText(
                 f"{summary['image_files']:,} images; "
-                f"{summary['raman_files']:,} Raman positions; "
+                f"{len(raman_fovs):,} Raman FOVs; "
+                f"{cell_count:,} cells; "
                 f"{len(channels)} channels; indexed in {elapsed:.2f} s"
             )
             self.status_label.setText(
-                "Indexed. Choose a Raman index and channel, then Show. "
-                "Containing-tile view is fastest; stitching is optional."
+                "Indexed. Choose Raman t, p/FOV, z, cell, and an imaging "
+                "channel, then Show. Exact image/Raman FOV matches are used "
+                "first; center matching is the fallback."
             )
         except Exception as error:
             self.acquisition = None
@@ -344,6 +388,68 @@ class LargeAcquisitionViewerWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
             self.index_btn.setEnabled(True)
+
+    @staticmethod
+    def _set_combo_values(combo, values):
+        previous = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        for value in values:
+            combo.addItem(str(value), int(value))
+        if previous in values:
+            combo.setCurrentIndex(values.index(previous))
+        combo.blockSignals(False)
+
+    def _selected_raman_t(self):
+        value = self.raman_t_combo.currentData()
+        return None if value is None else int(value)
+
+    def _selected_raman_z(self):
+        value = self.raman_z_combo.currentData()
+        return None if value is None else int(value)
+
+    def _update_raman_axes(self, *_args):
+        if self.acquisition is None:
+            self.raman_t_combo.clear()
+            self.raman_z_combo.clear()
+            self.cell_index.setRange(0, 0)
+            return
+        times = list(
+            self.acquisition.raman_times(self.raman_index.value())
+        )
+        self._set_combo_values(self.raman_t_combo, times)
+        self._update_raman_z_and_cells()
+
+    def _update_raman_z_and_cells(self, *_args):
+        if self.acquisition is None:
+            self.raman_z_combo.clear()
+            self.cell_index.setRange(0, 0)
+            return
+        time_index = self._selected_raman_t()
+        z_indices = (
+            []
+            if time_index is None
+            else list(
+                self.acquisition.raman_z_indices(
+                    self.raman_index.value(), time_index
+                )
+            )
+        )
+        self._set_combo_values(self.raman_z_combo, z_indices)
+        self._update_cell_range()
+
+    def _update_cell_range(self, *_args):
+        if self.acquisition is None:
+            self.cell_index.setRange(0, 0)
+            return
+        cells = self.acquisition.raman_cells(
+            self.raman_index.value(),
+            time_index=self._selected_raman_t(),
+            z_index=self._selected_raman_z(),
+        )
+        self.cell_index.setRange(0, max(0, len(cells) - 1))
+        if self.cell_index.value() >= len(cells):
+            self.cell_index.setValue(max(0, len(cells) - 1))
 
     def show_selection(self):
         """Load and draw exactly one spectrum plus one tile or mosaic."""
@@ -357,9 +463,16 @@ class LargeAcquisitionViewerWindow(QMainWindow):
         started = time.perf_counter()
         try:
             raman_index = self.raman_index.value()
+            time_index = self._selected_raman_t()
+            z_index = self._selected_raman_z()
+            cell_index = self.cell_index.value()
             channel = self.channel_combo.currentData()
             spectrum_data = _mean_raman_spectrum(
-                self.acquisition, raman_index
+                self.acquisition,
+                raman_index,
+                cell_index,
+                time_index=time_index,
+                z_index=z_index,
             )
 
             self.spectrum_ax.clear()
@@ -373,6 +486,9 @@ class LargeAcquisitionViewerWindow(QMainWindow):
                     self.geometry,
                     imaging_channel=channel,
                     max_side=int(self.preview_size.currentData()),
+                    cell_index=cell_index,
+                    time_index=time_index,
+                    z_index=z_index,
                 )
                 if mosaic is not None:
                     self.image_ax.imshow(mosaic, cmap="gray")
@@ -397,6 +513,9 @@ class LargeAcquisitionViewerWindow(QMainWindow):
                     raman_index,
                     self.geometry,
                     imaging_channel=channel,
+                    cell_index=cell_index,
+                    time_index=time_index,
+                    z_index=z_index,
                 )
                 if match is not None:
                     image = self.acquisition.load_image(match.image_key)
@@ -423,7 +542,8 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             self.canvas.draw_idle()
             elapsed = time.perf_counter() - started
             self.status_label.setText(
-                f"Showing Raman p={raman_index} in {elapsed:.2f} s"
+                f"Showing Raman t={time_index}, p/FOV={raman_index}, "
+                f"z={z_index}, cell={cell_index} in {elapsed:.2f} s"
             )
         except Exception as error:
             self.status_label.setText(f"Could not show selection: {error}")
