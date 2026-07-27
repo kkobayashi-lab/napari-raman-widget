@@ -360,8 +360,14 @@ HELP = {
         "and Raman-free runs are skipped."
     ),
     "gen_dataset_btn": (
-        "Load a completed run directory (using the current batch value) and "
-        "write ds_<run>.zarr + df_<run>.pkl, then open the dataset viewer."
+        "Legacy export: load a completed run directory eagerly, write "
+        "ds_<run>.zarr + df_<run>.pkl, then open the dataset viewer. Prefer "
+        "Open saved acquisition for large runs."
+    ),
+    "view_acquisition_btn": (
+        "Open the indexed, on-demand viewer. Imaging and Raman folders can be "
+        "selected independently; only the requested spectrum and image tiles "
+        "are loaded."
     ),
 
     # ---- pixel-to-stage calibration (inside Run Raman MDA) ----

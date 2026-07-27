@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+import tempfile
 from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
@@ -392,6 +393,51 @@ class TestAutomaticDatasetGeneration(unittest.TestCase):
 
         self.assertEqual(generated, [])
         self.assertIn("MDA canceled", widget.status.text)
+
+
+class TestSavedAcquisitionViewer(unittest.TestCase):
+    def test_opens_offline_viewer_with_inferred_run_paths(self):
+        opened = []
+
+        class FakeWindow:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.shown = False
+                opened.append(self)
+
+            def show(self):
+                self.shown = True
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            (run / "raman").mkdir()
+            (run / "useq-sequence.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            objective_combo = _FakeCombo()
+            objective_combo.addItem("3")
+            widget = SimpleNamespace(
+                mda_dir_input=SimpleNamespace(text=lambda: str(run)),
+                objective_combo=objective_combo,
+                vandermonde_objective=None,
+                sel_vdm_path=SimpleNamespace(text=lambda: "model.json"),
+                _plot_windows=[],
+            )
+
+            with patch(
+                "napari_raman_widget.widget.LargeAcquisitionViewerWindow",
+                FakeWindow,
+            ):
+                HardwareWidget.open_acquisition_viewer(widget)
+
+        self.assertEqual(len(opened), 1)
+        self.assertTrue(opened[0].shown)
+        self.assertEqual(opened[0].kwargs["imaging_folder"], str(run))
+        self.assertEqual(
+            opened[0].kwargs["raman_folder"], str(run / "raman")
+        )
+        self.assertEqual(opened[0].kwargs["objective"], "3")
+        self.assertEqual(widget._plot_windows, opened)
 
 
 if __name__ == "__main__":

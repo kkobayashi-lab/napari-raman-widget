@@ -7,15 +7,17 @@ from pathlib import Path
 import xarray as xr
 import napari
 import numpy as np
-from qtpy.QtCore import QEvent, Qt, QTimer, QUrl
+from qtpy.QtCore import QEvent, Qt, QUrl, Slot
 from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QSpinBox,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QMessageBox
 )
+from .acquisition_viewer import LargeAcquisitionViewerWindow
 from .field_help import apply_tooltips
 from .log_window import LogWindow, _StdoutRedirector
+from .lazy_visualization import install_lazy_mda_viewer
 from .plot_windows import (
     CalibrationPlotWindow, GridScanPlotWindow, ReferenceSpectraWindow,
     SpectrumWindow, DatasetViewerWindow,
@@ -85,6 +87,8 @@ class HardwareWidget(QWidget):
         self._raman_mda_writer = None
         self._raman_mda_batch = False
         self._raman_mda_has_raman = False
+        self._raman_visualization_engine = None
+        self._lazy_mda_viewer = None
         self.px2stage_picker = None
         self.px2stage_xy = None
         self.px2stage_objective = None
@@ -1132,7 +1136,7 @@ class HardwareWidget(QWidget):
         mda_layout.addLayout(rz_row)
 
         mda_layout.addWidget(QLabel(
-            "Extra fluorescence channels (added to the sequence):"
+            "Acquisition channels (add RM for Raman; BF is optional):"
         ))
         self.mda_channel_rows_layout = QVBoxLayout()
         mda_layout.addLayout(self.mda_channel_rows_layout)
@@ -1164,9 +1168,24 @@ class HardwareWidget(QWidget):
         sep.setAlignment(Qt.AlignCenter)
         mda_layout.addWidget(sep)
  
-        self.gen_dataset_btn = QPushButton("Generate dataset")
+        dataset_help = QLabel(
+            "For large acquisitions, use the indexed viewer. Legacy dataset "
+            "generation eagerly assembles all TIFFs."
+        )
+        dataset_help.setWordWrap(True)
+        mda_layout.addWidget(dataset_help)
+
+        dataset_actions = QHBoxLayout()
+        self.view_acquisition_btn = QPushButton("Open saved acquisition")
+        self.view_acquisition_btn.clicked.connect(
+            self.open_acquisition_viewer
+        )
+        dataset_actions.addWidget(self.view_acquisition_btn, 2)
+
+        self.gen_dataset_btn = QPushButton("Generate legacy dataset")
         self.gen_dataset_btn.clicked.connect(self.generate_dataset)
-        mda_layout.addWidget(self.gen_dataset_btn)
+        dataset_actions.addWidget(self.gen_dataset_btn, 1)
+        mda_layout.addLayout(dataset_actions)
  
         # --- pixel-to-stage calibration ---
         self.px2stage_check = QCheckBox("Pixel-to-stage calibration")
@@ -1885,6 +1904,18 @@ class HardwareWidget(QWidget):
             available_all = []
         if available_all:
             combo.addItems(available_all)
+            if channel is None:
+                used = {
+                    entry["combo"].currentText()
+                    for entry in self.mda_channel_rows
+                }
+                if "RM" in available_all and "RM" not in used:
+                    channel = "RM"
+                else:
+                    channel = next(
+                        (name for name in available_all if name not in used),
+                        available_all[0],
+                    )
             if channel and channel in available_all:
                 combo.setCurrentText(channel)
         else:
@@ -1909,7 +1940,23 @@ class HardwareWidget(QWidget):
             "row": row, "combo": combo, "exp": exp_spin, "remove": remove_btn,
         }
         self.mda_channel_rows.append(entry)
+        combo.currentTextChanged.connect(
+            lambda text, spin=exp_spin: self._set_mda_channel_exposure_state(
+                text, spin
+            )
+        )
+        self._set_mda_channel_exposure_state(combo.currentText(), exp_spin)
         remove_btn.clicked.connect(lambda: self._remove_mda_channel_row(entry))
+
+    @staticmethod
+    def _set_mda_channel_exposure_state(channel, exposure_widget):
+        """RM uses the dedicated Raman exposure setting, not camera exposure."""
+        is_raman = channel == "RM"
+        exposure_widget.setEnabled(not is_raman)
+        exposure_widget.setToolTip(
+            "Uses 'Exposure per cell' above"
+            if is_raman else "Camera exposure for this channel"
+        )
 
     def _remove_mda_channel_row(self, entry):
         while entry["row"].count():
@@ -1984,6 +2031,9 @@ class HardwareWidget(QWidget):
                 combo.addItem("(connect first)")
                 combo.setEnabled(False)
             combo.blockSignals(False)
+            self._set_mda_channel_exposure_state(
+                combo.currentText(), entry["exp"]
+            )
         
         combo = self.mda_seg_ch_combo
         current = combo.currentText()
@@ -2039,6 +2089,35 @@ class HardwareWidget(QWidget):
             print(f"[mda setup] failed to update sequence: {e}")
 
     # -------- dataset generation --------
+    def open_acquisition_viewer(self):
+        """Open the offline indexed viewer without querying hardware."""
+        imaging_folder = self.mda_dir_input.text().strip()
+        imaging_path = Path(imaging_folder) if imaging_folder else None
+        raman_folder = ""
+        sequence_file = ""
+        if imaging_path is not None:
+            candidate = imaging_path / "raman"
+            if candidate.is_dir():
+                raman_folder = str(candidate)
+            candidate = imaging_path / "useq-sequence.json"
+            if candidate.is_file():
+                sequence_file = str(candidate)
+
+        objective = self.objective_combo.currentText().strip()
+        if not objective.isdigit():
+            objective = self.vandermonde_objective
+
+        window = LargeAcquisitionViewerWindow(
+            imaging_folder=imaging_folder,
+            raman_folder=raman_folder,
+            sequence_file=sequence_file,
+            vandermonde_model=self.sel_vdm_path.text().strip(),
+            objective=objective,
+            parent=self,
+        )
+        window.show()
+        self._plot_windows.append(window)
+
     def generate_dataset(self):
         # Let the user pick which run folder to load.
         default_dir = self.mda_dir_input.text().strip() or "data/run"
@@ -2121,6 +2200,39 @@ class HardwareWidget(QWidget):
         events.sequenceCanceled.connect(self._on_raman_mda_canceled)
         events.sequenceFinished.connect(self._on_raman_mda_finished)
         self._mda_completion_events = events
+
+    def _connect_raman_visualization(self, engine):
+        """Connect one active Raman engine to the lazy napari spectrum view."""
+        if engine is self._raman_visualization_engine:
+            return
+        if self._raman_visualization_engine is not None:
+            try:
+                self._raman_visualization_engine.raman_events.ramanSpectraReady.disconnect(
+                    self._on_raman_spectra_ready
+                )
+            except Exception:
+                pass
+        engine.raman_events.ramanSpectraReady.connect(
+            self._on_raman_spectra_ready
+        )
+        self._raman_visualization_engine = engine
+
+    @Slot(object, object, object, object, object)
+    def _on_raman_spectra_ready(
+        self, event, spectra, _points, _which, _exposure
+    ):
+        """Add the spectrum image at RM's index in the shared MDA stack."""
+        if self._lazy_mda_viewer is None:
+            return
+        try:
+            wavenumbers = self.collector.get_wavenumbers(
+                np.asarray(spectra).shape[-1]
+            )
+        except Exception:
+            wavenumbers = None
+        self._lazy_mda_viewer.add_raman_spectrum(
+            event, spectra, wavenumbers
+        )
 
     def _on_raman_mda_canceled(self, _sequence):
         """Remember cancellation before the ensuing sequenceFinished signal."""
@@ -2379,6 +2491,9 @@ class HardwareWidget(QWidget):
                 )
                 if isinstance(result, tuple) and len(result) >= 2:
                     self.main_window = result[1]
+                    self._lazy_mda_viewer = install_lazy_mda_viewer(
+                        self.main_window, self.core, self.viewer
+                    )
             except Exception as e:
                 print(f"[napari-micromanager load] {e}")
 
@@ -2439,6 +2554,14 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: transformer reload failed -- {e}")
 
     def disconnect(self):
+        if self._raman_visualization_engine is not None:
+            try:
+                self._raman_visualization_engine.raman_events.ramanSpectraReady.disconnect(
+                    self._on_raman_spectra_ready
+                )
+            except Exception:
+                pass
+            self._raman_visualization_engine = None
         try:
             if self.core is not None:
                 from cns_control.utils import unload
@@ -2469,6 +2592,7 @@ class HardwareWidget(QWidget):
         self.vandermonde = None
         self.vandermonde_objective = None
         self.vandermonde_path = None
+        self._lazy_mda_viewer = None
         self._set_objective_combo([], placeholder="(connect first)")
         self.status.setText("Status: disconnected")
         self.connect_btn.setEnabled(True)
@@ -3387,6 +3511,10 @@ class HardwareWidget(QWidget):
                 "tilt_degree": tilt_degree,
                 "snake_axis": snake_axis,
                 "batch": False,
+                # Every grid position samples the same point at the center of
+                # the FOV, so the discarded galvo-prepositioning acquisition
+                # is unnecessary.
+                "pre_acq": False,
             }
             n_pos = len(autofocus_p)
             if preview_channel is not None:
@@ -3479,19 +3607,57 @@ class HardwareWidget(QWidget):
         batch = self.selection_results.get(
             "batch", self.sel_batch_combo.currentText() == "True"
         )
+        pre_acq = self.selection_results.get("pre_acq", True)
 
         try:
             z_relative = self._parse_float_list(
                 self.mda_zrel_input.text(), "Z relative"
             )
-            raman_z_indices = _parse_raman_z_indices(
-                self.mda_rz_input.text()
-            )
         except ValueError as e:
             self.status.setText(f"Status: {e}")
             return
 
-        raman_enabled = bool(raman_z_indices)
+        acquisition_channels = []
+        seen_channels = set()
+        for entry in self.mda_channel_rows:
+            if not entry["combo"].isEnabled():
+                continue
+            channel_name = entry["combo"].currentText()
+            if not channel_name or channel_name == "(connect first)":
+                continue
+            if channel_name in seen_channels:
+                self.status.setText(
+                    f"Status: duplicate acquisition channel {channel_name!r}"
+                )
+                return
+            seen_channels.add(channel_name)
+            acquisition_channels.append(
+                (channel_name, float(entry["exp"].value()))
+            )
+        if not acquisition_channels:
+            self.status.setText(
+                "Status: add at least one acquisition channel "
+                "(add RM for Raman)"
+            )
+            return
+
+        raman_enabled = "RM" in seen_channels
+        if raman_enabled:
+            try:
+                raman_z_indices = _parse_raman_z_indices(
+                    self.mda_rz_input.text()
+                )
+            except ValueError as e:
+                self.status.setText(f"Status: {e}")
+                return
+            if not raman_z_indices:
+                self.status.setText(
+                    "Status: RM is selected but Raman z indices is off"
+                )
+                return
+        else:
+            raman_z_indices = []
+
         if not raman_enabled and not _raman_free_autofocus_allowed(
             autofocus_enabled, autofocus_object
         ):
@@ -3536,17 +3702,6 @@ class HardwareWidget(QWidget):
         circle_radius = int(self.sel_r_input.value())
         # print(circle_radius)
 
-        extra_channels = []
-        seen = set()
-        for entry in self.mda_channel_rows:
-            if not entry["combo"].isEnabled():
-                continue
-            ch = entry["combo"].currentText()
-            if not ch or ch in seen:
-                continue
-            seen.add(ch)
-            extra_channels.append((ch, float(entry["exp"].value())))
-
         log = LogWindow(title="Raman MDA log")
         log.show()
         self._plot_windows.append(log)
@@ -3556,7 +3711,7 @@ class HardwareWidget(QWidget):
 
         try:
             import datetime as _dt
-            from useq import TIntervalLoops, ZRelativePositions
+            from useq import Channel, TIntervalLoops, ZRelativePositions
             from raman_mda_engine import (
                 RamanEngine, RamanTiffAndNumpyWriter,
             )
@@ -3574,6 +3729,7 @@ class HardwareWidget(QWidget):
                     spectra_collector=self.collector,
                     transformer=self.transformer,
                     batch=batch,
+                    pre_acq=pre_acq,
                     autofocus=autofocus_enabled,
                     autofocus_p=autofocus_p,
                     image_p=image_p,
@@ -3599,6 +3755,7 @@ class HardwareWidget(QWidget):
                 )
 
                 self.core.register_mda_engine(engine)
+                self._connect_raman_visualization(engine)
 
                 self.mda_writer = RamanTiffAndNumpyWriter(
                     out_dir,
@@ -3645,25 +3802,26 @@ class HardwareWidget(QWidget):
                     )
                 new_z_plan = ZRelativePositions(relative=z_relative)
 
-                if final_seq.channels:
-                    template = final_seq.channels[0]
-                    extra_channel_objs = tuple(
-                        template.replace(config=ch, exposure=ch_exp)
-                        for ch, ch_exp in extra_channels
+                template = (
+                    final_seq.channels[0]
+                    if final_seq.channels
+                    else Channel(config="BF")
+                )
+                acquisition_channel_objs = tuple(
+                    template.replace(
+                        config=channel_name,
+                        exposure=(
+                            None if channel_name == "RM" else channel_exposure
+                        ),
                     )
-                else:
-                    extra_channel_objs = ()
-                    if extra_channels:
-                        print(
-                            "[warn] no template channel in sequence; "
-                            "can't add extra channels"
-                        )
+                    for channel_name, channel_exposure in acquisition_channels
+                )
 
                 final_seq = final_seq.replace(
                     axis_order=("t", "p", "c", "z"),
                     time_plan=new_time_plan,
                     z_plan=new_z_plan,
-                    channels=final_seq.channels + extra_channel_objs,
+                    channels=acquisition_channel_objs,
                 )
 
                 if raman_enabled and "raman" in final_seq.metadata:
@@ -3682,7 +3840,7 @@ class HardwareWidget(QWidget):
                     f"search_pts={search_pts}, fine_range={fine_search_range}, "
                     f"fine_pts={fine_search_pts}, refocus_every={refocus_every}, "
                     f"image=({img_x}x{img_y}), "
-                    f"extra channels={[ch for ch, _ in extra_channels]}"
+                    f"channels={[ch for ch, _ in acquisition_channels]}"
                 )
                 print(
                     f"[debug] engine._autofocus={engine._autofocus}, "
