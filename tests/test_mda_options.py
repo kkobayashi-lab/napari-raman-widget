@@ -50,12 +50,17 @@ class TestRamanFreeAutofocus(unittest.TestCase):
     def test_software_autofocus_is_allowed(self):
         self.assertTrue(_raman_free_autofocus_allowed(True, "software"))
 
-    def test_raman_assisted_autofocus_is_rejected(self):
-        for autofocus_object in ("laser", "cell", "glass", "quartz"):
+    def test_raman_assisted_autofocus_is_allowed(self):
+        for autofocus_object in (
+            "laser", "software", "cell", "glass", "quartz"
+        ):
             with self.subTest(autofocus_object=autofocus_object):
-                self.assertFalse(
+                self.assertTrue(
                     _raman_free_autofocus_allowed(True, autofocus_object)
                 )
+
+    def test_unknown_autofocus_is_rejected(self):
+        self.assertFalse(_raman_free_autofocus_allowed(True, "unknown"))
 
 
 class TestAutomaticHardwareDisconnect(unittest.TestCase):

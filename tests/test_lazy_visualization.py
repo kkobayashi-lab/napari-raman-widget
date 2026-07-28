@@ -45,10 +45,10 @@ class _Core:
         self.mda = type("MDA", (), {"events": events})()
 
     def getImageHeight(self):
-        return 32
+        return 120
 
     def getImageWidth(self):
-        return 48
+        return 180
 
     def getBytesPerPixel(self):
         return 2
@@ -82,7 +82,7 @@ class _Viewer:
     def add_image(self, data, **kwargs):
         layer = _Layer(data, kwargs["metadata"])
         self.layers.append(layer)
-        ndim = data.ndim
+        ndim = data.ndim - (1 if data.shape[-1] in (3, 4) else 0)
         self.dims.axis_labels = [""] * ndim
         self.dims.current_step = [0] * ndim
         return layer
@@ -108,11 +108,19 @@ def test_raman_and_camera_share_one_lazy_channel_stack():
 
     handler.add_raman_spectrum(
         raman_event,
-        np.array([0.0, 1.0, 0.25]),
+        np.array(
+            [
+                [0.0, 1.0, 0.25],
+                [0.2, 0.8, 0.35],
+                [1.0, 0.1, 0.75],
+            ]
+        ),
         np.array([500.0, 1000.0, 1500.0]),
+        points=np.array([[0.2, 0.3], [0.2, 0.3], [0.8, 0.7]]),
+        which=["cells", "cells", "cells"],
     )
     handler._on_mda_frame(
-        np.full((32, 48), 17, dtype=np.uint16),
+        np.full((120, 180), 17, dtype=np.uint16),
         camera_event,
     )
 
@@ -123,21 +131,57 @@ def test_raman_and_camera_share_one_lazy_channel_stack():
     assert np.max(layer.data[0, 0, 0]) == np.iinfo(np.uint16).max
     np.testing.assert_array_equal(
         layer.data[0, 1, 0],
-        np.full((32, 48), 17, dtype=np.uint16),
+        np.full((120, 180, 3), 17, dtype=np.uint16),
     )
     assert app is not None
 
 
-def test_spectrum_rasterizer_has_no_hardware_dependency():
+def test_repeated_frames_at_same_point_are_averaged():
+    lazy = _load_lazy_module()
+    spectra = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [3.0, 4.0, 5.0],
+            [10.0, 20.0, 30.0],
+        ]
+    )
+    points = np.array([[0.25, 0.5], [0.25, 0.5], [0.75, 0.5]])
+
+    traces, grouped_points, counts = (
+        lazy.LazyMDAViewer._group_spectra_by_point(spectra, points)
+    )
+
+    np.testing.assert_allclose(
+        traces,
+        [[2.0, 3.0, 4.0], [10.0, 20.0, 30.0]],
+    )
+    np.testing.assert_allclose(
+        grouped_points,
+        [[0.25, 0.5], [0.75, 0.5]],
+    )
+    np.testing.assert_array_equal(counts, [2, 1])
+
+
+def test_matplotlib_spectrum_renderer_uses_rgb_without_hardware():
     lazy = _load_lazy_module()
 
     image = lazy.LazyMDAViewer._spectrum_image(
-        np.array([1.0, 4.0, 2.0]),
+        np.array(
+            [
+                [1.0, 4.0, 2.0],
+                [4.0, 1.0, 3.0],
+            ]
+        ),
         None,
-        (40, 60),
+        (180, 260, 3),
         np.dtype("uint8"),
+        points=np.array([[0.2, 0.3], [0.7, 0.8]]),
     )
 
-    assert image.shape == (40, 60)
+    assert image.shape == (180, 260, 3)
     assert image.dtype == np.uint8
     assert image.max() == 255
+    assert np.any(
+        (image[..., 0] != image[..., 1])
+        | (image[..., 1] != image[..., 2])
+    )

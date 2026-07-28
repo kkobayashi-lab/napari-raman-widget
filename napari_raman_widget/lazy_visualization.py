@@ -71,7 +71,7 @@ class LazyMDAViewer:
             width = int(self._mmc.getImageWidth())
         except Exception:
             height = width = 0
-        return (height or 512, width or 512)
+        return (height or 512, width or 512, 3)
 
     def _create_stack(self, event, *, image=None):
         sequence = event.sequence or self._sequence
@@ -81,7 +81,7 @@ class LazyMDAViewer:
             dtype = self._camera_dtype()
         else:
             image = np.asarray(image)
-            frame_shape = image.shape
+            frame_shape = (*image.shape[:2], 3)
             dtype = image.dtype
         self._frame_shape = frame_shape
         shape = tuple(int(sequence.sizes[axis]) for axis in axes) + frame_shape
@@ -105,8 +105,7 @@ class LazyMDAViewer:
             "lazy_mda_visualization": True,
             "raman_channel": "RM",
         }
-        is_rgb = len(frame_shape) == 3 and frame_shape[-1] in (3, 4)
-        scale = [1.0] * (len(shape) - (1 if is_rgb else 0))
+        scale = [1.0] * (len(shape) - 1)
         pixel_size = float(self._mmc.getPixelSizeUm())
         if pixel_size:
             scale[-2:] = [pixel_size, pixel_size]
@@ -140,88 +139,208 @@ class LazyMDAViewer:
             self._run_layer = self._create_stack(event, image=image)
         axes, array, layer = self._run_layer
         index = self._event_index(event, axes)
-        array[index] = image
+        array[index] = self._camera_image_rgb(image, array.dtype)
         layer.refresh()
         self._show_event(event, axes)
 
     @staticmethod
-    def _spectrum_image(spectra, wavenumbers, shape, dtype):
-        """Rasterize a spectrum into an existing camera-sized image plane."""
+    def _camera_image_rgb(image, dtype):
+        """Return a camera frame as RGB without changing its intensity."""
+        image = np.asarray(image, dtype=dtype)
+        if image.ndim == 2:
+            return np.repeat(image[..., None], 3, axis=-1)
+        if image.ndim == 3 and image.shape[-1] >= 3:
+            return image[..., :3]
+        raise ValueError(f"Unsupported camera frame shape: {image.shape}")
+
+    @staticmethod
+    def _group_spectra_by_point(spectra, points=None):
+        """Average repeated spectral frames collected at the same point."""
         spectra = np.asarray(spectra)
         if spectra.ndim == 1:
-            values = spectra
+            frames = spectra[None, :]
         else:
-            values = np.mean(spectra.reshape(-1, spectra.shape[-1]), axis=0)
-        values = np.asarray(values, dtype=np.float64)
+            frames = spectra.reshape(-1, spectra.shape[-1])
+        frames = np.asarray(frames, dtype=np.float64)
 
-        height, width = shape[:2]
-        canvas = np.zeros((height, width), dtype=dtype)
-        if values.size < 2 or height < 4 or width < 4:
-            return canvas
+        if points is None:
+            points_array = np.empty((0, 2), dtype=float)
+        else:
+            points_array = np.atleast_2d(np.asarray(points, dtype=float))
+        if len(frames) == 1 or len(points_array) != len(frames):
+            return frames, [None] * len(frames), np.ones(len(frames), dtype=int)
+
+        grouped_indices = []
+        grouped_points = []
+        for frame_index, point in enumerate(points_array):
+            for group_index, known_point in enumerate(grouped_points):
+                if np.allclose(point, known_point, rtol=0, atol=1e-6):
+                    grouped_indices[group_index].append(frame_index)
+                    break
+            else:
+                grouped_points.append(point.copy())
+                grouped_indices.append([frame_index])
+
+        averaged = np.stack(
+            [np.mean(frames[indices], axis=0) for indices in grouped_indices]
+        )
+        counts = np.asarray([len(indices) for indices in grouped_indices])
+        return averaged, grouped_points, counts
+
+    @staticmethod
+    def _convert_rgb_dtype(image, dtype):
+        """Convert an Agg uint8 RGB buffer to the MDA stack's dtype."""
+        dtype = np.dtype(dtype)
+        image = np.asarray(image)
+        if dtype == np.dtype("uint8"):
+            return image
+        normalized = image.astype(np.float64) / 255.0
+        if np.issubdtype(dtype, np.integer):
+            return np.rint(normalized * np.iinfo(dtype).max).astype(dtype)
+        if np.issubdtype(dtype, np.floating):
+            return normalized.astype(dtype)
+        return (normalized >= 0.5).astype(dtype)
+
+    @classmethod
+    def _spectrum_image(
+        cls,
+        spectra,
+        wavenumbers,
+        shape,
+        dtype,
+        *,
+        points=None,
+        which=None,
+        title=None,
+    ):
+        """Render point-grouped Raman spectra using off-screen Matplotlib."""
+        # Keep Matplotlib lazy: camera-only runs never import it.
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+
+        traces, grouped_points, counts = cls._group_spectra_by_point(
+            spectra, points
+        )
+        spectrum_length = traces.shape[-1]
 
         if wavenumbers is None:
-            x_values = np.arange(values.size, dtype=np.float64)
+            x_values = np.arange(spectrum_length, dtype=np.float64)
+            x_label = "Detector pixel"
         else:
             x_values = np.asarray(wavenumbers, dtype=np.float64)
-            if x_values.ndim != 1 or x_values.size != values.size:
-                x_values = np.arange(values.size, dtype=np.float64)
-        finite = np.isfinite(x_values) & np.isfinite(values)
-        if np.count_nonzero(finite) < 2:
-            return canvas
-        x_values = x_values[finite]
-        values = values[finite]
-        order = np.argsort(x_values)
-        x_values = x_values[order]
-        values = values[order]
+            if x_values.ndim != 1 or x_values.size != spectrum_length:
+                x_values = np.arange(spectrum_length, dtype=np.float64)
+                x_label = "Detector pixel"
+            else:
+                x_label = "Raman shift (cm$^{-1}$)"
 
-        left = max(1, width // 20)
-        right = max(left + 1, width - left - 1)
-        top = max(1, height // 20)
-        bottom = max(top + 1, height - top - 1)
-        columns = np.arange(left, right + 1)
-        sampled = np.interp(
-            np.linspace(x_values[0], x_values[-1], columns.size),
-            x_values,
-            values,
+        height, width = shape[:2]
+        dpi = 100
+        figure = Figure(
+            figsize=(width / dpi, height / dpi),
+            dpi=dpi,
+            facecolor="#181818",
         )
-        y_min = float(np.min(sampled))
-        y_max = float(np.max(sampled))
-        if y_max == y_min:
-            normalized = np.full(sampled.shape, 0.5)
-        else:
-            normalized = (sampled - y_min) / (y_max - y_min)
-        rows = bottom - np.rint(normalized * (bottom - top)).astype(int)
+        canvas = FigureCanvasAgg(figure)
+        axis = figure.add_subplot(111)
+        axis.set_facecolor("#181818")
 
-        if np.issubdtype(np.dtype(dtype), np.integer):
-            line_value = np.iinfo(dtype).max
-        else:
-            line_value = 1.0
-        axis_value = line_value // 4 if np.issubdtype(
-            np.dtype(dtype), np.integer
-        ) else 0.25
-        canvas[bottom, left:right + 1] = axis_value
-        canvas[top:bottom + 1, left] = axis_value
-        canvas[rows, columns] = line_value
-        canvas[np.maximum(top, rows - 1), columns] = line_value
+        point_sources = [None] * len(grouped_points)
+        if points is not None and which is not None:
+            points_array = np.atleast_2d(np.asarray(points, dtype=float))
+            source_names = [str(name) for name in which]
+            if len(points_array) == len(source_names):
+                for point_index, point in enumerate(grouped_points):
+                    if point is None:
+                        continue
+                    matches = np.all(
+                        np.isclose(
+                            points_array,
+                            point,
+                            rtol=0,
+                            atol=1e-6,
+                        ),
+                        axis=1,
+                    )
+                    names = list(
+                        dict.fromkeys(
+                            source_names[index]
+                            for index in np.flatnonzero(matches)
+                        )
+                    )
+                    if names:
+                        point_sources[point_index] = "/".join(names)
 
-        if len(shape) == 3:
-            rgb = np.zeros(shape, dtype=dtype)
-            rgb[..., 1] = canvas
-            rgb[..., 2] = canvas
-            return rgb
-        return canvas
+        for trace_index, (trace, point, count) in enumerate(
+            zip(traces, grouped_points, counts)
+        ):
+            finite = np.isfinite(x_values) & np.isfinite(trace)
+            if np.count_nonzero(finite) < 2:
+                continue
+            label = f"Point {trace_index + 1}"
+            if point is not None:
+                label += f" ({point[0]:.3f}, {point[1]:.3f})"
+            if point_sources[trace_index]:
+                label += f" [{point_sources[trace_index]}]"
+            if count > 1:
+                label += f", mean of {count}"
+            axis.plot(
+                x_values[finite],
+                trace[finite],
+                linewidth=1.25,
+                label=label,
+            )
+
+        axis.set_xlabel(x_label, color="white")
+        axis.set_ylabel("Intensity", color="white")
+        if title:
+            axis.set_title(title, color="white")
+        axis.tick_params(colors="white", labelsize=8)
+        for spine in axis.spines.values():
+            spine.set_color("#b0b0b0")
+        axis.grid(color="white", alpha=0.12, linewidth=0.5)
+        if len(traces) > 1 or np.any(counts > 1):
+            legend = axis.legend(
+                loc="best",
+                fontsize=7,
+                facecolor="#202020",
+                edgecolor="#808080",
+            )
+            for text in legend.get_texts():
+                text.set_color("white")
+        figure.tight_layout(pad=0.7)
+        canvas.draw()
+        rgb = np.asarray(canvas.buffer_rgba())[..., :3].copy()
+        return cls._convert_rgb_dtype(rgb, dtype)
 
     @ensure_main_thread
-    def add_raman_spectrum(self, event, spectra, wavenumbers=None):
+    def add_raman_spectrum(
+        self,
+        event,
+        spectra,
+        wavenumbers=None,
+        *,
+        points=None,
+        which=None,
+    ):
         """Put one acquired spectrum into the RM plane of the shared MDA stack."""
         if self._run_layer is None:
             self._run_layer = self._create_stack(event)
         axes, array, layer = self._run_layer
+        index = getattr(event, "index", {})
+        title = (
+            f"Raman t={index.get('t', 0)}, "
+            f"p={index.get('p', 0)}, z={index.get('z', 0)}, "
+            f"c={index.get('c', 0)}"
+        )
         image = self._spectrum_image(
             spectra,
             wavenumbers,
             self._frame_shape,
             array.dtype,
+            points=points,
+            which=which,
+            title=title,
         )
         array[self._event_index(event, axes)] = image
         layer.refresh()

@@ -48,7 +48,14 @@ def _parse_raman_z_indices(text):
 
 
 def _raman_free_autofocus_allowed(autofocus_enabled, autofocus_object):
-    return not autofocus_enabled or autofocus_object == "software"
+    """Allow autofocus when the main acquisition has no Raman channel.
+
+    Laser, cell, glass, and quartz modes may still use the Raman hardware
+    during autofocus; "Raman-free" here only means that the main acquisition
+    does not record Raman spectra.
+    """
+    supported = {"laser", "software", "cell", "glass", "quartz"}
+    return not autofocus_enabled or autofocus_object in supported
 
 
 def _spatial_yx(point):
@@ -2242,7 +2249,7 @@ class HardwareWidget(QWidget):
 
     @Slot(object, object, object, object, object)
     def _on_raman_spectra_ready(
-        self, event, spectra, _points, _which, _exposure
+        self, event, spectra, points, which, _exposure
     ):
         """Add the spectrum image at RM's index in the shared MDA stack."""
         if self._lazy_mda_viewer is None:
@@ -2254,7 +2261,11 @@ class HardwareWidget(QWidget):
         except Exception:
             wavenumbers = None
         self._lazy_mda_viewer.add_raman_spectrum(
-            event, spectra, wavenumbers
+            event,
+            spectra,
+            wavenumbers,
+            points=points,
+            which=which,
         )
 
     def _on_raman_mda_canceled(self, _sequence):
@@ -3717,7 +3728,8 @@ class HardwareWidget(QWidget):
             autofocus_enabled, autofocus_object
         ):
             self.status.setText(
-                "Status: Raman-free MDA requires Software or None autofocus"
+                "Status: unsupported autofocus mode for Raman-free MDA: "
+                f"{autofocus_object}"
             )
             return
 
