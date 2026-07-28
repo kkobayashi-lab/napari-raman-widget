@@ -468,7 +468,6 @@ Imaging positions & blank = autofocus positions & Optional comma-separated zero-
 indices at which imaging occurs. The code initializes this from the original
 selection autofocus list before applying overrides, so set this explicitly when
 using a substantially different autofocus override.\\
-Raman glass offset (um) & 5; -1000 to 1000 & Axial offset used for the Raman measurement.\\
 Autofocus search range & 6; 0.1--1000 & Coarse autofocus range; hidden if autofocus is None.\\
 Autofocus search pts & 8; 2--500 & Coarse autofocus sample count.\\
 Laser fine search range (+/- um) & 1.5; 0.1--1000 & Fine range shown only for laser autofocus.\\
@@ -488,21 +487,17 @@ Z relative (comma-separated um) & \code{0, 4} & Relative Z planes used to replac
 the sequence Z plan. Values must parse as floats.\\
 Raman z indices & \code{0} & Zero-based indices into the Z list where Raman is
 requested. Ensure every index exists; e.g. with two Z values, valid indices are 0 and 1.\\
-Extra fluorescence channel & none; default row exposure 10 ms & \ui{+ Add channel}
-adds any Micro-Manager channel (including BF); \ui{x} removes it. Duplicate channel
-names are ignored. Added channels inherit the first sequence channel as a template.\\
+Acquisition channel & none; default row exposure 10 ms, Z offset 0 um &
+\ui{+ Add channel} adds any Micro-Manager channel (including BF or RM);
+\ui{x} removes it. Every row includes a Z offset that is added directly to the
+focused baseline and relative Z plane. Duplicate channel names are rejected.\\
 \endfieldtable
 
 The acquisition uses axis order \code{t,p,c,z}, assigns the selection's aiming-source
-layers, replaces the time and Z plans, adds unique fluorescence channels, and writes
-Raman metadata containing the requested Z indices. \ui{Stop} requests MDA cancellation
-and stops sequence acquisition; the current hardware event may finish before exit.
-
-\section{Generate dataset}
-\ui{Generate dataset} asks for a completed MDA run directory. It loads the experiment,
-using the current \ui{Integrated batch collection} value, and writes sibling outputs
-\code{data/dataset/ds\_<run>.zarr} and \code{df\_<run>.pkl}. It also opens the dataset
-viewer. Set the batch dropdown to match how that run was acquired before generating.
+layers, replaces the time and Z plans, adds unique acquisition channels, and writes
+the per-channel Z offsets into the sequence metadata. Raman metadata contains the
+requested Z indices. \ui{Stop} requests MDA cancellation and stops sequence
+acquisition; the current hardware event may finish before exit.
 
 \section{Pixel-to-stage calibration}
 Check \ui{Pixel-to-stage calibration} to reveal these controls:
@@ -530,11 +525,9 @@ calibration dataset, repeat \ui{Pick points}, and save to the same JSON file.
 \section*{Saved output}
 The Raman acquisition is saved under
 \code{<output folder>/<Writer output dir>/}. The writer creates the TIFF and NumPy
-files for the run. \ui{Generate dataset} saves
-\code{<run parent>/dataset/ds\_<run>.zarr} and
-\code{<run parent>/dataset/df\_<run>.pkl}. Pixel-to-stage calibration saves the
-chosen \ui{Model file} as JSON at the location selected in the save dialog.
-Each save replaces only the active objective's entry.
+files for the run. Pixel-to-stage calibration saves the chosen \ui{Model file} as
+JSON at the location selected in the save dialog. Each save replaces only the active
+objective's entry.
 
 \section*{Options at a glance}
 \begin{longtable}{@{}p{0.31\textwidth}p{0.63\textwidth}@{}}
@@ -542,7 +535,6 @@ Each save replaces only the active objective's entry.
 Writer output directory & Destination used by the Raman TIFF/NumPy writer.\\
 Autofocus positions & Zero-based position indices that receive autofocus.\\
 Imaging positions & Zero-based position indices that receive imaging.\\
-Raman glass offset & Axial offset between glass focus and Raman measurement.\\
 Autofocus range / points & Extent and sampling count of the coarse focus search.\\
 Laser fine range / points & Extent and sampling count of laser fine focus.\\
 Segment and track & Re-detects cells and updates aiming during the time series.\\
@@ -556,10 +548,10 @@ Loops / interval & Number of time points and requested spacing between them.\\
 Refocus \& segment every & Time-point cadence for focus and tracking updates.\\
 Z relative & Comma-separated relative Z planes in micrometres.\\
 Raman Z indices & Indices of relative Z planes receiving Raman acquisition.\\
-Add/remove fluorescence channel & Manages channel/exposure pairs in the sequence.\\
+Add/remove acquisition channel & Manages channel/exposure/Z-offset entries in
+the sequence.\\
 Run Raman MDA & Builds and launches the final \code{t,p,c,z} acquisition.\\
 Stop & Requests MDA cancellation and stops sequence acquisition.\\
-Generate dataset & Converts a completed run into Zarr and pickled-table outputs.\\
 Pixel-to-stage calibration & Reveals the Vandermonde calibration workflow.\\
 Dataset & Zarr images and stage coordinates used for calibration.\\
 Vandermonde degree & Polynomial degree used for the pixel-to-stage fit.\\
@@ -587,7 +579,6 @@ Axial background scan & \code{reference/<name>\_<uuid>.zarr}.\\
 Spatial mapping & \code{grid\_scan\_data\_*.zarr} or \code{grid\_scan\_z\_*.zarr}.\\
 Selections / stage grid & In-memory source layers, autofocus indices, and MDA sequence.\\
 Raman MDA & TIFF/NumPy writer directory under \ui{Writer output dir}.\\
-Generate dataset & \code{ds\_<run>.zarr} and \code{df\_<run>.pkl}.\\
 Pixel-to-stage fit & Vandermonde JSON model.\\\bottomrule
 \end{longtable}
 

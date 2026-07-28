@@ -20,7 +20,7 @@ from .log_window import LogWindow, _StdoutRedirector
 from .lazy_visualization import install_lazy_mda_viewer
 from .plot_windows import (
     CalibrationPlotWindow, GridScanPlotWindow, ReferenceSpectraWindow,
-    SpectrumWindow, DatasetViewerWindow,
+    SpectrumWindow,
 )
 from .ui_helpers import make_collapsible
 
@@ -92,14 +92,13 @@ class HardwareWidget(QWidget):
         self._raman_mda_pending = False
         self._raman_mda_canceled = False
         self._raman_mda_writer = None
-        self._raman_mda_batch = False
-        self._raman_mda_has_raman = False
         self._raman_visualization_engine = None
         self._lazy_mda_viewer = None
         self.px2stage_picker = None
         self.px2stage_xy = None
         self.px2stage_objective = None
         self.mm_config = None
+        self._shutter_return_channel = "BF"
         outer = QVBoxLayout()
 
         self.manual_link = QLabel(
@@ -195,6 +194,52 @@ class HardwareWidget(QWidget):
 
         loading_box.setLayout(loading_layout)
         outer.addWidget(loading_box)
+
+        # ================= HARDWARE CONTROL SECTION =================
+        hardware_box = make_collapsible("Hardware Control", expanded=False)
+        hardware_layout = QVBoxLayout()
+
+        click_row = QHBoxLayout()
+        self.click_center_btn = QPushButton("Click to center")
+        self.click_center_btn.setCheckable(True)
+        self.click_center_btn.toggled.connect(self._toggle_click_to_center)
+        self.click_laser_btn = QPushButton("Click to point laser")
+        self.click_laser_btn.setCheckable(True)
+        self.click_laser_btn.toggled.connect(self._toggle_click_to_laser)
+        click_row.addWidget(self.click_center_btn)
+        click_row.addWidget(self.click_laser_btn)
+        hardware_layout.addLayout(click_row)
+
+        shutter_row = QHBoxLayout()
+        shutter_row.addWidget(QLabel("Laser shutter:"))
+        self.open_shutter_btn = QPushButton("Open (RM)")
+        self.close_shutter_btn = QPushButton("Close")
+        self.open_shutter_btn.clicked.connect(
+            lambda _checked=False: self._set_laser_shutter(True)
+        )
+        self.close_shutter_btn.clicked.connect(
+            lambda _checked=False: self._set_laser_shutter(False)
+        )
+        shutter_row.addWidget(self.open_shutter_btn)
+        shutter_row.addWidget(self.close_shutter_btn)
+        hardware_layout.addLayout(shutter_row)
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("ND filter:"))
+        self.open_filter_btn = QPushButton("Open (remove)")
+        self.close_filter_btn = QPushButton("Close (insert)")
+        self.open_filter_btn.clicked.connect(
+            lambda _checked=False: self._set_nd_filter(True)
+        )
+        self.close_filter_btn.clicked.connect(
+            lambda _checked=False: self._set_nd_filter(False)
+        )
+        filter_row.addWidget(self.open_filter_btn)
+        filter_row.addWidget(self.close_filter_btn)
+        hardware_layout.addLayout(filter_row)
+
+        hardware_box.setLayout(hardware_layout)
+        outer.addWidget(hardware_box)
 
         # ================= COLLECT SPECTRUM SECTION =================
         raman_box = make_collapsible(
@@ -830,11 +875,7 @@ class HardwareWidget(QWidget):
         mask_btn_row = QHBoxLayout()
         self.add_mask_btn = QPushButton("Add mask")
         self.add_mask_btn.clicked.connect(self.add_mask)
-        self.click_center_btn = QPushButton("Click to center")
-        self.click_center_btn.setCheckable(True)
-        self.click_center_btn.toggled.connect(self._toggle_click_to_center)
         mask_btn_row.addWidget(self.add_mask_btn)
-        mask_btn_row.addWidget(self.click_center_btn)
         sel_layout.addLayout(mask_btn_row)
 
         sel_layout.addWidget(QLabel("Automated point selection:"))
@@ -967,16 +1008,6 @@ class HardwareWidget(QWidget):
         self.mda_imgp_input.setPlaceholderText("(blank = same as autofocus p)")
         imgp_row.addWidget(self.mda_imgp_input)
         mda_layout.addLayout(imgp_row)
-
-        raman_off_row = QHBoxLayout()
-        raman_off_row.addWidget(QLabel("Raman glass offset (um):"))
-        self.mda_raman_off_input = QDoubleSpinBox()
-        self.mda_raman_off_input.setRange(-1000, 1000)
-        self.mda_raman_off_input.setValue(5.0)
-        self.mda_raman_off_input.setDecimals(2)
-        self.mda_raman_off_input.setSingleStep(0.1)
-        raman_off_row.addWidget(self.mda_raman_off_input)
-        mda_layout.addLayout(raman_off_row)
 
         af_range_row = QHBoxLayout()
         self._af_range_label = QLabel("Autofocus search range:")
@@ -1143,7 +1174,7 @@ class HardwareWidget(QWidget):
         mda_layout.addLayout(rz_row)
 
         mda_layout.addWidget(QLabel(
-            "Acquisition channels (add RM for Raman; BF is optional):"
+            "Acquisition channels (channel / exposure / Z offset):"
         ))
         self.mda_channel_rows_layout = QVBoxLayout()
         mda_layout.addLayout(self.mda_channel_rows_layout)
@@ -1164,35 +1195,16 @@ class HardwareWidget(QWidget):
 
         mda_layout.addLayout(mda_btns_row)
 
-        self.auto_dataset_check = QCheckBox(
-            "Generate dataset automatically after a successful run"
-        )
-        self.auto_dataset_check.setChecked(False)
-        mda_layout.addWidget(self.auto_dataset_check)
- 
         # --- separator ---
         sep = QLabel("-" * 45)
         sep.setAlignment(Qt.AlignCenter)
         mda_layout.addWidget(sep)
- 
-        dataset_help = QLabel(
-            "For large acquisitions, use the indexed viewer. Legacy dataset "
-            "generation eagerly assembles all TIFFs."
-        )
-        dataset_help.setWordWrap(True)
-        mda_layout.addWidget(dataset_help)
 
-        dataset_actions = QHBoxLayout()
         self.view_acquisition_btn = QPushButton("Open saved acquisition")
         self.view_acquisition_btn.clicked.connect(
             self.open_acquisition_viewer
         )
-        dataset_actions.addWidget(self.view_acquisition_btn, 2)
-
-        self.gen_dataset_btn = QPushButton("Generate legacy dataset")
-        self.gen_dataset_btn.clicked.connect(self.generate_dataset)
-        dataset_actions.addWidget(self.gen_dataset_btn, 1)
-        mda_layout.addLayout(dataset_actions)
+        mda_layout.addWidget(self.view_acquisition_btn)
  
         # --- pixel-to-stage calibration ---
         self.px2stage_check = QCheckBox("Pixel-to-stage calibration")
@@ -1897,7 +1909,9 @@ class HardwareWidget(QWidget):
         if entry in self.channel_rows:
             self.channel_rows.remove(entry)
 
-    def _add_mda_channel_row(self, *, channel=None, exposure=10.0):
+    def _add_mda_channel_row(
+        self, *, channel=None, exposure=10.0, z_offset=0.0
+    ):
         """Append a channel row to the MDA section."""
         row = QHBoxLayout()
         combo = QComboBox()
@@ -1935,16 +1949,31 @@ class HardwareWidget(QWidget):
         exp_spin.setDecimals(1)
         exp_spin.setSuffix(" ms")
 
+        offset_spin = QDoubleSpinBox()
+        offset_spin.setRange(-1000, 1000)
+        offset_spin.setValue(z_offset)
+        offset_spin.setDecimals(2)
+        offset_spin.setSingleStep(0.1)
+        offset_spin.setSuffix(" um")
+        offset_spin.setToolTip(
+            "Added directly to the focused Z position for this channel"
+        )
+
         remove_btn = QPushButton("x")
         remove_btn.setFixedWidth(30)
 
         row.addWidget(combo, 2)
         row.addWidget(exp_spin, 1)
+        row.addWidget(offset_spin, 1)
         row.addWidget(remove_btn)
         self.mda_channel_rows_layout.addLayout(row)
 
         entry = {
-            "row": row, "combo": combo, "exp": exp_spin, "remove": remove_btn,
+            "row": row,
+            "combo": combo,
+            "exp": exp_spin,
+            "offset": offset_spin,
+            "remove": remove_btn,
         }
         self.mda_channel_rows.append(entry)
         combo.currentTextChanged.connect(
@@ -2140,78 +2169,6 @@ class HardwareWidget(QWidget):
         window.show()
         self._plot_windows.append(window)
 
-    def generate_dataset(self):
-        active_writer = getattr(self, "mda_writer", None)
-        if active_writer is not None and not getattr(
-            active_writer, "closed", True
-        ):
-            self.status.setText(
-                "Status: finish or stop the active MDA before legacy export"
-            )
-            return
-        # Let the user pick which run folder to load.
-        default_dir = self.mda_dir_input.text().strip() or "data/run"
-        run_dir = QFileDialog.getExistingDirectory(
-            self, "Select MDA run folder", default_dir
-        )
-        if not run_dir:
-            return  # user cancelled
-
-        batch = self.sel_batch_combo.currentText() == "True"
-
-        self._generate_dataset(run_dir, batch)
-
-    def _generate_dataset(self, run_dir, batch):
-        """Generate and display a dataset for an explicit MDA run folder."""
-
-        log = LogWindow(title="Dataset generation log")
-        log.show()
-        self._plot_windows.append(log)
-
-        self.status.setText("Status: generating dataset...")
-        self.repaint()
-
-        try:
-            from .dataset import load_experiment
-            from pathlib import Path
-
-            run_path = Path(run_dir)
-            run_name = run_path.name              # e.g. "run_9"
-            parent = run_path.parent              # e.g. "data/"
-            dataset_dir = parent / "dataset"      # e.g. "data/dataset/"
-
-            os.makedirs(dataset_dir, exist_ok=True)
-            zarr_path = str(dataset_dir / f"ds_{run_name}.zarr")
-            pkl_path = str(dataset_dir / f"df_{run_name}.pkl")
-
-            with _StdoutRedirector(log):
-                wavenumbers = (
-                    self.collector.get_wavenumbers()
-                    if self.collector is not None else None
-                )
-                df, df_locs, da = load_experiment(
-                    run_dir, zarr_output=zarr_path, batch=batch,
-                    wavenumbers=wavenumbers,
-                )
-                df.to_pickle(pkl_path)
-                print(f"Saved DataFrame to {pkl_path}")
-
-            log.append(f"\n--- dataset ready: {len(df)} spectra ---\n")
-
-            win = DatasetViewerWindow(
-                df, da, title=f"Dataset: {run_name}"
-            )
-            win.show()
-            self._plot_windows.append(win)
-
-            self.status.setText(
-                f"Status: dataset generated ({len(df)} spectra) "
-                f"-> {zarr_path}, {pkl_path}"
-            )
-        except Exception as e:
-            log.append(f"\n--- generation failed: {e} ---\n")
-            self.status.setText(f"Status: dataset generation failed - {e}")
-
     def _connect_mda_completion_events(self):
         """Connect completion handling once for the active MDA event source."""
         events = self.core.mda.events
@@ -2274,13 +2231,11 @@ class HardwareWidget(QWidget):
             self._raman_mda_canceled = True
 
     def _on_raman_mda_finished(self, _sequence):
-        """Generate the just-finished Raman run when the user opted in."""
+        """Close the writer and report how the Raman MDA finished."""
         if not self._raman_mda_pending:
             return
 
         writer = self._raman_mda_writer
-        batch = self._raman_mda_batch
-        has_raman = self._raman_mda_has_raman
         self._raman_mda_pending = False
         self._raman_mda_writer = None
 
@@ -2305,33 +2260,10 @@ class HardwareWidget(QWidget):
             if writer_status != "completed":
                 reason = writer_status
         if reason != "completed":
-            suffix = (
-                " -- automatic dataset generation skipped"
-                if self.auto_dataset_check.isChecked() else ""
-            )
-            self.status.setText(f"Status: MDA {reason}{suffix}")
+            self.status.setText(f"Status: MDA {reason}")
             return
 
-        if not self.auto_dataset_check.isChecked():
-            self.status.setText("Status: MDA finished OK")
-            return
-
-        if not has_raman:
-            self.status.setText(
-                "Status: Raman-free MDA finished -- automatic dataset "
-                "generation skipped (no Raman spectra)"
-            )
-            return
-
-        run_dir = getattr(writer, "path", None)
-        if run_dir is None:
-            self.status.setText(
-                "Status: MDA finished -- automatic dataset generation failed "
-                "(run folder unavailable)"
-            )
-            return
-
-        self._generate_dataset(str(run_dir), batch)
+        self.status.setText("Status: MDA finished OK")
 
     
     def browse_px2stage_ds(self):
@@ -3698,7 +3630,11 @@ class HardwareWidget(QWidget):
                 return
             seen_channels.add(channel_name)
             acquisition_channels.append(
-                (channel_name, float(entry["exp"].value()))
+                (
+                    channel_name,
+                    float(entry["exp"].value()),
+                    float(entry["offset"].value()),
+                )
             )
         if not acquisition_channels:
             self.status.setText(
@@ -3748,7 +3684,6 @@ class HardwareWidget(QWidget):
 
         out_dir = self.mda_dir_input.text().strip() or "data/run"
         os.makedirs(out_dir, exist_ok=True)
-        raman_offset = float(self.mda_raman_off_input.value())
         af_range = float(self.mda_af_range_input.value())
         search_pts = int(self.mda_search_pts_input.value())
         fine_search_range = float(self.mda_fine_range_input.value())
@@ -3805,7 +3740,6 @@ class HardwareWidget(QWidget):
                     cellpose_model=cellpose_model,
                     segment_crop=segment_crop,
                     tracking_config=tracking_config,
-                    raman_glass_offset=raman_offset,
                     autofocus_search_range=af_range,
                     search_pts=search_pts,
                     fine_search_range=fine_search_range,
@@ -3888,14 +3822,28 @@ class HardwareWidget(QWidget):
                             None if channel_name == "RM" else channel_exposure
                         ),
                     )
-                    for channel_name, channel_exposure in acquisition_channels
+                    for (
+                        channel_name,
+                        channel_exposure,
+                        _channel_offset,
+                    ) in acquisition_channels
                 )
 
+                metadata = dict(final_seq.metadata)
+                metadata["channel_z_offsets_um"] = {
+                    channel_name: channel_offset
+                    for (
+                        channel_name,
+                        _channel_exposure,
+                        channel_offset,
+                    ) in acquisition_channels
+                }
                 final_seq = final_seq.replace(
                     axis_order=("t", "p", "c", "z"),
                     time_plan=new_time_plan,
                     z_plan=new_z_plan,
                     channels=acquisition_channel_objs,
+                    metadata=metadata,
                 )
 
                 if raman_enabled and "raman" in final_seq.metadata:
@@ -3914,7 +3862,8 @@ class HardwareWidget(QWidget):
                     f"search_pts={search_pts}, fine_range={fine_search_range}, "
                     f"fine_pts={fine_search_pts}, refocus_every={refocus_every}, "
                     f"image=({img_x}x{img_y}), "
-                    f"channels={[ch for ch, _ in acquisition_channels]}"
+                    "channels="
+                    f"{[(ch, offset) for ch, _, offset in acquisition_channels]}"
                 )
                 print(
                     f"[debug] engine._autofocus={engine._autofocus}, "
@@ -3924,8 +3873,6 @@ class HardwareWidget(QWidget):
                 self._raman_mda_pending = True
                 self._raman_mda_canceled = False
                 self._raman_mda_writer = self.mda_writer
-                self._raman_mda_batch = batch
-                self._raman_mda_has_raman = raman_enabled
                 self.core.run_mda(final_seq)
 
             log.append("\n--- MDA started ---\n")

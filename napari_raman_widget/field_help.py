@@ -304,7 +304,6 @@ HELP = {
         "the selection's autofocus list; set explicitly when overriding "
         "autofocus differently."
     ),
-    "mda_raman_off_input": "Axial offset used for the Raman measurement (um).",
     "mda_af_range_input": "Coarse autofocus range. Hidden if autofocus is None.",
     "mda_search_pts_input": "Coarse autofocus sample count.",
     "mda_fine_range_input": (
@@ -353,16 +352,6 @@ HELP = {
     "stop_mda_btn": (
         "Request MDA cancellation and stop sequence acquisition; the current "
         "hardware event may finish before exit."
-    ),
-    "auto_dataset_check": (
-        "After a Raman MDA completes successfully, convert its saved run folder "
-        "to Zarr and a pickled spectra table automatically. Canceled, errored, "
-        "and Raman-free runs are skipped."
-    ),
-    "gen_dataset_btn": (
-        "Legacy export: load a completed run directory eagerly, write "
-        "ds_<run>.zarr + df_<run>.pkl, then open the dataset viewer. Prefer "
-        "Open saved acquisition for large runs."
     ),
     "view_acquisition_btn": (
         "Open the indexed, on-demand viewer. Imaging and Raman folders can be "

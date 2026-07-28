@@ -323,12 +323,11 @@ class TestObjectiveSelection(unittest.TestCase):
         self.assertFalse(widget.core.waited)
 
 
-class TestAutomaticDatasetGeneration(unittest.TestCase):
+class TestMdaCompletion(unittest.TestCase):
     def _widget(
-        self, *, reason="completed", checked=True, has_raman=True,
-        status_api=True, writer_status="completed",
+        self, *, reason="completed", status_api=True,
+        writer_status="completed",
     ):
-        generated = []
         mda = SimpleNamespace()
         if status_api:
             mda.status = lambda: SimpleNamespace(finish_reason=reason)
@@ -341,75 +340,49 @@ class TestAutomaticDatasetGeneration(unittest.TestCase):
             _raman_mda_pending=True,
             _raman_mda_canceled=False,
             _raman_mda_writer=writer,
-            _raman_mda_batch=True,
-            _raman_mda_has_raman=has_raman,
-            auto_dataset_check=_FakeCheckBox(checked),
             status=_FakeStatusLabel(),
             core=SimpleNamespace(mda=mda),
-            _generate_dataset=lambda run_dir, batch: generated.append(
-                (run_dir, batch)
-            ),
         )
-        return widget, generated
+        return widget
 
-    def test_successful_run_generates_dataset_when_enabled(self):
-        widget, generated = self._widget()
+    def test_successful_run_reports_completion(self):
+        widget = self._widget()
 
         HardwareWidget._on_raman_mda_finished(widget, None)
 
-        self.assertEqual(generated, [(str(Path("data/run_1")), True)])
+        self.assertEqual(widget.status.text, "Status: MDA finished OK")
         self.assertFalse(widget._raman_mda_pending)
 
-    def test_disabled_option_does_not_generate(self):
-        widget, generated = self._widget(checked=False)
-
-        HardwareWidget._on_raman_mda_finished(widget, None)
-
-        self.assertEqual(generated, [])
-        self.assertEqual(widget.status.text, "Status: MDA finished OK")
-
-    def test_canceled_or_errored_run_does_not_generate(self):
-        for reason in ("canceled", "errored"):
+    def test_canceled_or_errored_run_reports_reason(self):
+        reasons = (("canceled", "canceled"), ("errored", "failed"))
+        for reason, expected in reasons:
             with self.subTest(reason=reason):
-                widget, generated = self._widget(reason=reason)
+                widget = self._widget(reason=reason)
 
                 HardwareWidget._on_raman_mda_finished(widget, None)
 
-                self.assertEqual(generated, [])
-                self.assertIn(
-                    "automatic dataset generation skipped", widget.status.text
-                )
+                self.assertIn(f"MDA {expected}", widget.status.text)
 
-    def test_writer_failure_prevents_export_even_if_core_reports_completion(self):
-        widget, generated = self._widget(writer_status="failed")
+    def test_writer_failure_overrides_core_completion(self):
+        widget = self._widget(writer_status="failed")
 
         HardwareWidget._on_raman_mda_finished(widget, None)
 
-        self.assertEqual(generated, [])
         self.assertIn("MDA failed", widget.status.text)
 
-    def test_raman_free_run_does_not_generate(self):
-        widget, generated = self._widget(has_raman=False)
-
-        HardwareWidget._on_raman_mda_finished(widget, None)
-
-        self.assertEqual(generated, [])
-        self.assertIn("Raman-free MDA finished", widget.status.text)
-
     def test_runtime_without_status_api_uses_completion_signal(self):
-        widget, generated = self._widget(status_api=False)
+        widget = self._widget(status_api=False)
 
         HardwareWidget._on_raman_mda_finished(widget, None)
 
-        self.assertEqual(generated, [(str(Path("data/run_1")), True)])
+        self.assertEqual(widget.status.text, "Status: MDA finished OK")
 
     def test_runtime_without_status_api_uses_cancellation_signal(self):
-        widget, generated = self._widget(status_api=False)
+        widget = self._widget(status_api=False)
 
         HardwareWidget._on_raman_mda_canceled(widget, None)
         HardwareWidget._on_raman_mda_finished(widget, None)
 
-        self.assertEqual(generated, [])
         self.assertIn("MDA canceled", widget.status.text)
 
 
