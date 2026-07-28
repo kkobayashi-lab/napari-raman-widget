@@ -252,9 +252,9 @@ HELP = {
         "Micro-Manager DigitalIO device."
     ),
     "click_center_btn": (
-        "Arm a one-shot viewer click that moves the stage so the clicked "
-        "feature reaches Center Y/X. Needs a Vandermonde model + hardware; "
-        "commands stage motion."
+        "Enable a persistent viewer mode that moves the stage after every "
+        "left-click so the clicked feature reaches Center Y/X. Toggle off or "
+        "press Escape to stop. Needs a Vandermonde model and hardware."
     ),
 
     # ============ AUTOMATED CELL SELECTION ============

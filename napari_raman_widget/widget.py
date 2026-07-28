@@ -2592,10 +2592,14 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: transformer reload failed -- {e}")
 
     def disconnect(self):
-        if self.drag_stage_btn.isChecked():
-            self.drag_stage_btn.setChecked(False)
-        else:
-            self._stop_stage_drag()
+        for button in (
+            self.click_center_btn,
+            self.click_laser_btn,
+            self.drag_stage_btn,
+        ):
+            if button.isChecked():
+                button.setChecked(False)
+        self._stop_stage_drag()
         writer = self._raman_mda_writer or self.mda_writer
         if writer is not None and not getattr(writer, "closed", True):
             writer.disconnect()
@@ -2655,10 +2659,19 @@ class HardwareWidget(QWidget):
             watched is self._napari_window
             and event.type() == QEvent.KeyPress
             and event.key() == Qt.Key_Escape
-            and self.drag_stage_btn.isChecked()
+            and any(
+                button.isChecked()
+                for button in (
+                    self.click_center_btn,
+                    self.click_laser_btn,
+                    self.drag_stage_btn,
+                )
+            )
         ):
+            self.click_center_btn.setChecked(False)
+            self.click_laser_btn.setChecked(False)
             self.drag_stage_btn.setChecked(False)
-            self.status.setText("Status: stage drag disabled")
+            self.status.setText("Status: viewer hardware control disabled")
             return True
         if (
             watched is self._napari_window
@@ -3290,7 +3303,7 @@ class HardwareWidget(QWidget):
 
 
     def _toggle_click_to_center(self, checked):
-        """Arm/disarm one-shot click-to-center mode."""
+        """Arm/disarm persistent click-to-center mode."""
         if checked:
             if self.click_laser_btn.isChecked():
                 self.click_laser_btn.setChecked(False)
@@ -3312,8 +3325,6 @@ class HardwareWidget(QWidget):
         if event.button != 1:          # left click only
             return
         yx = np.array(event.position[-2:], dtype=float)
-        # disarm BEFORE moving so a slow move can't eat a second click
-        self.click_center_btn.setChecked(False)
         self._move_clicked_to_center(yx)
 
     def _toggle_click_to_laser(self, checked):

@@ -222,6 +222,23 @@ class TestAutomaticBeamCentering(unittest.TestCase):
 
 
 class TestHardwareControls(unittest.TestCase):
+    def test_click_to_center_stays_armed_after_each_click(self):
+        class FakeButton:
+            @staticmethod
+            def setChecked(_checked):
+                raise AssertionError("persistent mode should not disarm")
+
+        moved = []
+        widget = SimpleNamespace(
+            click_center_btn=FakeButton(),
+            _move_clicked_to_center=lambda yx: moved.append(yx),
+        )
+        event = SimpleNamespace(button=1, position=(4, 120, 240))
+
+        HardwareWidget._click_center_cb(widget, None, event)
+
+        np.testing.assert_array_equal(moved[0], [120.0, 240.0])
+
     def test_shutter_uses_rm_and_restores_previous_imaging_channel(self):
         class FakeCore:
             def __init__(self):
