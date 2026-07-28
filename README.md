@@ -15,10 +15,11 @@ Provides a single collapsible sidebar panel inside napari with sections for:
 - Automated cell selection inside a mask
 - Running a Raman MDA with fluorescence channels and Z stacks
 
-All outputs (reference `.npy` files, `grid_scan_*.zarr`, recalibrated models,
-the MDA writer directory) are written relative to the current working
-directory - or an output folder you set in the Loading section, which is
-switched to on connect.
+Relative output paths (reference `.npy` files, `grid_scan_*.zarr`,
+recalibrated models, and the MDA writer directory) are resolved beneath the
+base folder in **Data Output**. Changing it applies to the next save
+immediately and does not reconnect hardware or change the process working
+directory.
 
 ## Install
 
@@ -104,10 +105,11 @@ It also includes three usability features layered on top of the panel:
 - **AI assistant** - an optional chat box that maps plain-English commands to
   the panel's existing actions (see [AI assistant](#ai-assistant-chat-panel)).
 
-All outputs (reference `.npy` files, `grid_scan_*.zarr`, recalibrated models,
-the MDA writer directory) are written relative to the current working
-directory - or an output folder you set in the Loading section, which is
-switched to on connect.
+Relative output paths (reference `.npy` files, `grid_scan_*.zarr`,
+recalibrated models, and the MDA writer directory) are resolved beneath the
+base folder in **Data Output**. Changing it applies to the next save
+immediately and does not reconnect hardware or change the process working
+directory.
 
 ## Install
 

@@ -32,9 +32,9 @@ HELP = {
         "commands the objective turret."
     ),
     "out_path": (
-        "Working directory applied on Connect (created if needed). Relative "
-        "result paths resolve from here. Editing after connection has no "
-        "effect."
+        "Base folder for relative result paths. Changes apply to the next "
+        "save immediately and never reload hardware or change the process "
+        "working directory."
     ),
     "connect_btn": (
         "Unload old devices, load the CFG, open the napari-micromanager dock, "
@@ -57,7 +57,7 @@ HELP = {
     ),
     "collect_save_input": (
         "Optional filename; the .npy suffix is added if missing. Relative "
-        "names save under the working directory. Blank = display only."
+        "names save under Data Output. Blank = display only."
     ),
     "collect_btn": (
         "Restart the galvo, transform the last layer's first point, collect "
@@ -322,7 +322,8 @@ HELP = {
 
     # ============ RUN RAMAN MDA ============
     "mda_dir_input": (
-        "Directory for Raman TIFF/NumPy outputs. Blank uses data/run."
+        "Directory for Raman TIFF/NumPy outputs. Relative paths use the Data "
+        "Output base folder; blank uses data/run."
     ),
     "mda_afp_input": (
         "Optional comma-separated 0-based position indices to autofocus, e.g. "

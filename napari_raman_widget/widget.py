@@ -1,5 +1,4 @@
 """The main HardwareWidget: a dockable napari panel for the CNS Raman rig."""
-import os
 import time
 import uuid
 from pathlib import Path
@@ -209,19 +208,6 @@ class HardwareWidget(QWidget):
         objective_row.addWidget(self.objective_combo)
         loading_layout.addLayout(objective_row)
 
-        loading_layout.addWidget(
-            QLabel("Output folder (optional, applied on connect):")
-        )
-        out_row = QHBoxLayout()
-        self.out_path = QLineEdit()
-        self.out_path.setPlaceholderText("(current directory)")
-        out_browse = QPushButton("...")
-        out_browse.setFixedWidth(30)
-        out_browse.clicked.connect(self.browse_out)
-        out_row.addWidget(self.out_path)
-        out_row.addWidget(out_browse)
-        loading_layout.addLayout(out_row)
-
         self.connect_btn = QPushButton("Connect hardware")
         self.disconnect_btn = QPushButton("Disconnect")
         self.reload_tf_btn = QPushButton("Reload transformer")
@@ -296,6 +282,24 @@ class HardwareWidget(QWidget):
 
         hardware_box.setLayout(hardware_layout)
         outer.addWidget(hardware_box)
+
+        # ================= DATA OUTPUT SECTION =================
+        output_box = make_collapsible("Data Output", expanded=True)
+        output_layout = QVBoxLayout()
+        output_layout.addWidget(QLabel(
+            "Base folder for new saves (changes apply immediately):"
+        ))
+        out_row = QHBoxLayout()
+        self.out_path = QLineEdit()
+        self.out_path.setPlaceholderText("(current directory)")
+        out_browse = QPushButton("...")
+        out_browse.setFixedWidth(30)
+        out_browse.clicked.connect(self.browse_out)
+        out_row.addWidget(self.out_path)
+        out_row.addWidget(out_browse)
+        output_layout.addLayout(out_row)
+        output_box.setLayout(output_layout)
+        outer.addWidget(output_box)
 
         # ================= COLLECT SPECTRUM SECTION =================
         raman_box = make_collapsible(
@@ -1419,10 +1423,13 @@ class HardwareWidget(QWidget):
 
     def browse_out(self):
         path = QFileDialog.getExistingDirectory(
-            self, "Select output folder", ""
+            self, "Select output folder", str(self._output_path("."))
         )
         if path:
             self.out_path.setText(path)
+            self.status.setText(
+                f"Status: new saves will use {self._output_path('.')}"
+            )
 
     def browse_vandermonde(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1446,6 +1453,15 @@ class HardwareWidget(QWidget):
             self.mda_track_cfg_input.setText(path)
 
     # -------- helpers --------
+    def _output_path(self, path):
+        """Resolve a relative result path under the current output folder."""
+        candidate = Path(path).expanduser()
+        if candidate.is_absolute():
+            return candidate
+        base_text = self.out_path.text().strip()
+        base = Path(base_text).expanduser() if base_text else Path.cwd()
+        return base / candidate
+
     def _get_image_xy(self):
         """Return (X_size, Y_size) from the camera via the core if connected,
         else from the first image layer in the viewer. Falls back to
@@ -2197,6 +2213,8 @@ class HardwareWidget(QWidget):
         active_path = getattr(active_writer, "path", None)
         if active_path is not None:
             imaging_folder = str(active_path)
+        elif imaging_folder:
+            imaging_folder = str(self._output_path(imaging_folder))
         imaging_path = Path(imaging_folder) if imaging_folder else None
         raman_folder = ""
         sequence_file = ""
@@ -2471,18 +2489,6 @@ class HardwareWidget(QWidget):
         self.status.setText("Status: connecting...")
         self.repaint()
 
-        out = self.out_path.text().strip()
-        if out:
-            try:
-                os.makedirs(out, exist_ok=True)
-                os.chdir(out)
-                print(f"[cwd] changed to {os.getcwd()}")
-            except Exception as e:
-                self.status.setText(
-                    f"Status: couldn't cd to output folder -- {e}"
-                )
-                return
-
         try:
             from pymmcore_plus import CMMCorePlus
             from raman_control.princeton import (
@@ -2739,13 +2745,15 @@ class HardwareWidget(QWidget):
             try:
                 if not save_name.lower().endswith(".npy"):
                     save_name += ".npy"
-                np.save(save_name, spec)
-                axis_name = str(Path(save_name).with_suffix("")) + (
-                    "_wavenumbers.npy"
+                save_path = self._output_path(save_name)
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                np.save(save_path, spec)
+                axis_path = save_path.with_name(
+                    f"{save_path.stem}_wavenumbers.npy"
                 )
-                np.save(axis_name, wavenumbers)
-                saved_msg = f" -> {save_name}"
-                print(f"Saved spectrum to {save_name}")
+                np.save(axis_path, wavenumbers)
+                saved_msg = f" -> {save_path}"
+                print(f"Saved spectrum to {save_path}")
             except Exception as e:
                 save_error = e
 
@@ -2866,12 +2874,15 @@ class HardwareWidget(QWidget):
             from cns_control.coordtransformer import CoordTransformer
 
             selected_points = self.selector.selected_points
+            model_base = self._output_path(model_name)
+            model_base.parent.mkdir(parents=True, exist_ok=True)
             self.calibrator.save_new_model(
-                self.calibration_ds, selected_points, model_name
+                self.calibration_ds, selected_points, str(model_base)
             )
-            self.transformer = CoordTransformer.from_json(f"{model_name}.json")
-            self.tf_path.setText(f"{model_name}.json")
-            self.status.setText(f"Status: saved & loaded {model_name}.json OK")
+            model_path = Path(f"{model_base}.json")
+            self.transformer = CoordTransformer.from_json(model_path)
+            self.tf_path.setText(str(model_path))
+            self.status.setText(f"Status: saved & loaded {model_path} OK")
         except Exception as e:
             self.status.setText(f"Status: save failed -- {e}")
 
@@ -2939,7 +2950,8 @@ class HardwareWidget(QWidget):
             win.show()
             self._plot_windows.append(win)
 
-            os.makedirs("reference", exist_ok=True)
+            reference_dir = self._output_path("reference")
+            reference_dir.mkdir(parents=True, exist_ok=True)
             uid = str(uuid.uuid1())[:8]
 
             ds = xr.Dataset(
@@ -2958,7 +2970,7 @@ class HardwareWidget(QWidget):
                 units="cm^-1", long_name="Raman shift"
             )
 
-            zarr_path = f"reference/{name}_{uid}.zarr"
+            zarr_path = reference_dir / f"{name}_{uid}.zarr"
             ds.to_zarr(zarr_path)
 
             log.append(f"\n--- saved to {zarr_path} ---\n")
@@ -3175,8 +3187,10 @@ class HardwareWidget(QWidget):
                 ds["wavenumber"].attrs.update(
                     units="cm^-1", long_name="Raman shift"
                 )
-                ds.to_zarr(zarr_name)
-                print(f"Saved grid scan to {zarr_name}")
+                zarr_path = self._output_path(zarr_name)
+                zarr_path.parent.mkdir(parents=True, exist_ok=True)
+                ds.to_zarr(zarr_path)
+                print(f"Saved grid scan to {zarr_path}")
 
             self.scan_ds = ds
 
@@ -3184,7 +3198,7 @@ class HardwareWidget(QWidget):
             win.show()
             self._plot_windows.append(win)
 
-            self.status.setText(f"Status: grid scan saved -> {zarr_name}")
+            self.status.setText(f"Status: grid scan saved -> {zarr_path}")
         except Exception as e:
             log.append(f"\n--- grid scan failed: {e} ---\n")
             self.status.setText(f"Status: grid scan failed -- {e}")
@@ -4001,8 +4015,10 @@ class HardwareWidget(QWidget):
             )
             return
 
-        out_dir = self.mda_dir_input.text().strip() or "data/run"
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = self._output_path(
+            self.mda_dir_input.text().strip() or "data/run"
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
         af_range = float(self.mda_af_range_input.value())
         search_pts = int(self.mda_search_pts_input.value())
         fine_search_range = float(self.mda_fine_range_input.value())

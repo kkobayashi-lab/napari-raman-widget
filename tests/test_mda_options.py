@@ -43,6 +43,32 @@ class TestSpatialPointExtraction(unittest.TestCase):
             _spatial_yx(np.zeros((2, 4)))
 
 
+class TestOutputPaths(unittest.TestCase):
+    def test_relative_paths_follow_latest_output_folder(self):
+        selected = {"path": "first"}
+        widget = SimpleNamespace(
+            out_path=SimpleNamespace(text=lambda: selected["path"])
+        )
+
+        first = HardwareWidget._output_path(widget, "reference/test.zarr")
+        selected["path"] = "second"
+        second = HardwareWidget._output_path(widget, "reference/test.zarr")
+
+        self.assertEqual(first, Path("first/reference/test.zarr"))
+        self.assertEqual(second, Path("second/reference/test.zarr"))
+
+    def test_absolute_output_paths_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            absolute = Path(directory) / "run"
+            widget = SimpleNamespace(
+                out_path=SimpleNamespace(text=lambda: "ignored")
+            )
+
+            result = HardwareWidget._output_path(widget, absolute)
+
+        self.assertEqual(result, absolute)
+
+
 class TestMdaAxisOrder(unittest.TestCase):
     def test_selection_preparation_preserves_selected_axis_order(self):
         from useq import MDASequence
@@ -612,10 +638,14 @@ class TestSavedAcquisitionViewer(unittest.TestCase):
             objective_combo.addItem("3")
             widget = SimpleNamespace(
                 mda_dir_input=SimpleNamespace(text=lambda: str(run)),
+                out_path=SimpleNamespace(text=lambda: ""),
                 objective_combo=objective_combo,
                 vandermonde_objective=None,
                 sel_vdm_path=SimpleNamespace(text=lambda: "model.json"),
                 _plot_windows=[],
+            )
+            widget._output_path = MethodType(
+                HardwareWidget._output_path, widget
             )
 
             with patch(
