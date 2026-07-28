@@ -502,6 +502,12 @@ the per-channel Z offsets into the sequence metadata. Raman metadata contains th
 requested Z indices. \ui{Stop} requests MDA cancellation and stops sequence
 acquisition; the current hardware event may finish before exit.
 
+The MDA widget also provides a \code{p} option under \ui{Keep Shutter Open Across
+Axis}. With \code{c,p,z,t}, selecting \code{p}, \code{z}, and \code{t} keeps the
+illumination shutter open for one complete channel, including XY stage moves, and
+closes it before the channel changes. Use this only when illumination during stage
+travel is acceptable for the sample.
+
 \section{Pixel-to-stage calibration}
 Check \ui{Pixel-to-stage calibration} to reveal these controls:
 \fieldtable

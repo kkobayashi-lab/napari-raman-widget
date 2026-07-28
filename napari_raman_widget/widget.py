@@ -36,11 +36,36 @@ STAGE_DRAG_DEAD_ZONE_PX = 10.0
 STAGE_DRAG_FULL_SPEED_PX = 100.0
 
 
-def _enable_cpzt_axis_order():
-    """Expose channel-major ``cpzt`` in the pymmcore-widgets MDA editor."""
-    from pymmcore_widgets.useq_widgets._mda_sequence import ALLOWED_ORDERS
+def _enable_raman_mda_options():
+    """Expose channel-major order and position shutter control in the MDA editor."""
+    from pymmcore_widgets.useq_widgets import _mda_sequence
 
-    ALLOWED_ORDERS.add("cpzt")
+    _mda_sequence.ALLOWED_ORDERS.add("cpzt")
+
+    base = _mda_sequence.KeepShutterOpen
+    if getattr(base, "_raman_position_axis", False):
+        return
+
+    class KeepShutterOpenAcrossPosition(base):
+        _raman_position_axis = True
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.leave_open_p = QCheckBox("p")
+            self.layout().insertWidget(1, self.leave_open_p)
+            self.leave_open_p.toggled.connect(self.valueChanged)
+
+        def value(self):
+            axes = super().value()
+            if self.leave_open_p.isChecked() and self.leave_open_p.isEnabled():
+                return ("p", *axes)
+            return axes
+
+        def setValue(self, value):
+            super().setValue(value)
+            self.leave_open_p.setChecked("p" in value)
+
+    _mda_sequence.KeepShutterOpen = KeepShutterOpenAcrossPosition
 
 
 def _parse_raman_z_indices(text):
@@ -2498,7 +2523,7 @@ class HardwareWidget(QWidget):
                     if not hasattr(QtGui, name):
                         setattr(QtGui, name, getattr(QtWidgets, name))
 
-                _enable_cpzt_axis_order()
+                _enable_raman_mda_options()
                 result = self.viewer.window.add_plugin_dock_widget(
                     "napari-micromanager"
                 )
