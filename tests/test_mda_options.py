@@ -190,6 +190,114 @@ class TestAutomaticBeamCentering(unittest.TestCase):
             HardwareWidget._aim_beam_at_pixel(widget, 512, 512)
 
 
+class TestHardwareControls(unittest.TestCase):
+    def test_shutter_uses_rm_and_restores_previous_imaging_channel(self):
+        class FakeCore:
+            def __init__(self):
+                self.current = "GFP"
+                self.set_calls = []
+                self.wait_calls = []
+
+            def getCurrentConfig(self, group):
+                self.assert_channel_group(group)
+                return self.current
+
+            def setConfig(self, group, config):
+                self.assert_channel_group(group)
+                self.current = config
+                self.set_calls.append(config)
+
+            def waitForConfig(self, group, config):
+                self.assert_channel_group(group)
+                self.wait_calls.append(config)
+
+            @staticmethod
+            def assert_channel_group(group):
+                if group != "Channel":
+                    raise AssertionError(group)
+
+        core = FakeCore()
+        widget = SimpleNamespace(
+            core=core,
+            status=_FakeStatusLabel(),
+            _shutter_return_channel="BF",
+        )
+
+        HardwareWidget._set_laser_shutter(widget, True)
+        HardwareWidget._set_laser_shutter(widget, False)
+
+        self.assertEqual(core.set_calls, ["RM", "GFP"])
+        self.assertEqual(core.wait_calls, ["RM", "GFP"])
+        self.assertEqual(widget._shutter_return_channel, "GFP")
+        self.assertIn("closed (GFP)", widget.status.text)
+
+    def test_nd_filter_uses_autofocus_digital_io_and_preserves_shutter(self):
+        class FakeCore:
+            def __init__(self):
+                self.state = 1
+                self.set_calls = []
+                self.wait_calls = []
+
+            @staticmethod
+            def getLoadedDevices():
+                return ("Camera", "DigitalIO")
+
+            def getState(self, device):
+                self.assert_filter_device(device)
+                return self.state
+
+            def setState(self, device, state):
+                self.assert_filter_device(device)
+                self.state = state
+                self.set_calls.append(state)
+
+            def waitForDevice(self, device):
+                self.assert_filter_device(device)
+                self.wait_calls.append(device)
+
+            @staticmethod
+            def assert_filter_device(device):
+                if device != "DigitalIO":
+                    raise AssertionError(device)
+
+        core = FakeCore()
+        widget = SimpleNamespace(
+            core=core,
+            status=_FakeStatusLabel(),
+        )
+
+        HardwareWidget._set_nd_filter(widget, False)
+        HardwareWidget._set_nd_filter(widget, True)
+
+        self.assertEqual(core.set_calls, [3, 1])
+        self.assertEqual(core.wait_calls, ["DigitalIO", "DigitalIO"])
+        self.assertIn("open (removed)", widget.status.text)
+
+    def test_viewer_click_points_laser_and_disarms(self):
+        class FakeButton:
+            def __init__(self):
+                self.checked = True
+
+            def setChecked(self, checked):
+                self.checked = checked
+
+        aimed = []
+        widget = SimpleNamespace(
+            click_laser_btn=FakeButton(),
+            _aim_beam_at_pixel=lambda x, y: (
+                aimed.append((x, y)) or np.array([0.25, -0.5])
+            ),
+            status=_FakeStatusLabel(),
+        )
+        event = SimpleNamespace(button=1, position=(4, 120, 240))
+
+        HardwareWidget._click_laser_cb(widget, None, event)
+
+        self.assertEqual(aimed, [(240.0, 120.0)])
+        self.assertFalse(widget.click_laser_btn.checked)
+        self.assertIn("laser pointed at (120,240)", widget.status.text)
+
+
 class _FakeStatusLabel:
     def __init__(self):
         self.text = ""

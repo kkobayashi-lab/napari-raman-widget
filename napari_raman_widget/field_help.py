@@ -223,6 +223,31 @@ HELP = {
         "prepare sources / autofocus_p / new_seq for Run Raman MDA."
     ),
 
+    # ============ HARDWARE CONTROL ============
+    "click_laser_btn": (
+        "Arm a one-shot viewer click that aims the calibrated laser at the "
+        "clicked pixel. Needs the DAQ and transformer."
+    ),
+    "open_shutter_btn": (
+        "Open the laser shutter by switching the Channel config to RM."
+    ),
+    "close_shutter_btn": (
+        "Close the laser shutter by restoring the previous imaging channel."
+    ),
+    "open_filter_btn": (
+        "Open the ND-filter path by removing the autofocus filter with the "
+        "Micro-Manager DigitalIO device."
+    ),
+    "close_filter_btn": (
+        "Close the ND-filter path by inserting the autofocus filter with the "
+        "Micro-Manager DigitalIO device."
+    ),
+    "click_center_btn": (
+        "Arm a one-shot viewer click that moves the stage so the clicked "
+        "feature reaches Center Y/X. Needs a Vandermonde model + hardware; "
+        "commands stage motion."
+    ),
+
     # ============ AUTOMATED CELL SELECTION ============
     "sel_cy_input": (
         "Center of the circular permitted region (Y pixel). Same value is "
@@ -239,11 +264,6 @@ HELP = {
     "add_mask_btn": (
         "Add a red masked overlay with a green center marker to inspect the "
         "permitted region before selection."
-    ),
-    "click_center_btn": (
-        "Arm a one-shot viewer click that moves the stage so the clicked "
-        "feature reaches Center Y/X. Needs a Vandermonde model + hardware; "
-        "commands stage motion."
     ),
     "sel_af_combo": (
         "Autofocus strategy saved with the selection. None disables autofocus "

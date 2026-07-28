@@ -29,6 +29,8 @@ DEFAULT_LIGHTFIELD_CONFIG = (
     r"C:\Users\spraman\Documents\LightField\Experiments\RamanConfocal.lfe"
 )
 DEFAULT_BEAM_CENTER_XY = (512.0, 512.0)
+ND_FILTER_DEVICE = "DigitalIO"
+ND_FILTER_MASK = 1 << 1  # Dev1/port0/line1
 
 
 def _parse_raman_z_indices(text):
@@ -3122,7 +3124,7 @@ class HardwareWidget(QWidget):
             add_mask_with_hole(
                 self.viewer,
                 image_size=(Y, X),
-                circle_center=(cx, cy),
+                circle_center=(cy, cx),
                 circle_radius=r,
                 small_circle_radius=10,
                 color=(255, 0, 0),
@@ -3220,6 +3222,8 @@ class HardwareWidget(QWidget):
     def _toggle_click_to_center(self, checked):
         """Arm/disarm one-shot click-to-center mode."""
         if checked:
+            if self.click_laser_btn.isChecked():
+                self.click_laser_btn.setChecked(False)
             if self._click_center_cb not in self.viewer.mouse_drag_callbacks:
                 self.viewer.mouse_drag_callbacks.append(self._click_center_cb)
             self.status.setText(
@@ -3239,6 +3243,83 @@ class HardwareWidget(QWidget):
         # disarm BEFORE moving so a slow move can't eat a second click
         self.click_center_btn.setChecked(False)
         self._move_clicked_to_center(yx)
+
+    def _toggle_click_to_laser(self, checked):
+        """Arm/disarm one-shot click-to-point-laser mode."""
+        if checked:
+            if self.click_center_btn.isChecked():
+                self.click_center_btn.setChecked(False)
+            if self._click_laser_cb not in self.viewer.mouse_drag_callbacks:
+                self.viewer.mouse_drag_callbacks.append(self._click_laser_cb)
+            self.status.setText(
+                "Status: laser pointing ARMED -- click a spot in the image"
+            )
+        else:
+            try:
+                self.viewer.mouse_drag_callbacks.remove(self._click_laser_cb)
+            except ValueError:
+                pass
+
+    def _click_laser_cb(self, viewer, event):
+        """napari mouse callback: aim the laser at one left-clicked pixel."""
+        if event.button != 1:
+            return
+        yx = np.array(event.position[-2:], dtype=float)
+        self.click_laser_btn.setChecked(False)
+        try:
+            volts = self._aim_beam_at_pixel(yx[1], yx[0])
+            self.status.setText(
+                f"Status: laser pointed at ({yx[0]:.0f},{yx[1]:.0f}) "
+                f"[X={volts[0]:.3f}, Y={volts[1]:.3f} V]"
+            )
+        except Exception as e:
+            self.status.setText(f"Status: laser pointing failed -- {e}")
+
+    def _set_laser_shutter(self, open_):
+        """Control the shutter through the RM/imaging channel configs."""
+        if self.core is None:
+            self.status.setText("Status: not connected")
+            return
+        try:
+            if open_:
+                current = self.core.getCurrentConfig("Channel")
+                if current and current != "RM":
+                    self._shutter_return_channel = current
+                target = "RM"
+            else:
+                target = self._shutter_return_channel or "BF"
+                if target == "RM":
+                    target = "BF"
+            self.core.setConfig("Channel", target)
+            self.core.waitForConfig("Channel", target)
+            state = "open (RM)" if open_ else f"closed ({target})"
+            self.status.setText(f"Status: laser shutter {state}")
+        except Exception as e:
+            self.status.setText(f"Status: laser shutter failed -- {e}")
+
+    def _set_nd_filter(self, open_):
+        """Control the autofocus ND filter through Micro-Manager DigitalIO."""
+        if self.core is None:
+            self.status.setText("Status: not connected")
+            return
+        try:
+            if ND_FILTER_DEVICE not in self.core.getLoadedDevices():
+                raise LookupError(
+                    f"{ND_FILTER_DEVICE!r} is not loaded"
+                )
+            current = int(self.core.getState(ND_FILTER_DEVICE))
+            desired = (
+                current & ~ND_FILTER_MASK
+                if open_
+                else current | ND_FILTER_MASK
+            )
+            if desired != current:
+                self.core.setState(ND_FILTER_DEVICE, desired)
+                self.core.waitForDevice(ND_FILTER_DEVICE)
+            state = "open (removed)" if open_ else "closed (inserted)"
+            self.status.setText(f"Status: ND filter {state}")
+        except Exception as e:
+            self.status.setText(f"Status: ND filter failed -- {e}")
 
     def _move_clicked_to_center(self, yx):
         """Move the stage so the clicked pixel lands at (cy, cx)."""
