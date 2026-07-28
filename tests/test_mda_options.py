@@ -43,6 +43,37 @@ class TestSpatialPointExtraction(unittest.TestCase):
             _spatial_yx(np.zeros((2, 4)))
 
 
+class TestMdaAxisOrder(unittest.TestCase):
+    def test_selection_preparation_preserves_selected_axis_order(self):
+        from useq import MDASequence
+
+        original = MDASequence(
+            axis_order="tpzc",
+            channels=("BF", "GFP"),
+            z_plan={"relative": (-1.0, 0.0, 1.0)},
+            time_plan={"interval": 2.0, "loops": 3},
+        )
+        updated = []
+        settings = SimpleNamespace(
+            value=lambda: original,
+            setValue=lambda sequence: updated.append(sequence),
+        )
+        widget = SimpleNamespace(
+            core=SimpleNamespace(stopSequenceAcquisition=lambda: None),
+            main_window=object(),
+        )
+
+        with patch(
+            "raman_mda_engine.utils.get_mda_widget_from_napari",
+            return_value=settings,
+        ):
+            HardwareWidget._prepare_for_selection(widget)
+
+        self.assertEqual(len(updated), 1)
+        self.assertEqual(updated[0].axis_order, original.axis_order)
+        self.assertEqual(updated[0].time_plan.loops, 1)
+
+
 class TestRamanFreeAutofocus(unittest.TestCase):
     def test_disabled_autofocus_is_allowed(self):
         self.assertTrue(_raman_free_autofocus_allowed(False, "laser"))
@@ -296,6 +327,53 @@ class TestHardwareControls(unittest.TestCase):
         self.assertEqual(aimed, [(240.0, 120.0)])
         self.assertFalse(widget.click_laser_btn.checked)
         self.assertIn("laser pointed at (120,240)", widget.status.text)
+
+    def test_stage_drag_follows_calibrated_stage_direction(self):
+        moves = []
+        core = SimpleNamespace(
+            mda=SimpleNamespace(is_running=lambda: False),
+            getXYStageDevice=lambda: "XYStage",
+            deviceBusy=lambda _device: False,
+            setRelativeXYPosition=lambda dx, dy: moves.append((dx, dy)),
+        )
+        widget = SimpleNamespace(
+            _stage_drag_active=True,
+            _stage_drag_anchor_yx=np.array([100.0, 100.0]),
+            _stage_drag_current_yx=np.array([100.0, 200.0]),
+            core=core,
+            vandermonde=(object(), 1),
+            stage_drag_speed_input=SimpleNamespace(value=lambda: 50.0),
+            drag_stage_btn=SimpleNamespace(setChecked=lambda _checked: None),
+            status=_FakeStatusLabel(),
+        )
+
+        with patch(
+            "cns_control.utils.apply_vandermonde_model",
+            side_effect=lambda offset, _coefficients, _degree: np.asarray(
+                offset, dtype=float
+            ),
+        ):
+            HardwareWidget._stage_drag_tick(widget)
+
+        self.assertEqual(len(moves), 1)
+        self.assertAlmostEqual(moves[0][0], 5.0)
+        self.assertAlmostEqual(moves[0][1], 0.0)
+        self.assertIn("dX=+5.00", widget.status.text)
+
+    def test_stage_drag_dead_zone_does_not_move(self):
+        widget = SimpleNamespace(
+            _stage_drag_active=True,
+            _stage_drag_anchor_yx=np.array([100.0, 100.0]),
+            _stage_drag_current_yx=np.array([105.0, 105.0]),
+            core=SimpleNamespace(
+                mda=SimpleNamespace(is_running=lambda: False),
+                getXYStageDevice=lambda: self.fail(
+                    "dead-zone drag should not query the stage"
+                ),
+            ),
+        )
+
+        HardwareWidget._stage_drag_tick(widget)
 
 
 class _FakeStatusLabel:

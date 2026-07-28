@@ -56,7 +56,8 @@ following selection workflows:
 \end{itemize}
 
 Before selection begins, live acquisition stops and the napari-micromanager MDA
-settings are prepared with axis order \code{t,p,c,z} and a centered Z plan. The
+settings are prepared with a centered Z plan while preserving the selected axis
+order. The
 recommended sequence is:
 \begin{enumerate}
   \item Connect hardware; this attempts to open the \code{napari-micromanager} dock.
@@ -493,8 +494,10 @@ Acquisition channel & none; default row exposure 10 ms, Z offset 0 um &
 focused baseline and relative Z plane. Duplicate channel names are rejected.\\
 \endfieldtable
 
-The acquisition uses axis order \code{t,p,c,z}, assigns the selection's aiming-source
-layers, replaces the time and Z plans, adds unique acquisition channels, and writes
+The acquisition preserves the axis order selected in the MDA widget. The Raman
+plugin also enables the channel-major \code{c,p,z,t} option in that widget. The
+acquisition assigns the selection's aiming-source layers, replaces the time and
+Z plans, adds unique acquisition channels, and writes
 the per-channel Z offsets into the sequence metadata. Raman metadata contains the
 requested Z indices. \ui{Stop} requests MDA cancellation and stops sequence
 acquisition; the current hardware event may finish before exit.
@@ -550,7 +553,7 @@ Z relative & Comma-separated relative Z planes in micrometres.\\
 Raman Z indices & Indices of relative Z planes receiving Raman acquisition.\\
 Add/remove acquisition channel & Manages channel/exposure/Z-offset entries in
 the sequence.\\
-Run Raman MDA & Builds and launches the final \code{t,p,c,z} acquisition.\\
+Run Raman MDA & Builds and launches the final acquisition with the selected MDA axis order.\\
 Stop & Requests MDA cancellation and stops sequence acquisition.\\
 Pixel-to-stage calibration & Reveals the Vandermonde calibration workflow.\\
 Dataset & Zarr images and stage coordinates used for calibration.\\

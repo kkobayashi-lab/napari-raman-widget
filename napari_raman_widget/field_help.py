@@ -228,6 +228,15 @@ HELP = {
         "Arm a one-shot viewer click that aims the calibrated laser at the "
         "clicked pixel. Needs the DAQ and transformer."
     ),
+    "drag_stage_btn": (
+        "Enable stage movement: hold the left mouse button and drag in the "
+        "viewer. The stage follows the drag direction; distance controls speed. "
+        "Release the mouse to stop."
+    ),
+    "stage_drag_speed_input": (
+        "Maximum click-and-drag stage speed in micrometers per second. The "
+        "cursor reaches this speed 100 pixels from the press point."
+    ),
     "open_shutter_btn": (
         "Open the laser shutter by switching the Channel config to RM."
     ),
@@ -366,8 +375,8 @@ HELP = {
         "ignored; added channels inherit the first channel as a template."
     ),
     "run_mda_btn": (
-        "Build and launch the final t,p,c,z acquisition using the selection "
-        "sources, replaced time/Z plans and Raman metadata."
+        "Build and launch the final acquisition using the MDA widget's axis "
+        "order, selection sources, replaced time/Z plans and Raman metadata."
     ),
     "stop_mda_btn": (
         "Request MDA cancellation and stop sequence acquisition; the current "

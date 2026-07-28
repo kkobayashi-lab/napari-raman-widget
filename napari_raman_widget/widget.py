@@ -7,7 +7,7 @@ from pathlib import Path
 import xarray as xr
 import napari
 import numpy as np
-from qtpy.QtCore import QEvent, Qt, QUrl, Slot
+from qtpy.QtCore import QEvent, QTimer, Qt, QUrl, Slot
 from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
@@ -31,6 +31,16 @@ DEFAULT_LIGHTFIELD_CONFIG = (
 DEFAULT_BEAM_CENTER_XY = (512.0, 512.0)
 ND_FILTER_DEVICE = "DigitalIO"
 ND_FILTER_MASK = 1 << 1  # Dev1/port0/line1
+STAGE_DRAG_INTERVAL_MS = 100
+STAGE_DRAG_DEAD_ZONE_PX = 10.0
+STAGE_DRAG_FULL_SPEED_PX = 100.0
+
+
+def _enable_cpzt_axis_order():
+    """Expose channel-major ``cpzt`` in the pymmcore-widgets MDA editor."""
+    from pymmcore_widgets.useq_widgets._mda_sequence import ALLOWED_ORDERS
+
+    ALLOWED_ORDERS.add("cpzt")
 
 
 def _parse_raman_z_indices(text):
@@ -101,6 +111,12 @@ class HardwareWidget(QWidget):
         self.px2stage_objective = None
         self.mm_config = None
         self._shutter_return_channel = "BF"
+        self._stage_drag_active = False
+        self._stage_drag_anchor_yx = None
+        self._stage_drag_current_yx = None
+        self._stage_drag_timer = QTimer(self)
+        self._stage_drag_timer.setInterval(STAGE_DRAG_INTERVAL_MS)
+        self._stage_drag_timer.timeout.connect(self._stage_drag_tick)
         outer = QVBoxLayout()
 
         self.manual_link = QLabel(
@@ -211,6 +227,19 @@ class HardwareWidget(QWidget):
         click_row.addWidget(self.click_center_btn)
         click_row.addWidget(self.click_laser_btn)
         hardware_layout.addLayout(click_row)
+
+        drag_row = QHBoxLayout()
+        self.drag_stage_btn = QPushButton("Drag image to move stage")
+        self.drag_stage_btn.setCheckable(True)
+        self.drag_stage_btn.toggled.connect(self._toggle_stage_drag)
+        self.stage_drag_speed_input = QDoubleSpinBox()
+        self.stage_drag_speed_input.setRange(1.0, 1000.0)
+        self.stage_drag_speed_input.setValue(800.0)
+        self.stage_drag_speed_input.setDecimals(1)
+        self.stage_drag_speed_input.setSuffix(" um/s max")
+        drag_row.addWidget(self.drag_stage_btn)
+        drag_row.addWidget(self.stage_drag_speed_input)
+        hardware_layout.addLayout(drag_row)
 
         shutter_row = QHBoxLayout()
         shutter_row.addWidget(QLabel("Laser shutter:"))
@@ -2085,7 +2114,7 @@ class HardwareWidget(QWidget):
         combo.blockSignals(False)
 
     def _prepare_for_selection(self):
-        """Stop live mode, set axis order to tpcz, set z plan to RangeAround."""
+        """Stop live mode and reset Z/time plans while preserving axis order."""
         try:
             self.core.stopSequenceAcquisition()
         except Exception as e:
@@ -2108,7 +2137,6 @@ class HardwareWidget(QWidget):
             import datetime as _dt
             seq = mda_settings.value()
             new_seq = seq.replace(
-                axis_order=("t", "p", "c", "z"),
                 z_plan=ZRangeAround(range=0.0, step=1.0),
                 time_plan=TIntervalLoops(
                     interval=_dt.timedelta(seconds=0), loops=1
@@ -2116,7 +2144,10 @@ class HardwareWidget(QWidget):
             )
             if hasattr(mda_settings, "setValue"):
                 mda_settings.setValue(new_seq)
-                print("[mda setup] axis_order=tpcz, z_plan, t=1loop OK")
+                print(
+                    "[mda setup] preserved "
+                    f"axis_order={new_seq.axis_order}, z_plan, t=1loop OK"
+                )
             else:
                 print("[mda setup] no setValue method -- can't push sequence back")
                 print(
@@ -2467,6 +2498,7 @@ class HardwareWidget(QWidget):
                     if not hasattr(QtGui, name):
                         setattr(QtGui, name, getattr(QtWidgets, name))
 
+                _enable_cpzt_axis_order()
                 result = self.viewer.window.add_plugin_dock_widget(
                     "napari-micromanager"
                 )
@@ -2535,6 +2567,10 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: transformer reload failed -- {e}")
 
     def disconnect(self):
+        if self.drag_stage_btn.isChecked():
+            self.drag_stage_btn.setChecked(False)
+        else:
+            self._stop_stage_drag()
         writer = self._raman_mda_writer or self.mda_writer
         if writer is not None and not getattr(writer, "closed", True):
             writer.disconnect()
@@ -2590,6 +2626,15 @@ class HardwareWidget(QWidget):
             self.disconnect()
 
     def eventFilter(self, watched, event):
+        if (
+            watched is self._napari_window
+            and event.type() == QEvent.KeyPress
+            and event.key() == Qt.Key_Escape
+            and self.drag_stage_btn.isChecked()
+        ):
+            self.drag_stage_btn.setChecked(False)
+            self.status.setText("Status: stage drag disabled")
+            return True
         if (
             watched is self._napari_window
             and event.type() == QEvent.Close
@@ -3224,6 +3269,8 @@ class HardwareWidget(QWidget):
         if checked:
             if self.click_laser_btn.isChecked():
                 self.click_laser_btn.setChecked(False)
+            if self.drag_stage_btn.isChecked():
+                self.drag_stage_btn.setChecked(False)
             if self._click_center_cb not in self.viewer.mouse_drag_callbacks:
                 self.viewer.mouse_drag_callbacks.append(self._click_center_cb)
             self.status.setText(
@@ -3249,6 +3296,8 @@ class HardwareWidget(QWidget):
         if checked:
             if self.click_center_btn.isChecked():
                 self.click_center_btn.setChecked(False)
+            if self.drag_stage_btn.isChecked():
+                self.drag_stage_btn.setChecked(False)
             if self._click_laser_cb not in self.viewer.mouse_drag_callbacks:
                 self.viewer.mouse_drag_callbacks.append(self._click_laser_cb)
             self.status.setText(
@@ -3274,6 +3323,159 @@ class HardwareWidget(QWidget):
             )
         except Exception as e:
             self.status.setText(f"Status: laser pointing failed -- {e}")
+
+    def _toggle_stage_drag(self, checked):
+        """Enable or disable click-and-hold stage joystick mode."""
+        if checked:
+            if self.core is None:
+                self.drag_stage_btn.setChecked(False)
+                self.status.setText("Status: not connected")
+                return
+            if self.core.mda.is_running():
+                self.drag_stage_btn.setChecked(False)
+                self.status.setText(
+                    "Status: stage drag unavailable while MDA is running"
+                )
+                return
+            objective = self._ensure_current_vandermonde()
+            if not objective or self.vandermonde is None:
+                self.drag_stage_btn.setChecked(False)
+                self.status.setText(
+                    "Status: stage drag needs a Vandermonde calibration"
+                )
+                return
+            if self.click_center_btn.isChecked():
+                self.click_center_btn.setChecked(False)
+            if self.click_laser_btn.isChecked():
+                self.click_laser_btn.setChecked(False)
+            if self._stage_drag_cb not in self.viewer.mouse_drag_callbacks:
+                self.viewer.mouse_drag_callbacks.append(self._stage_drag_cb)
+            self.status.setText(
+                "Status: stage drag ARMED -- hold and drag the image"
+            )
+        else:
+            self._stop_stage_drag()
+            try:
+                self.viewer.mouse_drag_callbacks.remove(self._stage_drag_cb)
+            except ValueError:
+                pass
+
+    def _stage_drag_cb(self, viewer, event):
+        """Use a held left-button drag as a velocity joystick."""
+        if event.button != 1:
+            return
+        if hasattr(event, "handled"):
+            event.handled = True
+        self._stage_drag_anchor_yx = np.asarray(
+            event.position[-2:], dtype=float
+        )
+        self._stage_drag_current_yx = self._stage_drag_anchor_yx.copy()
+        self._stage_drag_active = True
+        self._stage_drag_timer.start()
+        try:
+            yield
+            while event.type == "mouse_move":
+                self._stage_drag_current_yx = np.asarray(
+                    event.position[-2:], dtype=float
+                )
+                if hasattr(event, "handled"):
+                    event.handled = True
+                yield
+        finally:
+            self._stop_stage_drag()
+            if self.drag_stage_btn.isChecked():
+                self.status.setText(
+                    "Status: stage drag ARMED -- hold and drag the image"
+                )
+
+    def _stop_stage_drag(self):
+        """Stop issuing stage moves for the current drag gesture."""
+        self._stage_drag_timer.stop()
+        self._stage_drag_active = False
+        self._stage_drag_anchor_yx = None
+        self._stage_drag_current_yx = None
+
+    def _stage_drag_tick(self):
+        """Issue one bounded relative move for the current drag direction."""
+        if (
+            not self._stage_drag_active
+            or self._stage_drag_anchor_yx is None
+            or self._stage_drag_current_yx is None
+        ):
+            return
+        if self.core is None:
+            self.drag_stage_btn.setChecked(False)
+            self.status.setText("Status: stage drag stopped -- disconnected")
+            return
+        if self.core.mda.is_running():
+            self.drag_stage_btn.setChecked(False)
+            self.status.setText("Status: stage drag stopped -- MDA is running")
+            return
+
+        offset_yx = (
+            self._stage_drag_current_yx - self._stage_drag_anchor_yx
+        )
+        distance_px = float(np.linalg.norm(offset_yx))
+        if distance_px <= STAGE_DRAG_DEAD_ZONE_PX:
+            return
+
+        try:
+            xy_stage = self.core.getXYStageDevice()
+            if not xy_stage:
+                raise RuntimeError("no XY stage is configured")
+            if self.core.deviceBusy(xy_stage):
+                return
+            if self.vandermonde is None:
+                raise RuntimeError("no Vandermonde calibration is loaded")
+
+            from cns_control.utils import apply_vandermonde_model
+
+            coefficients, degree = self.vandermonde
+            offset_xy = offset_yx[::-1]
+            stage_at_offset = np.asarray(
+                apply_vandermonde_model(
+                    offset_xy, coefficients, degree
+                ),
+                dtype=float,
+            )
+            stage_at_origin = np.asarray(
+                apply_vandermonde_model(
+                    np.zeros(2), coefficients, degree
+                ),
+                dtype=float,
+            )
+            stage_direction = stage_at_offset - stage_at_origin
+            direction_norm = float(np.linalg.norm(stage_direction))
+            if direction_norm == 0 or not np.isfinite(direction_norm):
+                raise ValueError(
+                    "Vandermonde calibration produced no finite direction"
+                )
+
+            speed_fraction = min(
+                1.0,
+                (distance_px - STAGE_DRAG_DEAD_ZONE_PX)
+                / (
+                    STAGE_DRAG_FULL_SPEED_PX
+                    - STAGE_DRAG_DEAD_ZONE_PX
+                ),
+            )
+            step_um = (
+                float(self.stage_drag_speed_input.value())
+                * speed_fraction
+                * STAGE_DRAG_INTERVAL_MS
+                / 1000.0
+            )
+            delta_xy = stage_direction / direction_norm * step_um
+            self.core.setRelativeXYPosition(
+                float(delta_xy[0]), float(delta_xy[1])
+            )
+            self.status.setText(
+                "Status: dragging image "
+                f"[dX={delta_xy[0]:+.2f}, dY={delta_xy[1]:+.2f} um]"
+            )
+        except Exception as e:
+            self.drag_stage_btn.setChecked(False)
+            self.status.setText(f"Status: stage drag failed -- {e}")
 
     def _set_laser_shutter(self, open_):
         """Control the shutter through the RM/imaging channel configs."""
@@ -3920,7 +4122,6 @@ class HardwareWidget(QWidget):
                     ) in acquisition_channels
                 }
                 final_seq = final_seq.replace(
-                    axis_order=("t", "p", "c", "z"),
                     time_plan=new_time_plan,
                     z_plan=new_z_plan,
                     channels=acquisition_channel_objs,
@@ -3937,6 +4138,7 @@ class HardwareWidget(QWidget):
 
                 print(
                     f"Starting MDA: {loops} loops, interval={interval}s, "
+                    f"axis_order={final_seq.axis_order}, "
                     f"z_rel={z_relative}, raman_z={raman_z_indices}, "
                     f"autofocus={autofocus_enabled} ({af_choice}), "
                     f"segment_and_track={segment_and_track}, "
