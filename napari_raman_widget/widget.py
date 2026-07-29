@@ -968,6 +968,18 @@ class HardwareWidget(QWidget):
         af_row.addWidget(self.sel_af_combo)
         sel_layout.addLayout(af_row)
 
+        seg_ch_row = QHBoxLayout()
+        seg_ch_row.addWidget(QLabel("Segmentation channel:"))
+        self.sel_seg_ch_combo = QComboBox()
+        self.sel_seg_ch_combo.addItem("BF")
+        self.sel_seg_ch_combo.setToolTip(
+            "Micro-Manager channel preset used for the Cellpose input image. "
+            "BF is the default; choose another imaging channel if it provides "
+            "better cell contrast."
+        )
+        seg_ch_row.addWidget(self.sel_seg_ch_combo)
+        sel_layout.addLayout(seg_ch_row)
+
         npf_row = QHBoxLayout()
         npf_row.addWidget(QLabel("N per FOV:"))
         self.sel_npf_input = QSpinBox()
@@ -2175,16 +2187,18 @@ class HardwareWidget(QWidget):
                 combo.currentText(), entry["exp"]
             )
         
-        combo = self.mda_seg_ch_combo
-        current = combo.currentText()
-        combo.blockSignals(True)
-        combo.clear()
-        if available_all:
-            combo.addItems(available_all)
-            combo.setCurrentText(current if current in available_all else "BF")
-        else:
-            combo.addItem("BF")
-        combo.blockSignals(False)
+        for combo in (self.mda_seg_ch_combo, self.sel_seg_ch_combo):
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            if available_all:
+                combo.addItems(available_all)
+                combo.setCurrentText(
+                    current if current in available_all else "BF"
+                )
+            else:
+                combo.addItem("BF")
+            combo.blockSignals(False)
 
     def _prepare_for_selection(self):
         """Stop live mode and reset Z/time plans while preserving axis order."""
@@ -3353,6 +3367,7 @@ class HardwareWidget(QWidget):
         center_cell = self.sel_center_cell_check.isChecked()
         vandermonde_model_path = self.sel_vdm_path.text().strip()
         cellpose_model = self.sel_cellpose_combo.currentText() or "cyto2"
+        segmentation_channel = self.sel_seg_ch_combo.currentText() or "BF"
         objective = self._current_objective() if center_cell else None
 
         if center_cell and not vandermonde_model_path:
@@ -3395,6 +3410,7 @@ class HardwareWidget(QWidget):
                     ),
                     cellpose_model=cellpose_model,
                     objective=objective,
+                    segmentation_channel=segmentation_channel,
                 )
 
             self.selection_results = {
