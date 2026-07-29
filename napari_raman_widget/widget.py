@@ -103,6 +103,12 @@ def _raman_free_autofocus_allowed(autofocus_enabled, autofocus_object):
     return not autofocus_enabled or autofocus_object in supported
 
 
+def _cellpose_diameter(value):
+    """Convert the GUI diameter to the value expected by Cellpose."""
+    diameter = float(value)
+    return None if diameter == 0 else diameter
+
+
 def _cellpose_model_names():
     """Return built-in and Cellpose-registered user model names."""
     try:
@@ -1074,6 +1080,34 @@ class HardwareWidget(QWidget):
         sel_cp_row.addWidget(self.sel_cellpose_browse)
         sel_layout.addLayout(sel_cp_row)
 
+        sel_diameter_row = QHBoxLayout()
+        sel_diameter_row.addWidget(QLabel("Cell diameter (px):"))
+        self.sel_cell_diameter_input = QDoubleSpinBox()
+        self.sel_cell_diameter_input.setRange(0.0, 500.0)
+        self.sel_cell_diameter_input.setValue(15.0)
+        self.sel_cell_diameter_input.setDecimals(1)
+        self.sel_cell_diameter_input.setSpecialValueText(
+            "Model training diameter"
+        )
+        self.sel_cell_diameter_input.setToolTip(
+            "Expected cell diameter in pixels in the original segmentation "
+            "image. Set to 0 to use the diameter stored with the Cellpose "
+            "model."
+        )
+        sel_diameter_row.addWidget(self.sel_cell_diameter_input)
+        sel_layout.addLayout(sel_diameter_row)
+
+        self.sel_seg_debug_check = QCheckBox(
+            "Save segmentation debug images"
+        )
+        self.sel_seg_debug_check.setChecked(False)
+        self.sel_seg_debug_check.setToolTip(
+            "Save each exact Cellpose input and label mask as lossless .npy "
+            "files under Data Output/segmentation_debug. Napari can open "
+            "these files directly."
+        )
+        sel_layout.addWidget(self.sel_seg_debug_check)
+
         self.run_selection_btn = QPushButton("Run automated selection")
         self.run_selection_btn.clicked.connect(self.run_automated_selection)
         sel_layout.addWidget(self.run_selection_btn)
@@ -1104,6 +1138,13 @@ class HardwareWidget(QWidget):
         self.mda_dir_input = QLineEdit()
         self.mda_dir_input.setText("data/run")
         mda_dir_row.addWidget(self.mda_dir_input)
+        self.mda_overwrite_check = QCheckBox("Overwrite this folder")
+        self.mda_overwrite_check.setChecked(False)
+        self.mda_overwrite_check.setToolTip(
+            "Save directly into this writer folder and replace all of its "
+            "existing contents when the MDA starts."
+        )
+        mda_dir_row.addWidget(self.mda_overwrite_check)
         mda_layout.addLayout(mda_dir_row)
 
         afp_row = QHBoxLayout()
@@ -1218,6 +1259,24 @@ class HardwareWidget(QWidget):
         seg_model_row.addWidget(self.mda_seg_model_combo)
         seg_model_row.addWidget(self.mda_seg_model_browse)
         mda_layout.addLayout(seg_model_row)
+        # Expected object diameter passed to Cellpose
+        seg_diameter_row = QHBoxLayout()
+        self._seg_diameter_label = QLabel("Cell diameter (px):")
+        seg_diameter_row.addWidget(self._seg_diameter_label)
+        self.mda_seg_diameter_input = QDoubleSpinBox()
+        self.mda_seg_diameter_input.setRange(0.0, 500.0)
+        self.mda_seg_diameter_input.setValue(15.0)
+        self.mda_seg_diameter_input.setDecimals(1)
+        self.mda_seg_diameter_input.setSpecialValueText(
+            "Model training diameter"
+        )
+        self.mda_seg_diameter_input.setToolTip(
+            "Expected cell diameter in pixels in the original segmentation "
+            "image. Set to 0 to use the diameter stored with the Cellpose "
+            "model."
+        )
+        seg_diameter_row.addWidget(self.mda_seg_diameter_input)
+        mda_layout.addLayout(seg_diameter_row)
         # Crop-around-mask dropdown
         seg_crop_row = QHBoxLayout()
         self._seg_crop_label = QLabel("Crop image around mask:")
@@ -1802,6 +1861,8 @@ class HardwareWidget(QWidget):
         self._seg_model_label.setVisible(checked)
         self.mda_seg_model_combo.setVisible(checked)
         self.mda_seg_model_browse.setVisible(checked)
+        self._seg_diameter_label.setVisible(checked)
+        self.mda_seg_diameter_input.setVisible(checked)
         self._seg_crop_label.setVisible(checked)
         self.mda_seg_crop_combo.setVisible(checked)
         self._seg_track_cfg_label.setVisible(checked)
@@ -3439,6 +3500,15 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: {error}")
             return
         segmentation_channel = self.sel_seg_ch_combo.currentText() or "BF"
+        cell_diameter = _cellpose_diameter(
+            self.sel_cell_diameter_input.value()
+        )
+        segmentation_debug_dir = None
+        if self.sel_seg_debug_check.isChecked():
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            segmentation_debug_dir = self._output_path(
+                Path("segmentation_debug") / timestamp
+            )
         objective = self._current_objective() if center_cell else None
 
         if center_cell and not vandermonde_model_path:
@@ -3482,6 +3552,8 @@ class HardwareWidget(QWidget):
                     cellpose_model=cellpose_model,
                     objective=objective,
                     segmentation_channel=segmentation_channel,
+                    cell_diameter=cell_diameter,
+                    segmentation_debug_dir=segmentation_debug_dir,
                 )
 
             self.selection_results = {
@@ -3494,6 +3566,11 @@ class HardwareWidget(QWidget):
             extra = (
                 f" ({n_new} centered positions)" if center_cell else ""
             )
+            if segmentation_debug_dir is not None:
+                log.append(
+                    "\nSegmentation debug files saved to "
+                    f"{segmentation_debug_dir}\n"
+                )
             self.status.setText(f"Status: automated selection done OK{extra}")
         except Exception as e:
             log.append(f"\n--- selection failed: {e} ---\n")
@@ -4042,7 +4119,13 @@ class HardwareWidget(QWidget):
 
     # -------- run raman MDA --------
     def _show_mda_time_preview(
-        self, estimate, raman_exposure_ms, delay_seconds
+        self,
+        estimate,
+        raman_exposure_ms,
+        delay_seconds,
+        *,
+        output_dir=None,
+        overwrite=False,
     ):
         scheduled_start, expected_end = mda_schedule_window(
             datetime.now().astimezone(),
@@ -4069,7 +4152,18 @@ class HardwareWidget(QWidget):
             "Autofocus, segmentation/tracking, and stage movement time "
             "are not included."
         )
-        QMessageBox.information(
+        if overwrite:
+            resolved_output = Path(output_dir).expanduser().resolve()
+            message += (
+                "\n\nWARNING: The writer folder will be overwritten:\n"
+                f"{resolved_output}\n\n"
+                "All existing contents in this folder will be permanently "
+                "deleted when the MDA starts."
+            )
+        show_preview = (
+            QMessageBox.warning if overwrite else QMessageBox.information
+        )
+        show_preview(
             self,
             "MDA time preview",
             message,
@@ -4343,6 +4437,7 @@ class HardwareWidget(QWidget):
         out_dir = self._output_path(
             self.mda_dir_input.text().strip() or "data/run"
         )
+        overwrite_output = self.mda_overwrite_check.isChecked()
         out_dir.mkdir(parents=True, exist_ok=True)
         af_range = float(self.mda_af_range_input.value())
         search_pts = int(self.mda_search_pts_input.value())
@@ -4355,6 +4450,9 @@ class HardwareWidget(QWidget):
         refocus_every = int(self.mda_refocus_input.value())
         segment_channel = self.mda_seg_ch_combo.currentText() or "BF"
         seg_scale = float(self.mda_seg_scale_input.value())
+        cell_diameter = _cellpose_diameter(
+            self.mda_seg_diameter_input.value()
+        )
         try:
             cellpose_model = self._selected_cellpose_model(
                 self.mda_seg_model_combo
@@ -4405,6 +4503,7 @@ class HardwareWidget(QWidget):
                     scale=seg_scale,
                     segment_channel=segment_channel,
                     cellpose_model=cellpose_model,
+                    cell_diameter=cell_diameter,
                     segment_crop=segment_crop,
                     tracking_config=tracking_config,
                     autofocus_search_range=af_range,
@@ -4515,6 +4614,8 @@ class HardwareWidget(QWidget):
                     estimate,
                     engine.default_rm_exposure,
                     delay,
+                    output_dir=out_dir,
+                    overwrite=overwrite_output,
                 )
 
                 self.core.register_mda_engine(engine)
@@ -4531,6 +4632,7 @@ class HardwareWidget(QWidget):
                     wavenumbers=self.collector.get_wavenumbers(),
                     image_positions=image_p,
                     batch=batch,
+                    overwrite=overwrite_output,
                 )
 
                 print(

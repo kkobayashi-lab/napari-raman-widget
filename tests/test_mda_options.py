@@ -10,10 +10,19 @@ from qtpy.QtWidgets import QMessageBox
 from napari_raman_widget.widget import (
     DEFAULT_BEAM_CENTER_XY,
     HardwareWidget,
+    _cellpose_diameter,
     _parse_raman_z_indices,
     _raman_free_autofocus_allowed,
     _spatial_yx,
 )
+
+
+class TestCellposeDiameter(unittest.TestCase):
+    def test_zero_uses_model_training_diameter(self):
+        self.assertIsNone(_cellpose_diameter(0))
+
+    def test_positive_diameter_is_preserved(self):
+        self.assertEqual(_cellpose_diameter(15.5), 15.5)
 
 
 class TestRamanZIndices(unittest.TestCase):
@@ -103,6 +112,55 @@ class TestOutputPaths(unittest.TestCase):
             result = HardwareWidget._output_path(widget, absolute)
 
         self.assertEqual(result, absolute)
+
+
+class TestMdaTimePreview(unittest.TestCase):
+    @staticmethod
+    def _estimate():
+        return SimpleNamespace(
+            duration_seconds=3.2,
+            scheduled_wait_seconds=0,
+            raman_points=2,
+            imaging_frames=1,
+        )
+
+    def test_overwrite_preview_names_folder_and_warns_about_deletion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run"
+            with patch(
+                "napari_raman_widget.widget.QMessageBox.warning"
+            ) as warning:
+                HardwareWidget._show_mda_time_preview(
+                    SimpleNamespace(),
+                    self._estimate(),
+                    raman_exposure_ms=1000,
+                    delay_seconds=0,
+                    output_dir=output,
+                    overwrite=True,
+                )
+
+        warning.assert_called_once()
+        message = warning.call_args.args[2]
+        self.assertIn("folder will be overwritten", message)
+        self.assertIn(str(output.resolve()), message)
+        self.assertIn("permanently deleted", message)
+
+    def test_normal_preview_remains_informational(self):
+        with patch(
+            "napari_raman_widget.widget.QMessageBox.information"
+        ) as information:
+            HardwareWidget._show_mda_time_preview(
+                SimpleNamespace(),
+                self._estimate(),
+                raman_exposure_ms=1000,
+                delay_seconds=0,
+            )
+
+        information.assert_called_once()
+        self.assertNotIn(
+            "folder will be overwritten",
+            information.call_args.args[2],
+        )
 
 
 class TestMdaAxisOrder(unittest.TestCase):
