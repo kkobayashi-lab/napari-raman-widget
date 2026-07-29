@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import time
 
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QTimer
 from qtpy.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -68,6 +68,7 @@ class LargeAcquisitionViewerWindow(QMainWindow):
         self.resize(1300, 820)
         self.acquisition = None
         self.geometry = None
+        self._auto_refresh_suspended = True
 
         from matplotlib.backends.backend_qtagg import (
             FigureCanvasQTAgg,
@@ -164,7 +165,10 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             self.preview_size.addItem(str(size), size)
         self.preview_size.setCurrentText("2048")
         view_row.addWidget(self.preview_size)
-        self.show_btn = QPushButton("Show")
+        self.show_btn = QPushButton("Refresh")
+        self.show_btn.setToolTip(
+            "The viewer updates automatically; use this to refresh manually."
+        )
         self.show_btn.clicked.connect(self.show_selection)
         view_row.addWidget(self.show_btn)
         layout.addLayout(view_row)
@@ -191,10 +195,17 @@ class LargeAcquisitionViewerWindow(QMainWindow):
         layout.addWidget(self.canvas, 1)
         self.setCentralWidget(central)
 
+        self._auto_refresh_timer = QTimer(self)
+        self._auto_refresh_timer.setSingleShot(True)
+        self._auto_refresh_timer.setInterval(100)
+        self._auto_refresh_timer.timeout.connect(self.show_selection)
+        self._connect_auto_refresh()
+
         self._set_view_controls_enabled(False)
         self.model_path.editingFinished.connect(self.refresh_objectives)
         self.refresh_objectives(preferred=objective)
         self._infer_related_paths()
+        self._auto_refresh_suspended = False
 
     @staticmethod
     def _add_path_row(grid, row, label, line_edit, callback):
@@ -217,6 +228,29 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             self.show_btn,
         ):
             widget.setEnabled(enabled)
+
+    def _connect_auto_refresh(self):
+        """Refresh the plots after any view selection changes."""
+        for signal in (
+            self.raman_t_combo.currentIndexChanged,
+            self.raman_index.valueChanged,
+            self.raman_z_combo.currentIndexChanged,
+            self.cell_index.valueChanged,
+            self.channel_combo.currentIndexChanged,
+            self.stitched_check.toggled,
+            self.preview_size.currentIndexChanged,
+        ):
+            signal.connect(self._schedule_auto_refresh)
+
+    def _schedule_auto_refresh(self, *_args):
+        """Coalesce rapid control changes into one spectrum/image load."""
+        if (
+            self._auto_refresh_suspended
+            or self.acquisition is None
+            or self.geometry is None
+        ):
+            return
+        self._auto_refresh_timer.start()
 
     def _infer_related_paths(self):
         imaging_text = self.imaging_path.text().strip()
@@ -306,6 +340,8 @@ class LargeAcquisitionViewerWindow(QMainWindow):
 
     def index_acquisition(self):
         """Index source filenames and populate lightweight view controls."""
+        self._auto_refresh_timer.stop()
+        self._auto_refresh_suspended = True
         self.index_btn.setEnabled(False)
         self._set_view_controls_enabled(False)
         self.status_label.setText("Indexing acquisition...")
@@ -376,9 +412,10 @@ class LargeAcquisitionViewerWindow(QMainWindow):
                 f"{len(channels)} channels; indexed in {elapsed:.2f} s"
             )
             self.status_label.setText(
-                "Indexed. Choose Raman t, p/FOV, z, cell, and an imaging "
-                "channel, then Show. Exact image/Raman FOV matches are used "
-                "first; center matching is the fallback."
+                "Indexed. The spectrum and image update automatically when "
+                "Raman t, p/FOV, z, cell, channel, or preview options change. "
+                "Exact image/Raman FOV matches are used first; center matching "
+                "is the fallback."
             )
         except Exception as error:
             self.acquisition = None
@@ -388,6 +425,9 @@ class LargeAcquisitionViewerWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
             self.index_btn.setEnabled(True)
+            self._auto_refresh_suspended = False
+        if self.acquisition is not None and self.geometry is not None:
+            self._schedule_auto_refresh()
 
     @staticmethod
     def _set_combo_values(combo, values):
@@ -453,6 +493,7 @@ class LargeAcquisitionViewerWindow(QMainWindow):
 
     def show_selection(self):
         """Load and draw exactly one spectrum plus one tile or mosaic."""
+        self._auto_refresh_timer.stop()
         if self.acquisition is None or self.geometry is None:
             self.status_label.setText("Index an acquisition first.")
             return
