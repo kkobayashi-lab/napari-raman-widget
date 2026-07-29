@@ -103,6 +103,20 @@ def _raman_free_autofocus_allowed(autofocus_enabled, autofocus_object):
     return not autofocus_enabled or autofocus_object in supported
 
 
+def _cellpose_model_names():
+    """Return built-in and Cellpose-registered user model names."""
+    try:
+        from cellpose import models
+
+        names = list(models.MODEL_NAMES)
+        get_user_models = getattr(models, "get_user_models", None)
+        if get_user_models is not None:
+            names.extend(get_user_models())
+        return list(dict.fromkeys(names)) or ["cyto2"]
+    except Exception:
+        return ["cyto2"]
+
+
 def _spatial_yx(point):
     """Return the final Y/X coordinates from one napari point."""
     point = np.asarray(point)
@@ -1041,15 +1055,23 @@ class HardwareWidget(QWidget):
         sel_cp_row = QHBoxLayout()
         sel_cp_row.addWidget(QLabel("Cellpose model:"))
         self.sel_cellpose_combo = QComboBox()
-        try:
-            from cellpose import models as _cp_models
-            _sel_model_names = list(_cp_models.MODEL_NAMES)
-        except Exception:
-            _sel_model_names = ["cyto2"]
-        self.sel_cellpose_combo.addItems(_sel_model_names)
+        _sel_model_names = _cellpose_model_names()
+        for model_name in _sel_model_names:
+            self.sel_cellpose_combo.addItem(model_name, model_name)
         if "cyto2" in _sel_model_names:
             self.sel_cellpose_combo.setCurrentText("cyto2")
+        self.sel_cellpose_browse = QPushButton("...")
+        self.sel_cellpose_browse.setFixedWidth(30)
+        self.sel_cellpose_browse.setToolTip(
+            "Select a user-trained Cellpose weights file"
+        )
+        self.sel_cellpose_browse.clicked.connect(
+            lambda _checked=False: self.browse_cellpose_model(
+                self.sel_cellpose_combo
+            )
+        )
         sel_cp_row.addWidget(self.sel_cellpose_combo)
+        sel_cp_row.addWidget(self.sel_cellpose_browse)
         sel_layout.addLayout(sel_cp_row)
 
         self.run_selection_btn = QPushButton("Run automated selection")
@@ -1178,15 +1200,23 @@ class HardwareWidget(QWidget):
         self._seg_model_label = QLabel("Cellpose model:")
         seg_model_row.addWidget(self._seg_model_label)
         self.mda_seg_model_combo = QComboBox()
-        try:
-            from cellpose import models as _cp_models
-            model_names = list(_cp_models.MODEL_NAMES)
-        except Exception:
-            model_names = ["cyto2"]
-        self.mda_seg_model_combo.addItems(model_names)
+        model_names = _cellpose_model_names()
+        for model_name in model_names:
+            self.mda_seg_model_combo.addItem(model_name, model_name)
         if "cyto2" in model_names:
             self.mda_seg_model_combo.setCurrentText("cyto2")
+        self.mda_seg_model_browse = QPushButton("...")
+        self.mda_seg_model_browse.setFixedWidth(30)
+        self.mda_seg_model_browse.setToolTip(
+            "Select a user-trained Cellpose weights file"
+        )
+        self.mda_seg_model_browse.clicked.connect(
+            lambda _checked=False: self.browse_cellpose_model(
+                self.mda_seg_model_combo
+            )
+        )
         seg_model_row.addWidget(self.mda_seg_model_combo)
+        seg_model_row.addWidget(self.mda_seg_model_browse)
         mda_layout.addLayout(seg_model_row)
         # Crop-around-mask dropdown
         seg_crop_row = QHBoxLayout()
@@ -1496,6 +1526,40 @@ class HardwareWidget(QWidget):
         if path:
             self.mda_track_cfg_input.setText(path)
 
+    def browse_cellpose_model(self, combo):
+        """Add a user-trained Cellpose weights file to one model selector."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Cellpose model weights",
+            "",
+            "Cellpose model weights (*);;All files (*)",
+        )
+        if not path:
+            return
+        resolved = str(Path(path).expanduser().resolve())
+        index = combo.findData(resolved)
+        if index < 0:
+            combo.addItem(f"Custom: {Path(resolved).name}", resolved)
+            index = combo.count() - 1
+        combo.setCurrentIndex(index)
+        combo.setToolTip(resolved)
+
+    @staticmethod
+    def _selected_cellpose_model(combo):
+        """Return a built-in model name or validated custom weights path."""
+        value = combo.currentData() or combo.currentText()
+        value = str(value).strip()
+        if not value:
+            raise ValueError("Select a Cellpose model")
+        if combo.currentText().startswith("Custom:"):
+            path = Path(value).expanduser()
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"Cellpose model file not found: {path}"
+                )
+            return str(path.resolve())
+        return value
+
     # -------- helpers --------
     def _output_path(self, path):
         """Resolve a relative result path under the current output folder."""
@@ -1737,6 +1801,7 @@ class HardwareWidget(QWidget):
         self.mda_seg_scale_input.setVisible(checked)
         self._seg_model_label.setVisible(checked)
         self.mda_seg_model_combo.setVisible(checked)
+        self.mda_seg_model_browse.setVisible(checked)
         self._seg_crop_label.setVisible(checked)
         self.mda_seg_crop_combo.setVisible(checked)
         self._seg_track_cfg_label.setVisible(checked)
@@ -3366,7 +3431,13 @@ class HardwareWidget(QWidget):
 
         center_cell = self.sel_center_cell_check.isChecked()
         vandermonde_model_path = self.sel_vdm_path.text().strip()
-        cellpose_model = self.sel_cellpose_combo.currentText() or "cyto2"
+        try:
+            cellpose_model = self._selected_cellpose_model(
+                self.sel_cellpose_combo
+            )
+        except (FileNotFoundError, ValueError) as error:
+            self.status.setText(f"Status: {error}")
+            return
         segmentation_channel = self.sel_seg_ch_combo.currentText() or "BF"
         objective = self._current_objective() if center_cell else None
 
@@ -4284,7 +4355,13 @@ class HardwareWidget(QWidget):
         refocus_every = int(self.mda_refocus_input.value())
         segment_channel = self.mda_seg_ch_combo.currentText() or "BF"
         seg_scale = float(self.mda_seg_scale_input.value())
-        cellpose_model = self.mda_seg_model_combo.currentText() or "cyto2"
+        try:
+            cellpose_model = self._selected_cellpose_model(
+                self.mda_seg_model_combo
+            )
+        except (FileNotFoundError, ValueError) as error:
+            self.status.setText(f"Status: {error}")
+            return
         segment_crop = self.mda_seg_crop_combo.currentText() == "True"
         tracking_config = self.mda_track_cfg_input.text().strip() or "particle_config.json"
         cy = int(self.sel_cy_input.value())

@@ -43,6 +43,42 @@ class TestSpatialPointExtraction(unittest.TestCase):
             _spatial_yx(np.zeros((2, 4)))
 
 
+class TestCellposeModelSelection(unittest.TestCase):
+    def test_builtin_model_name_is_returned(self):
+        combo = SimpleNamespace(
+            currentData=lambda: "cpsam_v2",
+            currentText=lambda: "cpsam_v2",
+        )
+
+        self.assertEqual(
+            HardwareWidget._selected_cellpose_model(combo),
+            "cpsam_v2",
+        )
+
+    def test_custom_model_path_is_validated_and_resolved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "my-cellpose-model"
+            model.write_bytes(b"weights")
+            combo = SimpleNamespace(
+                currentData=lambda: str(model),
+                currentText=lambda: f"Custom: {model.name}",
+            )
+
+            selected = HardwareWidget._selected_cellpose_model(combo)
+
+        self.assertEqual(selected, str(model.resolve()))
+
+    def test_missing_custom_model_is_rejected(self):
+        model = Path("missing-cellpose-model").resolve()
+        combo = SimpleNamespace(
+            currentData=lambda: str(model),
+            currentText=lambda: f"Custom: {model.name}",
+        )
+
+        with self.assertRaisesRegex(FileNotFoundError, "model file not found"):
+            HardwareWidget._selected_cellpose_model(combo)
+
+
 class TestOutputPaths(unittest.TestCase):
     def test_relative_paths_follow_latest_output_folder(self):
         selected = {"path": "first"}
