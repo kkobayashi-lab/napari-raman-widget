@@ -1,4 +1,5 @@
 """The main HardwareWidget: a dockable napari panel for the CNS Raman rig."""
+from datetime import datetime
 import time
 import uuid
 from pathlib import Path
@@ -17,6 +18,14 @@ from .acquisition_viewer import LargeAcquisitionViewerWindow
 from .field_help import apply_tooltips
 from .log_window import LogWindow, _StdoutRedirector
 from .lazy_visualization import install_lazy_mda_viewer
+from .mda_timing import (
+    IMAGING_FRAME_OVERHEAD_S,
+    RAMAN_POINT_OVERHEAD_S,
+    estimate_mda_time,
+    estimate_live_mda_end,
+    format_duration,
+    mda_schedule_window,
+)
 from .plot_windows import (
     CalibrationPlotWindow, GridScanPlotWindow, ReferenceSpectraWindow,
     SpectrumWindow,
@@ -128,6 +137,16 @@ class HardwareWidget(QWidget):
         self._raman_mda_pending = False
         self._raman_mda_canceled = False
         self._raman_mda_writer = None
+        self._scheduled_raman_mda = None
+        self._raman_mda_start_timer = QTimer(self)
+        self._raman_mda_start_timer.setSingleShot(True)
+        self._raman_mda_start_timer.timeout.connect(
+            self._start_scheduled_raman_mda
+        )
+        self._mda_live_total = 0
+        self._mda_live_completed = 0
+        self._mda_live_intervals = []
+        self._mda_live_last_completion = None
         self._raman_visualization_engine = None
         self._lazy_mda_viewer = None
         self.px2stage_picker = None
@@ -1207,6 +1226,15 @@ class HardwareWidget(QWidget):
         interval_row.addWidget(self.mda_interval_input)
         mda_layout.addLayout(interval_row)
 
+        delay_row = QHBoxLayout()
+        delay_row.addWidget(QLabel("Start delay (s):"))
+        self.mda_delay_input = QDoubleSpinBox()
+        self.mda_delay_input.setRange(0.0, 1_000_000)
+        self.mda_delay_input.setValue(0)
+        self.mda_delay_input.setDecimals(1)
+        delay_row.addWidget(self.mda_delay_input)
+        mda_layout.addLayout(delay_row)
+
         # Refocus / re-segment cadence: run autofocus AND segment-and-track
         # only every Nth timepoint (1 = every timepoint).
         refocus_row = QHBoxLayout()
@@ -1254,6 +1282,10 @@ class HardwareWidget(QWidget):
         mda_btns_row.addWidget(self.stop_mda_btn, 1)
 
         mda_layout.addLayout(mda_btns_row)
+
+        self.mda_live_eta_label = QLabel("Live ETA: --")
+        self.mda_live_eta_label.setWordWrap(True)
+        mda_layout.addWidget(self.mda_live_eta_label)
 
         # --- separator ---
         sep = QLabel("-" * 45)
@@ -2258,10 +2290,14 @@ class HardwareWidget(QWidget):
                 self._mda_completion_events.sequenceCanceled.disconnect(
                     self._on_raman_mda_canceled
                 )
+                self._mda_completion_events.frameReady.disconnect(
+                    self._on_mda_frame_completed
+                )
             except Exception:
                 pass
         events.sequenceCanceled.connect(self._on_raman_mda_canceled)
         events.sequenceFinished.connect(self._on_raman_mda_finished)
+        events.frameReady.connect(self._on_mda_frame_completed)
         self._mda_completion_events = events
 
     def _connect_raman_visualization(self, engine):
@@ -2285,6 +2321,7 @@ class HardwareWidget(QWidget):
         self, event, spectra, points, which, _exposure
     ):
         """Add the spectrum image at RM's index in the shared MDA stack."""
+        self._record_live_mda_completion()
         if self._lazy_mda_viewer is None:
             return
         try:
@@ -2300,6 +2337,62 @@ class HardwareWidget(QWidget):
             points=points,
             which=which,
         )
+
+    def _on_mda_frame_completed(self, _image, _event, *_metadata):
+        """Update the live ETA after one camera acquisition completes."""
+        self._record_live_mda_completion()
+
+    def _start_live_mda_timing(self, total_acquisitions):
+        self._mda_live_total = max(0, int(total_acquisitions))
+        self._mda_live_completed = 0
+        self._mda_live_intervals = []
+        self._mda_live_last_completion = time.perf_counter()
+        self.mda_live_eta_label.setText(
+            "Live ETA: collecting the first measurement..."
+        )
+
+    def _record_live_mda_completion(self):
+        """Update ETA from the rolling average of the latest 10 completions."""
+        if (
+            not self._raman_mda_pending
+            or self._mda_live_last_completion is None
+            or self._mda_live_completed >= self._mda_live_total
+        ):
+            return
+
+        now_monotonic = time.perf_counter()
+        interval = now_monotonic - self._mda_live_last_completion
+        self._mda_live_last_completion = now_monotonic
+        self._mda_live_intervals.append(interval)
+        self._mda_live_intervals = self._mda_live_intervals[-10:]
+        self._mda_live_completed += 1
+
+        live = estimate_live_mda_end(
+            self._mda_live_intervals,
+            self._mda_live_completed,
+            self._mda_live_total,
+            datetime.now().astimezone(),
+        )
+        if live is None:
+            return
+        end_text = live.expected_end.strftime("%Y-%m-%d %H:%M:%S %Z")
+        self.mda_live_eta_label.setText(
+            f"Live ETA: {end_text} "
+            f"({live.completed}/{live.total} complete; "
+            f"{format_duration(live.average_seconds)} average from "
+            f"last {live.sample_count})"
+        )
+
+    def _finish_live_mda_timing(self, reason):
+        self._mda_live_last_completion = None
+        if reason == "completed":
+            text = (
+                f"Live ETA: completed at "
+                f"{datetime.now().astimezone():%Y-%m-%d %H:%M:%S %Z}"
+            )
+        else:
+            text = f"Live ETA: {reason}"
+        self.mda_live_eta_label.setText(text)
 
     def _on_raman_mda_canceled(self, _sequence):
         """Remember cancellation before the ensuing sequenceFinished signal."""
@@ -2335,6 +2428,7 @@ class HardwareWidget(QWidget):
             writer_status = getattr(writer, "completion_status", reason)
             if writer_status != "completed":
                 reason = writer_status
+        self._finish_live_mda_timing(reason)
         if reason != "completed":
             self.status.setText(f"Status: MDA {reason}")
             return
@@ -2598,6 +2692,7 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: transformer reload failed -- {e}")
 
     def disconnect(self):
+        self._cancel_scheduled_raman_mda()
         for button in (
             self.click_center_btn,
             self.click_laser_btn,
@@ -2611,6 +2706,8 @@ class HardwareWidget(QWidget):
             writer.disconnect()
         self._raman_mda_writer = None
         self._raman_mda_pending = False
+        self._mda_live_last_completion = None
+        self.mda_live_eta_label.setText("Live ETA: --")
         if self._raman_visualization_engine is not None:
             try:
                 self._raman_visualization_engine.raman_events.ramanSpectraReady.disconnect(
@@ -3857,7 +3954,148 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: stage grid failed -- {e}")
 
     # -------- run raman MDA --------
+    def _show_mda_time_preview(
+        self, estimate, raman_exposure_ms, delay_seconds
+    ):
+        scheduled_start, expected_end = mda_schedule_window(
+            datetime.now().astimezone(),
+            delay_seconds,
+            estimate.duration_seconds,
+        )
+        date_format = "%Y-%m-%d %H:%M:%S %Z"
+        scheduled_wait = format_duration(estimate.scheduled_wait_seconds)
+        message = (
+            "Times are calculated from when Run MDA was clicked.\n\n"
+            f"Start delay: {format_duration(delay_seconds)}\n"
+            f"Estimated acquisition time: "
+            f"{format_duration(estimate.duration_seconds)}\n\n"
+            f"Scheduled start:\n{scheduled_start.strftime(date_format)}\n\n"
+            f"Expected to end:\n{expected_end.strftime(date_format)}\n\n"
+            "Estimate details:\n"
+            f"- {estimate.raman_points:,} Raman point acquisitions "
+            f"({float(raman_exposure_ms) / 1000.0:g} s exposure + "
+            f"{RAMAN_POINT_OVERHEAD_S:g} s overhead each)\n"
+            f"- {estimate.imaging_frames:,} imaging frames "
+            f"(channel exposure + {IMAGING_FRAME_OVERHEAD_S:g} s "
+            "overhead each)\n"
+            f"- {scheduled_wait} scheduled interval time\n\n"
+            "Autofocus, segmentation/tracking, and stage movement time "
+            "are not included."
+        )
+        QMessageBox.information(
+            self,
+            "MDA time preview",
+            message,
+            QMessageBox.Ok,
+        )
+        return scheduled_start
+
+    def _schedule_raman_mda_start(
+        self,
+        final_seq,
+        delay_seconds,
+        scheduled_start,
+        mode,
+        log,
+        total_acquisitions,
+    ):
+        """Start now or arm a responsive one-shot timer for a delayed start."""
+        self._scheduled_raman_mda = {
+            "sequence": final_seq,
+            "mode": mode,
+            "log": log,
+            "writer": self.mda_writer,
+            "total_acquisitions": total_acquisitions,
+        }
+        self._raman_mda_writer = self.mda_writer
+        self._raman_mda_canceled = False
+
+        remaining_delay = max(
+            0.0,
+            (
+                scheduled_start - datetime.now().astimezone()
+            ).total_seconds(),
+        )
+        if remaining_delay <= 0:
+            self._start_scheduled_raman_mda()
+            return
+
+        delay_ms = int(round(remaining_delay * 1000))
+        self._raman_mda_start_timer.start(delay_ms)
+        start_text = scheduled_start.strftime("%Y-%m-%d %H:%M:%S %Z")
+        log.append(
+            f"\n--- MDA scheduled to start at {start_text} "
+            f"(delay {format_duration(delay_seconds)}) ---\n"
+        )
+        self.status.setText(
+            f"Status: {mode} scheduled for {start_text}"
+        )
+        self.mda_live_eta_label.setText(
+            f"Live ETA: waiting to start at {start_text}"
+        )
+
+    def _start_scheduled_raman_mda(self):
+        """Submit the prepared sequence when its optional delay expires."""
+        prepared = self._scheduled_raman_mda
+        if prepared is None:
+            return
+        self._scheduled_raman_mda = None
+        self._raman_mda_start_timer.stop()
+
+        log = prepared["log"]
+        writer = prepared["writer"]
+        try:
+            with _StdoutRedirector(log):
+                print(f"Starting {prepared['mode']}")
+                self._connect_mda_completion_events()
+                self._raman_mda_pending = True
+                self._raman_mda_canceled = False
+                self._raman_mda_writer = writer
+                self._start_live_mda_timing(
+                    prepared["total_acquisitions"]
+                )
+                self.core.run_mda(prepared["sequence"])
+            log.append("\n--- MDA started ---\n")
+            self.status.setText(
+                f"Status: {prepared['mode']} started OK"
+            )
+        except Exception as e:
+            if writer is not None and not getattr(writer, "closed", True):
+                writer.close(status="failed")
+            self._raman_mda_pending = False
+            self._raman_mda_writer = None
+            self._finish_live_mda_timing("failed")
+            log.append(f"\n--- MDA failed: {e} ---\n")
+            self.status.setText(f"Status: MDA failed -- {e}")
+
+    def _cancel_scheduled_raman_mda(self):
+        """Cancel an MDA that is waiting for its delayed start."""
+        prepared = self._scheduled_raman_mda
+        if prepared is None:
+            return False
+
+        self._raman_mda_start_timer.stop()
+        self._scheduled_raman_mda = None
+        writer = prepared["writer"]
+        if writer is not None and not getattr(writer, "closed", True):
+            writer.close(status="canceled")
+        self._raman_mda_pending = False
+        self._raman_mda_canceled = False
+        self._raman_mda_writer = None
+        prepared["log"].append("\n--- delayed MDA canceled ---\n")
+        self.status.setText("Status: delayed MDA canceled")
+        self._finish_live_mda_timing("canceled before start")
+        return True
+
     def run_raman_mda(self):
+        if self._scheduled_raman_mda is not None:
+            self.status.setText(
+                "Status: an MDA is already waiting for its delayed start"
+            )
+            return
+        if self._raman_mda_pending:
+            self.status.setText("Status: an MDA is already running")
+            return
         if self.core is None:
             self.status.setText("Status: not connected")
             return
@@ -4026,6 +4264,7 @@ class HardwareWidget(QWidget):
         total_exp = float(self.mda_exp_input.value())
         loops = int(self.mda_loops_input.value())
         interval = float(self.mda_interval_input.value())
+        delay = float(self.mda_delay_input.value())
         refocus_every = int(self.mda_refocus_input.value())
         segment_channel = self.mda_seg_ch_combo.currentText() or "BF"
         seg_scale = float(self.mda_seg_scale_input.value())
@@ -4087,22 +4326,6 @@ class HardwareWidget(QWidget):
                     circle_center=circle_center,
                     circle_radius=circle_radius,
                     stage_centering_model=stage_centering_model,
-                )
-
-                self.core.register_mda_engine(engine)
-                self._connect_raman_visualization(engine)
-
-                previous_writer = self.mda_writer
-                if previous_writer is not None and not getattr(
-                    previous_writer, "closed", True
-                ):
-                    previous_writer.disconnect()
-                self.mda_writer = RamanAcquisitionWriter(
-                    out_dir,
-                    core=self.core,
-                    wavenumbers=self.collector.get_wavenumbers(),
-                    image_positions=image_p,
-                    batch=batch,
                 )
                 engine.aiming_sources = sources
 
@@ -4188,8 +4411,38 @@ class HardwareWidget(QWidget):
                         "skipping raman['z']"
                     )
 
+                estimate = estimate_mda_time(
+                    final_seq,
+                    sources,
+                    engine.default_rm_exposure,
+                    raman_z_indices,
+                    image_p,
+                )
+                scheduled_start = self._show_mda_time_preview(
+                    estimate,
+                    engine.default_rm_exposure,
+                    delay,
+                )
+
+                self.core.register_mda_engine(engine)
+                self._connect_raman_visualization(engine)
+
+                previous_writer = self.mda_writer
+                if previous_writer is not None and not getattr(
+                    previous_writer, "closed", True
+                ):
+                    previous_writer.disconnect()
+                self.mda_writer = RamanAcquisitionWriter(
+                    out_dir,
+                    core=self.core,
+                    wavenumbers=self.collector.get_wavenumbers(),
+                    image_positions=image_p,
+                    batch=batch,
+                )
+
                 print(
-                    f"Starting MDA: {loops} loops, interval={interval}s, "
+                    f"Prepared MDA: {loops} loops, interval={interval}s, "
+                    f"start_delay={delay}s, "
                     f"axis_order={final_seq.axis_order}, "
                     f"z_rel={z_relative}, raman_z={raman_z_indices}, "
                     f"autofocus={autofocus_enabled} ({af_choice}), "
@@ -4204,15 +4457,17 @@ class HardwareWidget(QWidget):
                     f"[debug] engine._autofocus={engine._autofocus}, "
                     f"engine._segment_and_track={engine._segment_and_track}"
                 )
-                self._connect_mda_completion_events()
-                self._raman_mda_pending = True
-                self._raman_mda_canceled = False
-                self._raman_mda_writer = self.mda_writer
-                self.core.run_mda(final_seq)
-
-            log.append("\n--- MDA started ---\n")
-            mode = "Raman MDA" if raman_enabled else "Raman-free MDA"
-            self.status.setText(f"Status: {mode} started OK")
+                mode = (
+                    "Raman MDA" if raman_enabled else "Raman-free MDA"
+                )
+                self._schedule_raman_mda_start(
+                    final_seq,
+                    delay,
+                    scheduled_start,
+                    mode,
+                    log,
+                    estimate.acquisition_count,
+                )
         except Exception as e:
             if self.mda_writer is not None and not getattr(
                 self.mda_writer, "closed", True
@@ -4224,6 +4479,8 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: MDA failed -- {e}")
 
     def stop_raman_mda(self):
+        if self._cancel_scheduled_raman_mda():
+            return
         if self.core is None:
             self.status.setText("Status: not connected")
             return

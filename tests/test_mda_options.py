@@ -569,8 +569,13 @@ class TestMdaCompletion(unittest.TestCase):
             _raman_mda_pending=True,
             _raman_mda_canceled=False,
             _raman_mda_writer=writer,
+            _mda_live_last_completion=0.0,
+            mda_live_eta_label=_FakeStatusLabel(),
             status=_FakeStatusLabel(),
             core=SimpleNamespace(mda=mda),
+        )
+        widget._finish_live_mda_timing = MethodType(
+            HardwareWidget._finish_live_mda_timing, widget
         )
         return widget
 

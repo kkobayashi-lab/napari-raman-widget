@@ -358,6 +358,9 @@ HELP = {
     ),
     "mda_loops_input": "Number of temporal repetitions (time points).",
     "mda_interval_input": "Requested interval between time points (s).",
+    "mda_delay_input": (
+        "Delay in seconds after confirming the preview before the MDA starts."
+    ),
     "mda_refocus_input": (
         "Cadence in time points for focus and tracking updates; 1 = every "
         "time point."

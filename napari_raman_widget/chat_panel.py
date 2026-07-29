@@ -645,6 +645,8 @@ ACTIONS = [
             _p("loops", "mda_loops_input", "int", "Time points."),
             _p("interval_s", "mda_interval_input", "float",
                "Interval between time points in seconds."),
+            _p("start_delay_s", "mda_delay_input", "float",
+               "Delay before the MDA starts, in seconds."),
             _p("z_relative", "mda_zrel_input", "text",
                "Comma-separated relative z planes, e.g. '0, 4'."),
             _p("raman_z_indices", "mda_rz_input", "text",
@@ -661,7 +663,7 @@ ACTIONS = [
         "always_run": True,      # never gate a stop
         "method": "stop_raman_mda",
         "params": [],
-        "description": "Request a clean stop of the running MDA.",
+        "description": "Cancel a delayed start or stop the running MDA.",
     },
 
     # ---- napari layers (safe: viewer only) ----
