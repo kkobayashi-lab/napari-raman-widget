@@ -10,11 +10,51 @@ from qtpy.QtWidgets import QMessageBox
 from napari_raman_widget.widget import (
     DEFAULT_BEAM_CENTER_XY,
     HardwareWidget,
+    _cell_layer_metadata,
     _cellpose_diameter,
     _parse_raman_z_indices,
     _raman_free_autofocus_allowed,
     _spatial_yx,
 )
+
+
+class TestCellLayerMetadata(unittest.TestCase):
+    def test_legacy_and_named_cell_sources_are_serialized(self):
+        sources = [
+            SimpleNamespace(
+                name="cells",
+                role="cell",
+                display_name="Type A",
+                source_id="a",
+                color="#aa0000ff",
+            ),
+            SimpleNamespace(
+                name="cell:Type B",
+                role="cell",
+                display_name="Type B",
+                source_id="b",
+                color="#0066ccff",
+            ),
+            SimpleNamespace(name="autofocus", role="autofocus"),
+        ]
+
+        self.assertEqual(
+            _cell_layer_metadata(sources),
+            [
+                {
+                    "id": "a",
+                    "name": "Type A",
+                    "source_name": "cells",
+                    "color": "#aa0000ff",
+                },
+                {
+                    "id": "b",
+                    "name": "Type B",
+                    "source_name": "cell:Type B",
+                    "color": "#0066ccff",
+                },
+            ],
+        )
 
 
 class TestCellposeDiameter(unittest.TestCase):

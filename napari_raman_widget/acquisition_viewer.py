@@ -145,6 +145,9 @@ class LargeAcquisitionViewerWindow(QMainWindow):
         view_row.addWidget(QLabel("Raman z:"))
         self.raman_z_combo = QComboBox()
         view_row.addWidget(self.raman_z_combo)
+        view_row.addWidget(QLabel("Cell layer:"))
+        self.cell_layer_combo = QComboBox()
+        view_row.addWidget(self.cell_layer_combo)
         view_row.addWidget(QLabel("Cell index:"))
         self.cell_index = QSpinBox()
         self.cell_index.setRange(0, 0)
@@ -177,6 +180,9 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             self._update_raman_z_and_cells
         )
         self.raman_z_combo.currentIndexChanged.connect(
+            self._update_cell_layers
+        )
+        self.cell_layer_combo.currentIndexChanged.connect(
             self._update_cell_range
         )
 
@@ -221,6 +227,7 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             self.raman_t_combo,
             self.raman_index,
             self.raman_z_combo,
+            self.cell_layer_combo,
             self.cell_index,
             self.channel_combo,
             self.stitched_check,
@@ -235,6 +242,7 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             self.raman_t_combo.currentIndexChanged,
             self.raman_index.valueChanged,
             self.raman_z_combo.currentIndexChanged,
+            self.cell_layer_combo.currentIndexChanged,
             self.cell_index.valueChanged,
             self.channel_combo.currentIndexChanged,
             self.stitched_check.toggled,
@@ -390,30 +398,34 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             self._set_view_controls_enabled(True)
 
             summary = acquisition.summary()
-            cell_count = sum(
-                len(
-                    acquisition.raman_cells(
-                        index,
-                        time_index=time_index,
-                        z_index=z_index,
-                    )
-                )
-                for index in range(len(raman_fovs))
-                for time_index in acquisition.raman_times(index)
-                for z_index in acquisition.raman_z_indices(
-                    index, time_index
-                )
-            )
+            cell_count = 0
+            cell_layer_designations = set()
+            for index in range(len(raman_fovs)):
+                for time_index in acquisition.raman_times(index):
+                    for z_index in acquisition.raman_z_indices(
+                        index, time_index
+                    ):
+                        cells = acquisition.raman_cells(
+                            index,
+                            time_index=time_index,
+                            z_index=z_index,
+                        )
+                        cell_count += len(cells)
+                        cell_layer_designations.update(
+                            cell.designation for cell in cells
+                        )
             elapsed = time.perf_counter() - started
             self.summary_label.setText(
                 f"{summary['image_files']:,} images; "
                 f"{len(raman_fovs):,} Raman FOVs; "
+                f"{len(cell_layer_designations):,} cell layers; "
                 f"{cell_count:,} cells; "
                 f"{len(channels)} channels; indexed in {elapsed:.2f} s"
             )
             self.status_label.setText(
                 "Indexed. The spectrum and image update automatically when "
-                "Raman t, p/FOV, z, cell, channel, or preview options change. "
+                "Raman t, p/FOV, z, cell layer/index, channel, or preview "
+                "options change. "
                 "Exact image/Raman FOV matches are used first; center matching "
                 "is the fallback."
             )
@@ -448,10 +460,15 @@ class LargeAcquisitionViewerWindow(QMainWindow):
         value = self.raman_z_combo.currentData()
         return None if value is None else int(value)
 
+    def _selected_cell_layer(self):
+        value = self.cell_layer_combo.currentData()
+        return None if value is None else str(value)
+
     def _update_raman_axes(self, *_args):
         if self.acquisition is None:
             self.raman_t_combo.clear()
             self.raman_z_combo.clear()
+            self.cell_layer_combo.clear()
             self.cell_index.setRange(0, 0)
             return
         times = list(
@@ -463,6 +480,7 @@ class LargeAcquisitionViewerWindow(QMainWindow):
     def _update_raman_z_and_cells(self, *_args):
         if self.acquisition is None:
             self.raman_z_combo.clear()
+            self.cell_layer_combo.clear()
             self.cell_index.setRange(0, 0)
             return
         time_index = self._selected_raman_t()
@@ -476,16 +494,43 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             )
         )
         self._set_combo_values(self.raman_z_combo, z_indices)
+        self._update_cell_layers()
+
+    def _update_cell_layers(self, *_args):
+        previous = self.cell_layer_combo.currentData()
+        self.cell_layer_combo.blockSignals(True)
+        self.cell_layer_combo.clear()
+        if self.acquisition is not None:
+            layers = self.acquisition.raman_cell_layers(
+                self.raman_index.value(),
+                time_index=self._selected_raman_t(),
+                z_index=self._selected_raman_z(),
+            )
+            for layer in layers:
+                cell_label = "cell" if layer.cell_count == 1 else "cells"
+                self.cell_layer_combo.addItem(
+                    f"{layer.layer_index}: {layer.name} "
+                    f"({layer.cell_count} {cell_label})",
+                    layer.designation,
+                )
+            designations = [layer.designation for layer in layers]
+            if previous in designations:
+                self.cell_layer_combo.setCurrentIndex(
+                    designations.index(previous)
+                )
+        self.cell_layer_combo.blockSignals(False)
         self._update_cell_range()
 
     def _update_cell_range(self, *_args):
         if self.acquisition is None:
             self.cell_index.setRange(0, 0)
             return
+        cell_layer = self._selected_cell_layer()
         cells = self.acquisition.raman_cells(
             self.raman_index.value(),
             time_index=self._selected_raman_t(),
             z_index=self._selected_raman_z(),
+            cell_layer=cell_layer,
         )
         self.cell_index.setRange(0, max(0, len(cells) - 1))
         if self.cell_index.value() >= len(cells):
@@ -506,6 +551,7 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             raman_index = self.raman_index.value()
             time_index = self._selected_raman_t()
             z_index = self._selected_raman_z()
+            cell_layer = self._selected_cell_layer()
             cell_index = self.cell_index.value()
             channel = self.channel_combo.currentData()
             spectrum_data = _mean_raman_spectrum(
@@ -514,6 +560,7 @@ class LargeAcquisitionViewerWindow(QMainWindow):
                 cell_index,
                 time_index=time_index,
                 z_index=z_index,
+                cell_layer=cell_layer,
             )
 
             self.spectrum_ax.clear()
@@ -530,6 +577,7 @@ class LargeAcquisitionViewerWindow(QMainWindow):
                     cell_index=cell_index,
                     time_index=time_index,
                     z_index=z_index,
+                    cell_layer=cell_layer,
                 )
                 if mosaic is not None:
                     self.image_ax.imshow(mosaic, cmap="gray")
@@ -557,6 +605,7 @@ class LargeAcquisitionViewerWindow(QMainWindow):
                     cell_index=cell_index,
                     time_index=time_index,
                     z_index=z_index,
+                    cell_layer=cell_layer,
                 )
                 if match is not None:
                     image = self.acquisition.load_image(match.image_key)
@@ -582,9 +631,11 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             self.figure.tight_layout()
             self.canvas.draw_idle()
             elapsed = time.perf_counter() - started
+            layer_label = self.cell_layer_combo.currentText()
             self.status_label.setText(
                 f"Showing Raman t={time_index}, p/FOV={raman_index}, "
-                f"z={z_index}, cell={cell_index} in {elapsed:.2f} s"
+                f"z={z_index}, layer={layer_label}, "
+                f"cell={cell_index} in {elapsed:.2f} s"
             )
         except Exception as error:
             self.status_label.setText(f"Could not show selection: {error}")

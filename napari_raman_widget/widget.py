@@ -11,7 +11,7 @@ from qtpy.QtCore import QEvent, QTimer, Qt, QUrl, Slot
 from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
-    QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QSpinBox,
+    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QPushButton, QScrollArea, QSpinBox,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QMessageBox
 )
 from .acquisition_viewer import LargeAcquisitionViewerWindow
@@ -42,6 +42,14 @@ ND_FILTER_MASK = 1 << 1  # Dev1/port0/line1
 STAGE_DRAG_INTERVAL_MS = 100
 STAGE_DRAG_DEAD_ZONE_PX = 10.0
 STAGE_DRAG_FULL_SPEED_PX = 100.0
+CELL_LAYER_COLORS = (
+    "#aa0000ff",
+    "#0066ccff",
+    "#cc6600ff",
+    "#8a2be2ff",
+    "#008866ff",
+    "#cc2288ff",
+)
 
 
 def _enable_raman_mda_options():
@@ -131,6 +139,50 @@ def _spatial_yx(point):
             "Expected one napari point with at least Y and X coordinates"
         )
     return point[-2:]
+
+
+def _source_has_role(source, role):
+    """Use explicit source roles while retaining legacy name-based behavior."""
+    source_role = getattr(source, "role", None)
+    if source_role is not None:
+        return source_role == role
+    return role in source.name.lower()
+
+
+def _cell_source_display_name(source):
+    display_name = getattr(source, "display_name", None)
+    if display_name:
+        return str(display_name)
+    name = str(source.name)
+    return (
+        name.split(":", 1)[1]
+        if name.lower().startswith("cell:") and ":" in name
+        else name
+    )
+
+
+def _cell_source_name(display_name):
+    display_name = str(display_name).strip()
+    if not display_name:
+        raise ValueError("Cell layer name cannot be empty")
+    return f"cell:{display_name}"
+
+
+def _cell_layer_metadata(sources):
+    """Return JSON-compatible cell-layer definitions for sequence metadata."""
+    layers = []
+    for source in sources:
+        if not _source_has_role(source, "cell"):
+            continue
+        layers.append(
+            {
+                "id": str(getattr(source, "source_id", source.name)),
+                "name": _cell_source_display_name(source),
+                "source_name": str(source.name),
+                "color": getattr(source, "color", None),
+            }
+        )
+    return layers
 
 
 class HardwareWidget(QWidget):
@@ -642,18 +694,6 @@ class HardwareWidget(QWidget):
         # let the grid combo also drive the MDA autofocus-field visibility
         self.grid_af_combo.currentTextChanged.connect(self._toggle_autofocus_fields)
 
-        channel_row = QHBoxLayout()
-        channel_row.addWidget(QLabel("Grid setup channel:"))
-        self.grid_channel_combo = QComboBox()
-        self.grid_channel_combo.addItem(
-            "Raman (pre-scan)", (None, False)
-        )
-        self.grid_channel_combo.addItem(
-            "Raman (compact, no pre-scan)", (None, True)
-        )
-        channel_row.addWidget(self.grid_channel_combo)
-        grid_layout.addLayout(channel_row)
-
         # Fixed point in image (pixel) coordinates -- same point at every FOV.
         fovx_row = QHBoxLayout()
         fovx_row.addWidget(QLabel("FOV x (px):"))
@@ -1121,6 +1161,25 @@ class HardwareWidget(QWidget):
         manual_row.addWidget(self.center_manual_btn)
         sel_layout.addLayout(manual_row)
 
+        sel_layout.addWidget(QLabel("Cell selection layers:"))
+        cell_layer_row = QHBoxLayout()
+        self.sel_cell_layer_combo = QComboBox()
+        self.sel_cell_layer_combo.currentIndexChanged.connect(
+            self._activate_selected_cell_layer
+        )
+        cell_layer_row.addWidget(self.sel_cell_layer_combo, 1)
+        self.add_cell_layer_btn = QPushButton("+ Add")
+        self.add_cell_layer_btn.clicked.connect(self.add_cell_layer)
+        cell_layer_row.addWidget(self.add_cell_layer_btn)
+        self.rename_cell_layer_btn = QPushButton("Rename")
+        self.rename_cell_layer_btn.clicked.connect(self.rename_cell_layer)
+        cell_layer_row.addWidget(self.rename_cell_layer_btn)
+        self.remove_cell_layer_btn = QPushButton("Remove")
+        self.remove_cell_layer_btn.clicked.connect(self.remove_cell_layer)
+        cell_layer_row.addWidget(self.remove_cell_layer_btn)
+        sel_layout.addLayout(cell_layer_row)
+        HardwareWidget._refresh_cell_layer_controls(self)
+
         sel_box.setLayout(sel_layout)
         outer.addWidget(sel_box)
 
@@ -1129,8 +1188,8 @@ class HardwareWidget(QWidget):
         mda_layout = QVBoxLayout()
 
         mda_layout.addWidget(QLabel(
-            "Run automated cell selection first; this uses its sources "
-            "& autofocus_p."
+            "Prepare cell selections first; every cell layer is acquired "
+            "with the shared MDA settings."
         ))
 
         mda_dir_row = QHBoxLayout()
@@ -2246,27 +2305,6 @@ class HardwareWidget(QWidget):
         if entry in self.mda_channel_rows:
             self.mda_channel_rows.remove(entry)
 
-    def _refresh_grid_channel_combo(self, available_channels):
-        """Keep Raman first while refreshing available hardware channels."""
-        current = self.grid_channel_combo.currentData()
-        self.grid_channel_combo.blockSignals(True)
-        self.grid_channel_combo.clear()
-        self.grid_channel_combo.addItem(
-            "Raman (pre-scan)", (None, False)
-        )
-        self.grid_channel_combo.addItem(
-            "Raman (compact, no pre-scan)", (None, True)
-        )
-        for channel in available_channels:
-            self.grid_channel_combo.addItem(channel, (channel, False))
-
-        index = self.grid_channel_combo.findData(current)
-        if index >= 0:
-            self.grid_channel_combo.setCurrentIndex(index)
-        self.grid_channel_combo.setEnabled(True)
-        self.grid_channel_combo.blockSignals(False)
-
-
     def _refresh_channel_combos(self):
         """Repopulate every channel combo with the current MM channel list."""
         available_no_bf = self._available_channels()
@@ -2277,8 +2315,6 @@ class HardwareWidget(QWidget):
             )
         except Exception:
             available_all = []
-
-        self._refresh_grid_channel_combo(available_all)
 
         for entry in self.channel_rows:
             combo = entry["combo"]
@@ -2547,6 +2583,7 @@ class HardwareWidget(QWidget):
         writer = self._raman_mda_writer
         self._raman_mda_pending = False
         self._raman_mda_writer = None
+        HardwareWidget._refresh_cell_layer_controls(self)
 
         reason = "canceled" if self._raman_mda_canceled else "completed"
         self._raman_mda_canceled = False
@@ -2879,6 +2916,7 @@ class HardwareWidget(QWidget):
         self.scan_ds = None
         self.main_window = None
         self.selection_results = None
+        self._refresh_cell_layer_controls()
         self.mda_writer = None
         self.px2stage_picker = None
         self.px2stage_xy = None
@@ -3472,6 +3510,198 @@ class HardwareWidget(QWidget):
         except Exception as e:
             self.status.setText(f"Status: add_mask failed -- {e}")
 
+    def _cell_sources(self):
+        if self.selection_results is None:
+            return []
+        return [
+            source
+            for source in self.selection_results.get("sources", ())
+            if _source_has_role(source, "cell")
+        ]
+
+    def _cell_layers_editable(self):
+        return (
+            self.selection_results is not None
+            and not self._raman_mda_pending
+            and self._scheduled_raman_mda is None
+        )
+
+    def _selected_cell_source(self):
+        source = self.sel_cell_layer_combo.currentData()
+        return source if source in self._cell_sources() else None
+
+    def _refresh_cell_layer_controls(self, selected_source=None):
+        if not hasattr(self, "sel_cell_layer_combo"):
+            return
+        if selected_source is None:
+            selected_source = self._selected_cell_source()
+        sources = self._cell_sources()
+        self.sel_cell_layer_combo.blockSignals(True)
+        self.sel_cell_layer_combo.clear()
+        for source in sources:
+            layer = getattr(source, "points_layer", None)
+            if layer is None:
+                layer = getattr(source, "_points", None)
+            try:
+                point_count = len(layer.data)
+            except Exception:
+                point_count = 0
+            self.sel_cell_layer_combo.addItem(
+                f"{_cell_source_display_name(source)} ({point_count} points)",
+                source,
+            )
+        if not sources:
+            self.sel_cell_layer_combo.addItem("(prepare a selection first)", None)
+        elif selected_source in sources:
+            self.sel_cell_layer_combo.setCurrentIndex(
+                sources.index(selected_source)
+            )
+        self.sel_cell_layer_combo.blockSignals(False)
+
+        editable = self._cell_layers_editable()
+        self.add_cell_layer_btn.setEnabled(editable)
+        self.rename_cell_layer_btn.setEnabled(editable and bool(sources))
+        self.remove_cell_layer_btn.setEnabled(editable and len(sources) > 1)
+        self.sel_cell_layer_combo.setEnabled(bool(sources))
+
+    def _activate_selected_cell_layer(self, *_args):
+        source = self._selected_cell_source()
+        if source is None:
+            return
+        layer = getattr(source, "points_layer", None)
+        if layer is None:
+            layer = getattr(source, "_points", None)
+        if layer is None:
+            return
+        try:
+            self.viewer.layers.selection.active = layer
+        except Exception as error:
+            self.status.setText(
+                f"Status: could not activate cell layer -- {error}"
+            )
+
+    def _prompt_cell_layer_name(self, title, initial):
+        name, accepted = QInputDialog.getText(
+            self,
+            title,
+            "Cell layer name:",
+            text=initial,
+        )
+        if not accepted:
+            return None
+        name = str(name).strip()
+        if not name:
+            self.status.setText("Status: cell layer name cannot be empty")
+            return None
+        existing = {
+            _cell_source_display_name(source).casefold()
+            for source in self._cell_sources()
+        }
+        if name.casefold() in existing and name.casefold() != initial.casefold():
+            self.status.setText(
+                f"Status: a cell layer named {name!r} already exists"
+            )
+            return None
+        return name
+
+    def add_cell_layer(self):
+        if not self._cell_layers_editable():
+            self.status.setText(
+                "Status: prepare a selection before adding cell layers"
+            )
+            return
+        sources = self._cell_sources()
+        default_name = f"Cells {len(sources) + 1}"
+        display_name = self._prompt_cell_layer_name(
+            "Add cell layer", default_name
+        )
+        if display_name is None:
+            return
+        try:
+            from cns_control.utils import create_point_sources
+
+            color = CELL_LAYER_COLORS[len(sources) % len(CELL_LAYER_COLORS)]
+            transformer = sources[0].transformer
+            source = create_point_sources(
+                self.viewer,
+                transformer,
+                size=15,
+                names=[_cell_source_name(display_name)],
+                colors=[color],
+                roles=["cell"],
+                display_names=[display_name],
+            )[0]
+            all_sources = self.selection_results["sources"]
+            autofocus_index = next(
+                (
+                    index
+                    for index, existing_source in enumerate(all_sources)
+                    if _source_has_role(existing_source, "autofocus")
+                ),
+                len(all_sources),
+            )
+            all_sources.insert(autofocus_index, source)
+            self._refresh_cell_layer_controls(selected_source=source)
+            self._activate_selected_cell_layer()
+            self.status.setText(
+                f"Status: added cell layer {display_name!r}; click its points"
+            )
+        except Exception as error:
+            self.status.setText(f"Status: could not add cell layer -- {error}")
+
+    def rename_cell_layer(self):
+        if not self._cell_layers_editable():
+            return
+        source = self._selected_cell_source()
+        if source is None:
+            return
+        current_name = _cell_source_display_name(source)
+        display_name = self._prompt_cell_layer_name(
+            "Rename cell layer", current_name
+        )
+        if display_name is None:
+            return
+        source.name = _cell_source_name(display_name)
+        source.display_name = display_name
+        layer = getattr(source, "points_layer", None)
+        if layer is None:
+            layer = getattr(source, "_points", None)
+        if layer is not None:
+            layer.name = display_name
+        self._refresh_cell_layer_controls(selected_source=source)
+        self.status.setText(f"Status: renamed cell layer to {display_name!r}")
+
+    def remove_cell_layer(self):
+        if not self._cell_layers_editable():
+            return
+        sources = self._cell_sources()
+        if len(sources) <= 1:
+            self.status.setText(
+                "Status: an MDA must retain at least one cell layer"
+            )
+            return
+        source = self._selected_cell_source()
+        if source is None:
+            return
+        self.selection_results["sources"].remove(source)
+        layer = getattr(source, "points_layer", None)
+        if layer is None:
+            layer = getattr(source, "_points", None)
+        if layer is not None:
+            try:
+                self.viewer.layers.remove(layer)
+            except (ValueError, KeyError):
+                pass
+        remaining = self._cell_sources()
+        self._refresh_cell_layer_controls(
+            selected_source=remaining[0] if remaining else None
+        )
+        self._activate_selected_cell_layer()
+        self.status.setText(
+            f"Status: removed cell layer "
+            f"{_cell_source_display_name(source)!r}"
+        )
+
     def run_automated_selection(self):
         if self.core is None:
             self.status.setText("Status: not connected")
@@ -3561,6 +3791,8 @@ class HardwareWidget(QWidget):
                 "autofocus_p": autofocus_p,
                 "new_seq": new_seq,
             }
+            HardwareWidget._refresh_cell_layer_controls(self)
+            self._activate_selected_cell_layer()
             n_new = len(new_seq.stage_positions)
             log.append("\n--- selection complete ---\n")
             extra = (
@@ -3915,6 +4147,8 @@ class HardwareWidget(QWidget):
                 "autofocus_p": autofocus_p,
                 "new_seq": new_seq,
             }
+            HardwareWidget._refresh_cell_layer_controls(self)
+            self._activate_selected_cell_layer()
             hint = (
                 f"click {N_per_fov} cell(s) per FOV"
                 if batch else "click points freely"
@@ -3986,6 +4220,8 @@ class HardwareWidget(QWidget):
                 "autofocus_object": autofocus_object,
                 "batch": False,
             }
+            HardwareWidget._refresh_cell_layer_controls(self)
+            self._activate_selected_cell_layer()
             n_new = len(new_seq.stage_positions)
             log.append("\n--- centering complete ---\n")
             self.status.setText(
@@ -4016,7 +4252,6 @@ class HardwareWidget(QWidget):
             x_count = int(self.grid_xcount_input.value())
             y_count = int(self.grid_ycount_input.value())
         repeats = int(self.grid_repeats_input.value())
-        preview_channel, use_placeholder = self.grid_channel_combo.currentData()
         sq_size = float(self.sel_sqsize_input.value())
         sq_n = int(self.sel_sqn_input.value())
         autofocus_object = self.grid_af_combo.currentText()
@@ -4070,8 +4305,6 @@ class HardwareWidget(QWidget):
                     x_range=x_range, y_range=y_range,
                     x_step=x_step, y_step=y_step,
                     repeats=repeats,
-                    preview_channel=preview_channel,
-                    use_placeholder=use_placeholder,
                     corner_positions=corner_positions,
                     x_count=x_count, y_count=y_count,
                     tilt_reference_points=tilt_reference_points,
@@ -4094,13 +4327,10 @@ class HardwareWidget(QWidget):
                 # is unnecessary.
                 "pre_acq": False,
             }
+            HardwareWidget._refresh_cell_layer_controls(self)
+            self._activate_selected_cell_layer()
             n_pos = len(autofocus_p)
-            if preview_channel is not None:
-                ready_detail = f"after {preview_channel} preview"
-            elif use_placeholder:
-                ready_detail = "using compact Raman grid"
-            else:
-                ready_detail = "after Raman pre-scan"
+            ready_detail = "without a preview"
             z_detail = (
                 f"degree {tilt_degree} surface"
                 if tilt_reference_points is not None else "default"
@@ -4188,6 +4418,7 @@ class HardwareWidget(QWidget):
             "writer": self.mda_writer,
             "total_acquisitions": total_acquisitions,
         }
+        HardwareWidget._refresh_cell_layer_controls(self)
         self._raman_mda_writer = self.mda_writer
         self._raman_mda_canceled = False
 
@@ -4232,6 +4463,7 @@ class HardwareWidget(QWidget):
                 self._raman_mda_pending = True
                 self._raman_mda_canceled = False
                 self._raman_mda_writer = writer
+                HardwareWidget._refresh_cell_layer_controls(self)
                 self._start_live_mda_timing(
                     prepared["total_acquisitions"]
                 )
@@ -4245,6 +4477,7 @@ class HardwareWidget(QWidget):
                 writer.close(status="failed")
             self._raman_mda_pending = False
             self._raman_mda_writer = None
+            HardwareWidget._refresh_cell_layer_controls(self)
             self._finish_live_mda_timing("failed")
             log.append(f"\n--- MDA failed: {e} ---\n")
             self.status.setText(f"Status: MDA failed -- {e}")
@@ -4263,6 +4496,7 @@ class HardwareWidget(QWidget):
         self._raman_mda_pending = False
         self._raman_mda_canceled = False
         self._raman_mda_writer = None
+        HardwareWidget._refresh_cell_layer_controls(self)
         prepared["log"].append("\n--- delayed MDA canceled ---\n")
         self.status.setText("Status: delayed MDA canceled")
         self._finish_live_mda_timing("canceled before start")
@@ -4295,6 +4529,18 @@ class HardwareWidget(QWidget):
         sources = self.selection_results["sources"]
         autofocus_p = self.selection_results["autofocus_p"]
         new_seq = self.selection_results["new_seq"]
+        cell_sources = [
+            source for source in sources if _source_has_role(source, "cell")
+        ]
+        if not cell_sources:
+            self.status.setText("Status: selection has no cell layers")
+            return
+        source_names = [source.name for source in cell_sources]
+        if len(set(source_names)) != len(source_names):
+            self.status.setText(
+                "Status: cell layer names must be unique before running MDA"
+            )
+            return
         image_p = autofocus_p
         afp_text = self.mda_afp_input.text().strip()
         if afp_text and afp_text.lower() != "none":
@@ -4588,20 +4834,17 @@ class HardwareWidget(QWidget):
                         channel_offset,
                     ) in acquisition_channels
                 }
+                if raman_enabled:
+                    raman_metadata = dict(metadata.get("raman") or {})
+                    raman_metadata["z"] = list(raman_z_indices)
+                    raman_metadata["cell_layers"] = _cell_layer_metadata(sources)
+                    metadata["raman"] = raman_metadata
                 final_seq = final_seq.replace(
                     time_plan=new_time_plan,
                     z_plan=new_z_plan,
                     channels=acquisition_channel_objs,
                     metadata=metadata,
                 )
-
-                if raman_enabled and "raman" in final_seq.metadata:
-                    final_seq.metadata["raman"]["z"] = raman_z_indices
-                elif raman_enabled:
-                    print(
-                        "[warn] final_seq.metadata has no 'raman' key; "
-                        "skipping raman['z']"
-                    )
 
                 estimate = estimate_mda_time(
                     final_seq,

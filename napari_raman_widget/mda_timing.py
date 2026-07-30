@@ -7,6 +7,11 @@ RAMAN_POINT_OVERHEAD_S = 0.6
 IMAGING_FRAME_OVERHEAD_S = 0.1
 
 
+def _is_cell_source(source):
+    role = getattr(source, "role", None)
+    return role == "cell" if role is not None else "cell" in source.name.lower()
+
+
 @dataclass(frozen=True)
 class MdaTimeEstimate:
     """Acquisition-only MDA timing estimate."""
@@ -84,7 +89,7 @@ def estimate_mda_time(
                 point_count = sum(
                     len(source.get_mda_points(event))
                     for source in aiming_sources
-                    if "cell" in source.name.lower()
+                    if _is_cell_source(source)
                 )
                 raman_points += point_count
                 if point_count:

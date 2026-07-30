@@ -148,11 +148,6 @@ HELP = {
         "Autofocus mode attached to the generated positions. Also controls "
         "which MDA autofocus fields are visible."
     ),
-    "grid_channel_combo": (
-        "Choose a hardware channel for a per-position preview, or choose "
-        "Raman for a full pre-scan or a compact procedural grid without a "
-        "pre-scan or per-position napari layers."
-    ),
     "grid_definition_combo": (
         "Use the current stage XY as the grid center, or define the bounds "
         "with top-left and bottom-right stage positions."

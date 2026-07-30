@@ -262,7 +262,13 @@ def test_fov_cell_index_averages_only_repeated_same_point(tmp_path):
     cells = acquisition.raman_cells(0)
     assert len(cells) == 2
     assert [cell.cell_index for cell in cells] == [0, 1]
+    assert [cell.layer_index for cell in cells] == [0, 0]
+    assert [cell.layer_cell_index for cell in cells] == [0, 1]
     assert [cell.repeat_count for cell in cells] == [2, 2]
+    legacy_layers = acquisition.raman_cell_layers(0)
+    assert len(legacy_layers) == 1
+    assert legacy_layers[0].name == "Cells"
+    assert legacy_layers[0].cell_count == 2
     np.testing.assert_allclose(cells[0].point_yx, [0.25, 0.25])
     np.testing.assert_allclose(cells[1].point_yx, [0.75, 0.75])
 

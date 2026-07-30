@@ -72,6 +72,8 @@ class RamanCellRecord:
     fov_index: int
     image_source_position: int
     cell_index: int
+    layer_index: int
+    layer_cell_index: int
     raman_key: RamanKey
     point_yx: tuple[float, float] | None
     designation: str
@@ -83,6 +85,18 @@ class RamanCellRecord:
 
 
 @dataclass(frozen=True)
+class RamanCellLayerRecord:
+    """One cell-selection layer available in a saved Raman view."""
+
+    layer_index: int
+    designation: str
+    name: str
+    source_id: str | None = None
+    color: str | None = None
+    cell_count: int = 0
+
+
+@dataclass(frozen=True)
 class RamanImageMatch:
     raman_key: RamanKey
     image_key: ImageKey
@@ -91,6 +105,9 @@ class RamanImageMatch:
     center_distance_pixels: float
     fov_index: int | None = None
     cell_index: int | None = None
+    layer_index: int | None = None
+    layer_cell_index: int | None = None
+    cell_layer: str | None = None
 
 
 def _scan(directory: Path, pattern: re.Pattern, key_type):
@@ -430,11 +447,64 @@ class AcquisitionIndex:
         )
         return tuple(key for key in keys if key.z == selected_z)
 
+    @cached_property
+    def cell_layer_definitions(self) -> tuple[RamanCellLayerRecord, ...]:
+        """Return the ordered cell-layer definitions saved with the MDA."""
+        if self.sequence is None:
+            return ()
+        metadata = self.sequence.get("metadata") or {}
+        raman_metadata = metadata.get("raman") or {}
+        definitions = raman_metadata.get("cell_layers") or ()
+        layers = []
+        for layer_index, definition in enumerate(definitions):
+            if not isinstance(definition, dict):
+                continue
+            name = str(definition.get("name") or "").strip()
+            designation = str(
+                definition.get("source_name") or name
+            ).strip()
+            if not designation:
+                continue
+            layers.append(
+                RamanCellLayerRecord(
+                    layer_index=layer_index,
+                    designation=designation,
+                    name=name or designation.removeprefix("cell:"),
+                    source_id=(
+                        None
+                        if definition.get("id") is None
+                        else str(definition["id"])
+                    ),
+                    color=(
+                        None
+                        if definition.get("color") is None
+                        else str(definition["color"])
+                    ),
+                )
+            )
+        return tuple(layers)
+
+    def _cell_layer_identity(
+        self,
+        designation: str,
+        unknown_layer_index: int,
+    ) -> RamanCellLayerRecord:
+        for layer in self.cell_layer_definitions:
+            if layer.designation == designation:
+                return layer
+        name = designation.removeprefix("cell:").strip() or "Cells"
+        return RamanCellLayerRecord(
+            layer_index=unknown_layer_index,
+            designation=designation,
+            name=name,
+        )
+
     def raman_cells(
         self,
         fov_index: int,
         time_index: int | None = None,
         z_index: int | None = None,
+        cell_layer: str | None = None,
     ) -> tuple[RamanCellRecord, ...]:
         """Group spectrum rows by saved spatial point within one physical FOV."""
         fov_index = int(fov_index)
@@ -502,8 +572,12 @@ class AcquisitionIndex:
                 if point is not None:
                     for group in groups:
                         existing = group["point"]
-                        if existing is not None and np.allclose(
-                            existing, point, rtol=0, atol=1e-9
+                        if (
+                            existing is not None
+                            and group["designation"] == designation
+                            and np.allclose(
+                                existing, point, rtol=0, atol=1e-9
+                            )
                         ):
                             destination = group
                             break
@@ -521,22 +595,94 @@ class AcquisitionIndex:
                     groups.append(destination)
                 destination["refs"].append((key, spectrum_index))
 
-        return tuple(
-            RamanCellRecord(
+        declared_designations = {
+            layer.designation: layer.layer_index
+            for layer in self.cell_layer_definitions
+        }
+        next_unknown_layer_index = (
+            max(
+                (
+                    layer.layer_index
+                    for layer in self.cell_layer_definitions
+                ),
+                default=-1,
+            )
+            + 1
+        )
+        unknown_designations: dict[str, int] = {}
+        layer_cell_counts: dict[str, int] = {}
+        cells = []
+        for cell_index, group in enumerate(groups):
+            designation = str(group["designation"])
+            if designation in declared_designations:
+                layer_index = declared_designations[designation]
+            else:
+                if designation not in unknown_designations:
+                    unknown_designations[designation] = next_unknown_layer_index
+                    next_unknown_layer_index += 1
+                layer_index = unknown_designations[designation]
+            layer_cell_index = layer_cell_counts.get(designation, 0)
+            layer_cell_counts[designation] = layer_cell_index + 1
+            cells.append(
+                RamanCellRecord(
                 fov_index=fov_index,
                 image_source_position=source_position,
                 cell_index=cell_index,
+                layer_index=layer_index,
+                layer_cell_index=layer_cell_index,
                 raman_key=group["key"],
                 point_yx=(
                     None
                     if group["point"] is None
                     else tuple(float(value) for value in group["point"])
                 ),
-                designation=str(group["designation"]),
+                designation=designation,
                 spectrum_refs=tuple(group["refs"]),
+                )
             )
-            for cell_index, group in enumerate(groups)
+        if cell_layer is not None:
+            requested_layer = str(cell_layer)
+            cells = [
+                cell
+                for cell in cells
+                if cell.designation == requested_layer
+            ]
+        return tuple(cells)
+
+    def raman_cell_layers(
+        self,
+        fov_index: int,
+        time_index: int | None = None,
+        z_index: int | None = None,
+    ) -> tuple[RamanCellLayerRecord, ...]:
+        """Return layers containing cells for one FOV/time/Z selection."""
+        cells = self.raman_cells(
+            fov_index,
+            time_index=time_index,
+            z_index=z_index,
         )
+        cells_by_layer: dict[int, list[RamanCellRecord]] = {}
+        for cell in cells:
+            cells_by_layer.setdefault(cell.layer_index, []).append(cell)
+        layers = []
+        for layer_index in sorted(cells_by_layer):
+            layer_cells = cells_by_layer[layer_index]
+            designation = layer_cells[0].designation
+            identity = self._cell_layer_identity(
+                designation,
+                layer_index,
+            )
+            layers.append(
+                RamanCellLayerRecord(
+                    layer_index=layer_index,
+                    designation=designation,
+                    name=identity.name,
+                    source_id=identity.source_id,
+                    color=identity.color,
+                    cell_count=len(layer_cells),
+                )
+            )
+        return tuple(layers)
 
     def raman_cell(
         self,
@@ -544,15 +690,24 @@ class AcquisitionIndex:
         cell_index: int,
         time_index: int | None = None,
         z_index: int | None = None,
+        cell_layer: str | None = None,
     ) -> RamanCellRecord:
         cells = self.raman_cells(
-            fov_index, time_index=time_index, z_index=z_index
+            fov_index,
+            time_index=time_index,
+            z_index=z_index,
+            cell_layer=cell_layer,
         )
         try:
             return cells[int(cell_index)]
         except IndexError as exc:
+            layer_text = (
+                ""
+                if cell_layer is None
+                else f" in cell layer {cell_layer!r}"
+            )
             raise IndexError(
-                f"Cell index {cell_index} is unavailable in Raman FOV "
+                f"Cell index {cell_index}{layer_text} is unavailable in Raman FOV "
                 f"{fov_index}; this FOV contains {len(cells)} cells"
             ) from exc
 
@@ -936,6 +1091,7 @@ def find_image_for_raman_index(
     cell_index: int = 0,
     time_index: int | None = None,
     z_index: int | None = None,
+    cell_layer: str | None = None,
 ) -> RamanImageMatch | None:
     """Find the image containing one cell from a physical Raman FOV."""
     cell = acquisition.raman_cell(
@@ -943,6 +1099,7 @@ def find_image_for_raman_index(
         cell_index,
         time_index=time_index,
         z_index=z_index,
+        cell_layer=cell_layer,
     )
     raman_key = cell.raman_key
     raman_stage_xyz = _raman_stage_xyz(
@@ -1005,6 +1162,9 @@ def find_image_for_raman_index(
             center_distance_pixels=center_distance,
             fov_index=cell.fov_index,
             cell_index=cell.cell_index,
+            layer_index=cell.layer_index,
+            layer_cell_index=cell.layer_cell_index,
+            cell_layer=cell.designation,
         )
 
     candidates = []
@@ -1040,6 +1200,9 @@ def find_image_for_raman_index(
         center_distance_pixels=center_distance,
         fov_index=cell.fov_index,
         cell_index=cell.cell_index,
+        layer_index=cell.layer_index,
+        layer_cell_index=cell.layer_cell_index,
+        cell_layer=cell.designation,
     )
 
 
@@ -1049,12 +1212,14 @@ def _mean_raman_spectrum(
     cell_index: int = 0,
     time_index: int | None = None,
     z_index: int | None = None,
+    cell_layer: str | None = None,
 ):
     cell = acquisition.raman_cell(
         raman_index,
         cell_index,
         time_index=time_index,
         z_index=z_index,
+        cell_layer=cell_layer,
     )
     raman_key = cell.raman_key
     spectra = acquisition.load_cell_spectra(cell)
@@ -1065,8 +1230,13 @@ def _mean_raman_spectrum(
         if len(spectra) > 1
         else "1 spectrum"
     )
+    layer = acquisition._cell_layer_identity(
+        cell.designation,
+        cell.layer_index,
+    )
     repeat_label = (
-        f"FOV {cell.fov_index}, cell {cell.cell_index}; "
+        f"FOV {cell.fov_index}, layer {layer.layer_index} "
+        f"({layer.name}), cell {cell.layer_cell_index}; "
         f"{acquisition_label}"
     )
     return raman_key, spectrum, axis, axis_label, repeat_label
@@ -1097,6 +1267,7 @@ def plot_raman_side_by_side(
     cell_index: int = 0,
     time_index: int | None = None,
     z_index: int | None = None,
+    cell_layer: str | None = None,
 ):
     """Plot one Raman index first, with its best containing BF image."""
     import matplotlib.pyplot as plt
@@ -1107,6 +1278,7 @@ def plot_raman_side_by_side(
         cell_index,
         time_index=time_index,
         z_index=z_index,
+        cell_layer=cell_layer,
     )
     match = find_image_for_raman_index(
         acquisition,
@@ -1116,6 +1288,7 @@ def plot_raman_side_by_side(
         cell_index=cell_index,
         time_index=time_index,
         z_index=z_index,
+        cell_layer=cell_layer,
     )
     fig, (spectrum_ax, image_ax) = plt.subplots(
         1, 2, figsize=(12, 5), constrained_layout=True
@@ -1154,6 +1327,7 @@ def raman_stitched_preview(
     cell_index: int = 0,
     time_index: int | None = None,
     z_index: int | None = None,
+    cell_layer: str | None = None,
 ) -> tuple[
     np.ndarray | None,
     tuple[float, float] | None,
@@ -1169,6 +1343,7 @@ def raman_stitched_preview(
         cell_index=cell_index,
         time_index=time_index,
         z_index=z_index,
+        cell_layer=cell_layer,
     )
     if match is None:
         return None, None, None, None
@@ -1224,6 +1399,9 @@ def raman_stitched_preview(
     metadata = dict(metadata)
     metadata["raman_index"] = int(raman_index)
     metadata["cell_index"] = int(cell_index)
+    metadata["cell_layer"] = match.cell_layer
+    metadata["layer_index"] = match.layer_index
+    metadata["layer_cell_index"] = match.layer_cell_index
     metadata["raman_marker_xy"] = marker_xy
     return mosaic, marker_xy, metadata, match
 
@@ -1238,6 +1416,7 @@ def plot_raman_on_stitched_image(
     cell_index: int = 0,
     time_index: int | None = None,
     z_index: int | None = None,
+    cell_layer: str | None = None,
 ):
     """Plot one Raman spectrum beside its marked stitched BF preview."""
     import matplotlib.pyplot as plt
@@ -1248,6 +1427,7 @@ def plot_raman_on_stitched_image(
         cell_index,
         time_index=time_index,
         z_index=z_index,
+        cell_layer=cell_layer,
     )
     mosaic, marker_xy, metadata, match = raman_stitched_preview(
         acquisition,
@@ -1258,6 +1438,7 @@ def plot_raman_on_stitched_image(
         cell_index=cell_index,
         time_index=time_index,
         z_index=z_index,
+        cell_layer=cell_layer,
     )
     fig, (spectrum_ax, mosaic_ax) = plt.subplots(
         1, 2, figsize=(13, 5), constrained_layout=True

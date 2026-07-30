@@ -28,6 +28,32 @@ class _FakeTimer:
         self.starts += 1
 
 
+class _FakeCombo:
+    def __init__(self):
+        self.items = []
+        self.current_index = -1
+
+    def currentData(self):
+        if 0 <= self.current_index < len(self.items):
+            return self.items[self.current_index][1]
+        return None
+
+    def blockSignals(self, _blocked):
+        pass
+
+    def clear(self):
+        self.items.clear()
+        self.current_index = -1
+
+    def addItem(self, text, data):
+        self.items.append((text, data))
+        if self.current_index < 0:
+            self.current_index = 0
+
+    def setCurrentIndex(self, index):
+        self.current_index = index
+
+
 def _control(**signals):
     return SimpleNamespace(**signals)
 
@@ -52,16 +78,17 @@ def test_vandermonde_objectives_are_read_without_hardware(tmp_path):
 
 class TestAcquisitionViewerAutoRefresh(unittest.TestCase):
     def test_every_view_control_schedules_a_refresh(self):
-        signals = [_FakeSignal() for _ in range(7)]
+        signals = [_FakeSignal() for _ in range(8)]
         calls = []
         viewer = SimpleNamespace(
             raman_t_combo=_control(currentIndexChanged=signals[0]),
             raman_index=_control(valueChanged=signals[1]),
             raman_z_combo=_control(currentIndexChanged=signals[2]),
-            cell_index=_control(valueChanged=signals[3]),
-            channel_combo=_control(currentIndexChanged=signals[4]),
-            stitched_check=_control(toggled=signals[5]),
-            preview_size=_control(currentIndexChanged=signals[6]),
+            cell_layer_combo=_control(currentIndexChanged=signals[3]),
+            cell_index=_control(valueChanged=signals[4]),
+            channel_combo=_control(currentIndexChanged=signals[5]),
+            stitched_check=_control(toggled=signals[6]),
+            preview_size=_control(currentIndexChanged=signals[7]),
             _schedule_auto_refresh=lambda *_args: calls.append(True),
         )
 
@@ -86,6 +113,45 @@ class TestAcquisitionViewerAutoRefresh(unittest.TestCase):
         viewer._auto_refresh_suspended = True
         LargeAcquisitionViewerWindow._schedule_auto_refresh(viewer)
         self.assertEqual(timer.starts, 1)
+
+    def test_cell_layer_selector_uses_saved_layer_indices(self):
+        combo = _FakeCombo()
+        range_updates = []
+        layers = (
+            SimpleNamespace(
+                layer_index=0,
+                name="Type A",
+                designation="cell:Type A",
+                cell_count=2,
+            ),
+            SimpleNamespace(
+                layer_index=1,
+                name="Type B",
+                designation="cell:Type B",
+                cell_count=1,
+            ),
+        )
+        viewer = SimpleNamespace(
+            cell_layer_combo=combo,
+            acquisition=SimpleNamespace(
+                raman_cell_layers=lambda *_args, **_kwargs: layers
+            ),
+            raman_index=SimpleNamespace(value=lambda: 0),
+            _selected_raman_t=lambda: 0,
+            _selected_raman_z=lambda: 0,
+            _update_cell_range=lambda: range_updates.append(True),
+        )
+
+        LargeAcquisitionViewerWindow._update_cell_layers(viewer)
+
+        self.assertEqual(
+            combo.items,
+            [
+                ("0: Type A (2 cells)", "cell:Type A"),
+                ("1: Type B (1 cell)", "cell:Type B"),
+            ],
+        )
+        self.assertEqual(range_updates, [True])
 
 
 if __name__ == "__main__":

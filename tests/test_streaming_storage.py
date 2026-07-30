@@ -154,3 +154,104 @@ def test_streaming_run_roundtrips_through_lazy_index(tmp_path):
     ]
     assert images.dims == ("t", "p", "c", "z", "y", "x")
     assert images.shape == (2, 3, 2, 2, 4, 5)
+
+
+def test_same_point_in_different_cell_layers_remains_distinct(tmp_path):
+    core = _FakeCore()
+    writer = RamanAcquisitionWriter(
+        tmp_path / "layered-run",
+        core=core,
+        wavenumbers=np.array([100.0, 200.0, 300.0]),
+    )
+    sequence = MDASequence(
+        stage_positions=[(0, 0, 0)],
+        channels=["BF", "RM"],
+        metadata={
+            "raman": {
+                "channel": "RM",
+                "z": [0],
+                "cell_layers": [
+                    {
+                        "id": "a",
+                        "name": "Type A",
+                        "source_name": "cell:Type A",
+                        "color": "#aa0000ff",
+                    },
+                    {
+                        "id": "b",
+                        "name": "Type B",
+                        "source_name": "cell:Type B",
+                        "color": "#0066ccff",
+                    },
+                ],
+            }
+        },
+    )
+
+    core.mda.events.sequenceStarted.emit(sequence, {})
+    bf_event = next(
+        event
+        for event in sequence.iter_events()
+        if event.channel is not None and event.channel.config == "BF"
+    )
+    core.mda.events.frameReady.emit(
+        np.ones((4, 5), dtype=np.uint16),
+        bf_event,
+        {},
+    )
+    writer._save_raman(
+        MDAEvent(index={"t": 0, "p": 0, "z": 0}),
+        np.array(
+            [[1, 2, 3], [7, 8, 9], [4, 5, 6]],
+            dtype=np.uint16,
+        ),
+        np.array(
+            [[0.25, 0.5], [0.75, 0.5], [0.25, 0.5]],
+        ),
+        ["cell:Type A", "cell:Type A", "cell:Type B"],
+        125.0,
+    )
+    core.mda.events.sequenceFinished.emit(sequence)
+
+    acquisition = _VIEWING.AcquisitionIndex.build(writer.path)
+    cells = acquisition.raman_cells(0)
+    assert len(cells) == 3
+    assert [cell.designation for cell in cells] == [
+        "cell:Type A",
+        "cell:Type A",
+        "cell:Type B",
+    ]
+    assert [cell.layer_index for cell in cells] == [0, 0, 1]
+    assert [cell.layer_cell_index for cell in cells] == [0, 1, 0]
+    assert [cell.repeat_count for cell in cells] == [1, 1, 1]
+    layers = acquisition.raman_cell_layers(0)
+    assert [
+        (layer.layer_index, layer.name, layer.designation, layer.cell_count)
+        for layer in layers
+    ] == [
+        (0, "Type A", "cell:Type A", 2),
+        (1, "Type B", "cell:Type B", 1),
+    ]
+    type_b_cells = acquisition.raman_cells(
+        0,
+        cell_layer="cell:Type B",
+    )
+    assert len(type_b_cells) == 1
+    assert type_b_cells[0].cell_index == 2
+    selected = acquisition.raman_cell(
+        0,
+        0,
+        cell_layer="cell:Type B",
+    )
+    assert selected.designation == "cell:Type B"
+    type_b_spectrum = _VIEWING._mean_raman_spectrum(
+        acquisition,
+        0,
+        0,
+        cell_layer="cell:Type B",
+    )
+    np.testing.assert_array_equal(type_b_spectrum[1], [4, 5, 6])
+    assert "layer 1 (Type B), cell 0" in type_b_spectrum[-1]
+    assert acquisition.sequence["metadata"]["raman"]["cell_layers"][1]["name"] == (
+        "Type B"
+    )
