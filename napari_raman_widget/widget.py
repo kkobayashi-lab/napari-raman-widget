@@ -11,7 +11,8 @@ from qtpy.QtCore import QEvent, QTimer, Qt, QUrl, Slot
 from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
-    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QPushButton, QScrollArea, QSpinBox,
+    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QPushButton,
+    QScrollArea, QSpinBox,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QMessageBox
 )
 from .acquisition_viewer import LargeAcquisitionViewerWindow
@@ -203,6 +204,7 @@ class HardwareWidget(QWidget):
         self.scan_ds = None
         self.main_window = None
         self.selection_results = None
+        self._grid_regions = []
         self.mda_channel_rows = []
         self.mda_writer = None
         self._mda_completion_events = None
@@ -669,8 +671,8 @@ class HardwareWidget(QWidget):
         grid_layout = QVBoxLayout()
 
         grid_layout.addWidget(QLabel(
-            "Creates a grid from the current center or two captured corners,\n"
-            "each carrying the same single fixed point (non-batch)."
+            "Add one or more grids from the current center or captured corners.\n"
+            "All grids share the same fixed Raman point settings (non-batch)."
         ))
 
         definition_row = QHBoxLayout()
@@ -973,9 +975,27 @@ class HardwareWidget(QWidget):
             control.textChanged.connect(self._update_grid_size_preview)
         self._update_grid_size_preview()
 
-        self.run_grid_sel_btn = QPushButton("Generate grid")
+        grid_layout.addWidget(QLabel("Grids in this acquisition:"))
+        self.grid_region_list = QListWidget()
+        self.grid_region_list.setMaximumHeight(120)
+        grid_layout.addWidget(self.grid_region_list)
+
+        self.grid_region_summary = QLabel("No grids added")
+        self.grid_region_summary.setWordWrap(True)
+        grid_layout.addWidget(self.grid_region_summary)
+
+        grid_region_buttons = QHBoxLayout()
+        self.run_grid_sel_btn = QPushButton("Add current grid")
         self.run_grid_sel_btn.clicked.connect(self.run_grid_selection)
-        grid_layout.addWidget(self.run_grid_sel_btn)
+        grid_region_buttons.addWidget(self.run_grid_sel_btn)
+        self.grid_remove_btn = QPushButton("Remove selected")
+        self.grid_remove_btn.clicked.connect(self.remove_selected_grid)
+        grid_region_buttons.addWidget(self.grid_remove_btn)
+        self.grid_clear_btn = QPushButton("Clear grids")
+        self.grid_clear_btn.clicked.connect(self.clear_grids)
+        grid_region_buttons.addWidget(self.grid_clear_btn)
+        grid_layout.addLayout(grid_region_buttons)
+        self._refresh_grid_region_list()
 
         grid_box.setLayout(grid_layout)
         outer.addWidget(grid_box)
@@ -2916,6 +2936,7 @@ class HardwareWidget(QWidget):
         self.scan_ds = None
         self.main_window = None
         self.selection_results = None
+        self._reset_grid_regions(clear_grid_selection=False)
         self._refresh_cell_layer_controls()
         self.mda_writer = None
         self.px2stage_picker = None
@@ -3786,6 +3807,7 @@ class HardwareWidget(QWidget):
                     segmentation_debug_dir=segmentation_debug_dir,
                 )
 
+            self._reset_grid_regions(clear_grid_selection=False)
             self.selection_results = {
                 "sources": sources,
                 "autofocus_p": autofocus_p,
@@ -4142,6 +4164,7 @@ class HardwareWidget(QWidget):
                     batch=batch,
                 )
 
+            self._reset_grid_regions(clear_grid_selection=False)
             self.selection_results = {
                 "sources": sources,
                 "autofocus_p": autofocus_p,
@@ -4213,6 +4236,7 @@ class HardwareWidget(QWidget):
                     center=(cy, cx),
                     objective=objective,
                 )
+            self._reset_grid_regions(clear_grid_selection=False)
             self.selection_results = {
                 "sources": sources,
                 "autofocus_p": autofocus_p,
@@ -4231,6 +4255,143 @@ class HardwareWidget(QWidget):
         except Exception as e:
             log.append(f"\n--- centering failed: {e} ---\n")
             self.status.setText(f"Status: centering failed -- {e}")
+
+    def _current_grid_source_settings(self):
+        """Return settings that must be shared by every combined grid."""
+        return {
+            "fov_x": int(self.grid_fovx_input.value()),
+            "fov_y": int(self.grid_fovy_input.value()),
+            "repeats": int(self.grid_repeats_input.value()),
+            "autofocus_object": self.grid_af_combo.currentText(),
+            "pattern_size": float(self.sel_sqsize_input.value()),
+            "pattern_n": int(self.sel_sqn_input.value()),
+        }
+
+    @staticmethod
+    def _grid_source_setting_mismatches(expected, actual):
+        labels = {
+            "fov_x": "FOV X",
+            "fov_y": "FOV Y",
+            "repeats": "repeats",
+            "autofocus_object": "autofocus",
+            "pattern_size": "point-pattern size",
+            "pattern_n": "point-pattern N",
+        }
+        return [
+            labels[key]
+            for key, value in expected.items()
+            if actual.get(key) != value
+        ]
+
+    def _refresh_grid_region_list(self):
+        """Refresh the grid list and lock settings shared by all regions."""
+        if not hasattr(self, "grid_region_list"):
+            return
+        self.grid_region_list.clear()
+        total_positions = 0
+        for index, region in enumerate(self._grid_regions, start=1):
+            total_positions += len(region["sequence"].stage_positions)
+            self.grid_region_list.addItem(
+                f"Grid {index}: {region['summary']}"
+            )
+
+        has_grids = bool(self._grid_regions)
+        if has_grids:
+            self.grid_region_summary.setText(
+                f"{len(self._grid_regions)} grid(s), "
+                f"{total_positions:,} total positions. "
+                "Fixed-point settings are locked until the grids are cleared."
+            )
+        else:
+            self.grid_region_summary.setText(
+                "No grids added. FOV, repeats, autofocus, and point-pattern "
+                "settings are shared across all grids."
+            )
+        self.grid_remove_btn.setEnabled(has_grids)
+        self.grid_clear_btn.setEnabled(has_grids)
+
+        for name in (
+            "grid_fovx_input",
+            "grid_fovy_input",
+            "grid_repeats_input",
+            "grid_af_combo",
+            "sel_sqsize_input",
+            "sel_sqn_input",
+        ):
+            control = getattr(self, name, None)
+            if control is not None:
+                control.setEnabled(not has_grids)
+
+    def _reset_grid_regions(self, *, clear_grid_selection=True):
+        """Discard the accumulated grid regions and unlock shared controls."""
+        self._grid_regions.clear()
+        if (
+            clear_grid_selection
+            and self.selection_results is not None
+            and self.selection_results.get("selection_type") == "grid"
+        ):
+            self.selection_results = None
+            HardwareWidget._refresh_cell_layer_controls(self)
+        self._refresh_grid_region_list()
+
+    def _rebuild_grid_selection_results(self):
+        """Flatten all grid regions into the existing single-MDA contract."""
+        if not self._grid_regions:
+            if (
+                self.selection_results is not None
+                and self.selection_results.get("selection_type") == "grid"
+            ):
+                self.selection_results = None
+            HardwareWidget._refresh_cell_layer_controls(self)
+            return
+
+        from cns_control.utils import combine_grid_sequences
+
+        new_seq = combine_grid_sequences(
+            region["sequence"] for region in self._grid_regions
+        )
+        first = self._grid_regions[0]
+        shared_settings = first["source_settings"]
+        self.selection_results = {
+            "selection_type": "grid",
+            "sources": first["sources"],
+            "autofocus_p": range(len(new_seq.stage_positions)),
+            "new_seq": new_seq,
+            "autofocus_object": shared_settings["autofocus_object"],
+            "grid_source_settings": dict(shared_settings),
+            "grid_regions": list(self._grid_regions),
+            "batch": False,
+            # Every grid position samples the same point, so the discarded
+            # galvo-prepositioning acquisition is unnecessary.
+            "pre_acq": False,
+        }
+        HardwareWidget._refresh_cell_layer_controls(self)
+        self._activate_selected_cell_layer()
+
+    def remove_selected_grid(self):
+        """Remove one grid region and rebuild the combined position sequence."""
+        row = self.grid_region_list.currentRow()
+        if row < 0 or row >= len(self._grid_regions):
+            self.status.setText("Status: select a grid to remove")
+            return
+        removed = self._grid_regions.pop(row)
+        self._rebuild_grid_selection_results()
+        self._refresh_grid_region_list()
+        if self._grid_regions:
+            self.grid_region_list.setCurrentRow(
+                min(row, len(self._grid_regions) - 1)
+            )
+        self.status.setText(
+            f"Status: removed grid with "
+            f"{len(removed['sequence'].stage_positions)} positions; "
+            f"{len(self._grid_regions)} grid(s) remain"
+        )
+
+    def clear_grids(self):
+        """Clear every accumulated grid region."""
+        count = len(self._grid_regions)
+        self._reset_grid_regions()
+        self.status.setText(f"Status: cleared {count} grid(s)")
 
     def run_grid_selection(self):
         """Build a centered or corner-defined grid of stage positions."""
@@ -4255,6 +4416,19 @@ class HardwareWidget(QWidget):
         sq_size = float(self.sel_sqsize_input.value())
         sq_n = int(self.sel_sqn_input.value())
         autofocus_object = self.grid_af_combo.currentText()
+        source_settings = self._current_grid_source_settings()
+        if self._grid_regions:
+            expected = self._grid_regions[0]["source_settings"]
+            mismatches = self._grid_source_setting_mismatches(
+                expected, source_settings
+            )
+            if mismatches:
+                self.status.setText(
+                    "Status: all grids must share "
+                    f"{', '.join(mismatches)}; restore the first grid's "
+                    "settings or clear the grids"
+                )
+                return
         snake_axis = self.grid_scan_order_combo.currentData()
         tilt_degree = int(self.grid_tilt_degree_input.value())
         tilt_reference_points = None
@@ -4298,7 +4472,7 @@ class HardwareWidget(QWidget):
                 self._prepare_for_selection()
                 self.core.register_mda_engine(self.default_engine)
                 point_transformer = self._make_point_transformer(sq_size, sq_n)
-                sources, autofocus_p, new_seq = grid_point_selections(
+                sources, _autofocus_p, region_seq = grid_point_selections(
                     self.core, self.viewer, self.main_window,
                     point_transformer,
                     fov_x=fov_x, fov_y=fov_y,
@@ -4313,35 +4487,49 @@ class HardwareWidget(QWidget):
                     autofocus_object=autofocus_object,
                 )
 
-            self.selection_results = {
+            nx, ny, *_grid_details = self._grid_size_preview()
+            xs = [position.x for position in region_seq.stage_positions]
+            ys = [position.y for position in region_seq.stage_positions]
+            region = {
+                "sequence": region_seq,
                 "sources": sources,
-                "autofocus_p": autofocus_p,
-                "new_seq": new_seq,
-                "autofocus_object": autofocus_object,
+                "source_settings": dict(source_settings),
                 "tilt_reference_points": tilt_reference_points,
                 "tilt_degree": tilt_degree,
                 "snake_axis": snake_axis,
-                "batch": False,
-                # Every grid position samples the same point at the center of
-                # the FOV, so the discarded galvo-prepositioning acquisition
-                # is unnecessary.
-                "pre_acq": False,
+                "summary": (
+                    f"{nx} x {ny} = {len(region_seq.stage_positions):,} "
+                    f"positions; X {min(xs):.3f}..{max(xs):.3f}; "
+                    f"Y {min(ys):.3f}..{max(ys):.3f}; "
+                    f"{self.grid_scan_order_combo.currentText()}"
+                ),
             }
-            HardwareWidget._refresh_cell_layer_controls(self)
-            self._activate_selected_cell_layer()
-            n_pos = len(autofocus_p)
-            ready_detail = "without a preview"
+            self._grid_regions.append(region)
+            try:
+                self._rebuild_grid_selection_results()
+            except Exception:
+                self._grid_regions.pop()
+                raise
+            self._refresh_grid_region_list()
+            self.grid_region_list.setCurrentRow(len(self._grid_regions) - 1)
+
+            n_region_positions = len(region_seq.stage_positions)
+            n_total_positions = len(
+                self.selection_results["new_seq"].stage_positions
+            )
             z_detail = (
                 f"degree {tilt_degree} surface"
                 if tilt_reference_points is not None else "default"
             )
-            log.append(f"\n--- grid ready {ready_detail} ---\n")
+            log.append(
+                f"\n--- added grid {len(self._grid_regions)} "
+                f"({n_region_positions} positions) ---\n"
+            )
             self.status.setText(
-                f"Status: grid ready {ready_detail} ({n_pos} positions, "
-                f"{repeats} pts each at ({fov_x},{fov_y}), "
-                f"{self.grid_scan_order_combo.currentText()}, "
-                f"Z={z_detail}"
-                ") -- then Run Raman MDA"
+                f"Status: added grid {len(self._grid_regions)} "
+                f"({n_region_positions} positions; {n_total_positions} total, "
+                f"{repeats} pts each at ({fov_x},{fov_y}), Z={z_detail}) -- "
+                "add another grid or Run Raman MDA"
             )
         except Exception as e:
             log.append(f"\n--- stage grid failed: {e} ---\n")
@@ -4525,6 +4713,19 @@ class HardwareWidget(QWidget):
                 "run automated selection first"
             )
             return
+
+        if self.selection_results.get("selection_type") == "grid":
+            expected = self.selection_results["grid_source_settings"]
+            mismatches = self._grid_source_setting_mismatches(
+                expected, self._current_grid_source_settings()
+            )
+            if mismatches:
+                self.status.setText(
+                    "Status: grid settings changed after grids were added "
+                    f"({', '.join(mismatches)}); restore them or clear and "
+                    "re-add the grids"
+                )
+                return
 
         sources = self.selection_results["sources"]
         autofocus_p = self.selection_results["autofocus_p"]

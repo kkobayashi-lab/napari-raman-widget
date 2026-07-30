@@ -213,9 +213,20 @@ HELP = {
         "Identical points at each stage position. Minimum of 2 required by "
         "the DAQ."
     ),
+    "grid_region_list": (
+        "Grid regions included in the next MDA, in acquisition order. Each "
+        "region occupies one contiguous range of position indices."
+    ),
     "run_grid_sel_btn": (
-        "Stop live mode, prepare the MDA sequence, build the stage grid, and "
-        "prepare sources / autofocus_p / new_seq for Run Raman MDA."
+        "Add the grid currently described by the controls to the next MDA. "
+        "Multiple grids are flattened into one position sequence."
+    ),
+    "grid_remove_btn": (
+        "Remove the selected grid and rebuild the combined position sequence."
+    ),
+    "grid_clear_btn": (
+        "Remove every accumulated grid and unlock the shared fixed-point "
+        "settings."
     ),
 
     # ============ HARDWARE CONTROL ============
