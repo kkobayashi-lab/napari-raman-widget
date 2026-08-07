@@ -59,6 +59,7 @@ def estimate_mda_time(
     raman_z_indices,
     image_positions,
     raman_channel="RM",
+    point_repeats=1,
 ):
     """Estimate exposure, fixed overhead, and scheduled interval time.
 
@@ -74,6 +75,7 @@ def estimate_mda_time(
     raman_z = set(int(index) for index in raman_z_indices)
     image_p = set(int(index) for index in image_positions)
     raman_exposure_s = float(raman_exposure_ms) / 1000.0
+    point_repeats = max(1, int(point_repeats))
 
     for event in sequence.iter_events():
         elapsed = max(elapsed, _event_min_start_seconds(event))
@@ -90,7 +92,7 @@ def estimate_mda_time(
                     len(source.get_mda_points(event))
                     for source in aiming_sources
                     if _is_cell_source(source)
-                )
+                ) * point_repeats
                 raman_points += point_count
                 if point_count:
                     raman_events += 1

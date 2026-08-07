@@ -51,6 +51,21 @@ def test_two_one_second_raman_frames_take_three_point_two_seconds():
     assert format_duration(estimate.duration_seconds) == "3.2 seconds"
 
 
+def test_selected_point_repeats_are_included_in_raman_time():
+    estimate = estimate_mda_time(
+        _sequence(_event("RM")),
+        [_two_point_source()],
+        raman_exposure_ms=1000,
+        raman_z_indices=[0],
+        image_positions=[0],
+        point_repeats=3,
+    )
+
+    assert estimate.duration_seconds == pytest.approx(9.6)
+    assert estimate.raman_points == 6
+    assert estimate.raman_events == 1
+
+
 def test_imaging_adds_exposure_and_overhead_per_frame():
     estimate = estimate_mda_time(
         _sequence(

@@ -1068,6 +1068,18 @@ class HardwareWidget(QWidget):
         npf_row.addWidget(self.sel_npf_input)
         sel_layout.addLayout(npf_row)
 
+        repeats_row = QHBoxLayout()
+        repeats_row.addWidget(QLabel("Frames per selected point (>=2):"))
+        self.sel_repeats_input = QSpinBox()
+        self.sel_repeats_input.setRange(2, 1000)
+        self.sel_repeats_input.setValue(2)
+        self.sel_repeats_input.setToolTip(
+            "Acquire this many consecutive Raman frames at every selected "
+            "aiming point."
+        )
+        repeats_row.addWidget(self.sel_repeats_input)
+        sel_layout.addLayout(repeats_row)
+
         # Center-cell mode: split each FOV into one new stage position per
         # detected cell, each shifted so that cell sits exactly at center.
         self.sel_center_cell_check = QCheckBox(
@@ -4791,6 +4803,15 @@ class HardwareWidget(QWidget):
             "batch", self.sel_batch_combo.currentText() == "True"
         )
         pre_acq = self.selection_results.get("pre_acq", True)
+        is_grid_selection = self.selection_results.get("selection_type") == "grid"
+        point_repeats = (
+            1 if is_grid_selection else int(self.sel_repeats_input.value())
+        )
+        frames_per_point = (
+            int(self.selection_results["grid_source_settings"]["repeats"])
+            if is_grid_selection
+            else point_repeats
+        )
         stage_centering_model = None
         if autofocus_enabled and autofocus_object == "laser":
             objective = self._ensure_current_vandermonde()
@@ -4965,6 +4986,7 @@ class HardwareWidget(QWidget):
                     circle_center=circle_center,
                     circle_radius=circle_radius,
                     stage_centering_model=stage_centering_model,
+                    point_repeats=point_repeats,
                 )
                 engine.aiming_sources = sources
 
@@ -5039,6 +5061,7 @@ class HardwareWidget(QWidget):
                     raman_metadata = dict(metadata.get("raman") or {})
                     raman_metadata["z"] = list(raman_z_indices)
                     raman_metadata["cell_layers"] = _cell_layer_metadata(sources)
+                    raman_metadata["frames_per_point"] = frames_per_point
                     metadata["raman"] = raman_metadata
                 final_seq = final_seq.replace(
                     time_plan=new_time_plan,
@@ -5053,6 +5076,7 @@ class HardwareWidget(QWidget):
                     engine.default_rm_exposure,
                     raman_z_indices,
                     image_p,
+                    point_repeats=point_repeats,
                 )
                 scheduled_start = self._show_mda_time_preview(
                     estimate,
