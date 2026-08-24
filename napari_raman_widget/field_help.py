@@ -262,6 +262,11 @@ HELP = {
         "left-click so the clicked feature reaches Center Y/X. Toggle off or "
         "press Escape to stop. Needs a Vandermonde model and hardware."
     ),
+    "laser_autofocus_btn": (
+        "Run the two-pass laser autofocus scan at the center of the current "
+        "FOV. Uses the coarse and fine autofocus range/point settings from "
+        "Raman MDA, leaves XY fixed, and moves Z to the best focus."
+    ),
 
     # ============ AUTOMATED CELL SELECTION ============
     "sel_cy_input": (

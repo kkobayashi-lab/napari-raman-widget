@@ -364,6 +364,23 @@ class TestAutomaticBeamCentering(unittest.TestCase):
         )
         self.assertTrue(galvo.write_calls[0][1])
 
+    def test_aiming_uses_on_demand_galvo_position_api(self):
+        calls = []
+        widget = SimpleNamespace(
+            daq=SimpleNamespace(
+                set_galvo_position=lambda volts: calls.append(
+                    np.array(volts)
+                )
+            ),
+            transformer=object(),
+            _pt_to_volts=lambda _point: np.array([[0.2, -0.3]]),
+        )
+
+        result = HardwareWidget._aim_beam_at_pixel(widget, 512, 512)
+
+        np.testing.assert_array_equal(calls, [[0.2, -0.3]])
+        np.testing.assert_array_equal(result, [0.2, -0.3])
+
     def test_rejects_invalid_transformer_output_without_writing(self):
         galvo = SimpleNamespace(
             stop=lambda: self.fail("galvo should not stop"),
@@ -382,6 +399,124 @@ class TestAutomaticBeamCentering(unittest.TestCase):
 
 
 class TestHardwareControls(unittest.TestCase):
+    def test_laser_autofocus_button_focuses_at_current_fov_center(self):
+        autofocus_calls = []
+        z_moves = []
+        init_kwargs = []
+
+        class FakeEngine:
+            def __init__(self, **kwargs):
+                init_kwargs.append(kwargs)
+
+            @staticmethod
+            def try_get_ZPosition():
+                return 12.0
+
+            @staticmethod
+            def autofocus_w_raman(**kwargs):
+                autofocus_calls.append(kwargs)
+                return 12.0, 14.5, None
+
+            @staticmethod
+            def try_set_ZPosition(z):
+                z_moves.append(z)
+
+        class FakeButton:
+            def __init__(self):
+                self.enabled = True
+
+            def setEnabled(self, enabled):
+                self.enabled = enabled
+
+        stopped = []
+        waited = []
+        core = SimpleNamespace(
+            mda=SimpleNamespace(is_running=lambda: False),
+            isSequenceRunning=lambda: True,
+            stopSequenceAcquisition=lambda: stopped.append(True),
+            waitForSystem=lambda: waited.append(True),
+        )
+        button = FakeButton()
+        widget = SimpleNamespace(
+            core=core,
+            collector=object(),
+            transformer=object(),
+            laser_autofocus_btn=button,
+            mda_af_range_input=SimpleNamespace(value=lambda: 6.0),
+            mda_search_pts_input=SimpleNamespace(value=lambda: 8),
+            mda_fine_range_input=SimpleNamespace(value=lambda: 1.5),
+            mda_fine_pts_input=SimpleNamespace(value=lambda: 9),
+            mm_config="scope.cfg",
+            _get_image_xy=lambda: (1344, 1024),
+            status=_FakeStatusLabel(),
+            repaint=lambda: None,
+        )
+
+        with patch("raman_mda_engine.RamanEngine", FakeEngine):
+            HardwareWidget.laser_autofocus_center(widget)
+
+        self.assertEqual(stopped, [True])
+        self.assertEqual(z_moves, [14.5])
+        self.assertEqual(waited, [True])
+        self.assertTrue(button.enabled)
+        np.testing.assert_array_equal(
+            autofocus_calls[0]["pt"], np.array([0.5, 0.5])
+        )
+        self.assertEqual(autofocus_calls[0]["last_z"], 12.0)
+        self.assertEqual(init_kwargs[0]["autofocus_object"], "laser")
+        self.assertEqual(init_kwargs[0]["autofocus_search_range"], 6.0)
+        self.assertEqual(init_kwargs[0]["fine_search_pts"], 9)
+        np.testing.assert_array_equal(
+            init_kwargs[0]["stage_centering_model"][0],
+            np.zeros((1, 2)),
+        )
+        self.assertIn("Z=14.500", widget.status.text)
+
+    def test_laser_autofocus_failure_restores_starting_z(self):
+        z_moves = []
+
+        class FakeEngine:
+            def __init__(self, **_kwargs):
+                pass
+
+            @staticmethod
+            def try_get_ZPosition():
+                return 7.0
+
+            @staticmethod
+            def autofocus_w_raman(**_kwargs):
+                raise RuntimeError("camera failure")
+
+            @staticmethod
+            def try_set_ZPosition(z):
+                z_moves.append(z)
+
+        button = SimpleNamespace(setEnabled=lambda _enabled: None)
+        widget = SimpleNamespace(
+            core=SimpleNamespace(
+                mda=SimpleNamespace(is_running=lambda: False),
+                isSequenceRunning=lambda: False,
+                waitForSystem=lambda: None,
+            ),
+            collector=object(),
+            transformer=object(),
+            laser_autofocus_btn=button,
+            mda_af_range_input=SimpleNamespace(value=lambda: 6.0),
+            mda_search_pts_input=SimpleNamespace(value=lambda: 8),
+            mda_fine_range_input=SimpleNamespace(value=lambda: 1.5),
+            mda_fine_pts_input=SimpleNamespace(value=lambda: 8),
+            mm_config="scope.cfg",
+            _get_image_xy=lambda: (1344, 1024),
+            status=_FakeStatusLabel(),
+            repaint=lambda: None,
+        )
+
+        with patch("raman_mda_engine.RamanEngine", FakeEngine):
+            HardwareWidget.laser_autofocus_center(widget)
+
+        self.assertEqual(z_moves, [7.0])
+        self.assertIn("camera failure", widget.status.text)
+
     def test_click_to_center_stays_armed_after_each_click(self):
         class FakeButton:
             @staticmethod

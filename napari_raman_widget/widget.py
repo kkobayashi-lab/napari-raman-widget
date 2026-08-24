@@ -373,6 +373,14 @@ class HardwareWidget(QWidget):
         filter_row.addWidget(self.close_filter_btn)
         hardware_layout.addLayout(filter_row)
 
+        self.laser_autofocus_btn = QPushButton(
+            "Laser autofocus at FOV center"
+        )
+        self.laser_autofocus_btn.clicked.connect(
+            self.laser_autofocus_center
+        )
+        hardware_layout.addWidget(self.laser_autofocus_btn)
+
         hardware_box.setLayout(hardware_layout)
         outer.addWidget(hardware_box)
 
@@ -1871,11 +1879,16 @@ class HardwareWidget(QWidget):
                 "Transformer must return one finite X/Y voltage pair"
             )
 
-        self.daq.galvo.stop()
-        self.daq.galvo.write(
-            np.ascontiguousarray(volts[0]),
-            auto_start=True,
-        )
+        set_position = getattr(self.daq, "set_galvo_position", None)
+        if callable(set_position):
+            set_position(volts[0])
+        else:
+            # Compatibility with older raman-control installations.
+            self.daq.galvo.stop()
+            self.daq.galvo.write(
+                np.ascontiguousarray(volts[0]),
+                auto_start=True,
+            )
         return volts[0]
 
     def _find_points_layer(self):
@@ -4099,6 +4112,95 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: ND filter {state}")
         except Exception as e:
             self.status.setText(f"Status: ND filter failed -- {e}")
+
+    def laser_autofocus_center(self):
+        """Run the MDA laser autofocus routine at the current FOV center."""
+        if self.core is None:
+            self.status.setText("Status: not connected")
+            return
+        if self.collector is None or self.transformer is None:
+            self.status.setText(
+                "Status: laser autofocus requires the collector and transformer"
+            )
+            return
+
+        mda = getattr(self.core, "mda", None)
+        is_running = getattr(mda, "is_running", False)
+        if is_running() if callable(is_running) else bool(is_running):
+            self.status.setText(
+                "Status: stop the active MDA before laser autofocus"
+            )
+            return
+
+        engine = None
+        starting_z = None
+        self.laser_autofocus_btn.setEnabled(False)
+        try:
+            from raman_mda_engine import RamanEngine
+
+            image_x, image_y = self._get_image_xy()
+            # The selected point is already at the FOV center, so autofocus
+            # must not translate XY. A zero degree-0 model lets the shared MDA
+            # routine retain its normal stage-save/restore safety behavior.
+            stationary_stage_model = (np.zeros((1, 2), dtype=float), 0)
+            engine = RamanEngine(
+                mmc=self.core,
+                spectra_collector=self.collector,
+                transformer=self.transformer,
+                autofocus=True,
+                autofocus_object="laser",
+                segment_and_track=False,
+                autofocus_search_range=float(
+                    self.mda_af_range_input.value()
+                ),
+                search_pts=int(self.mda_search_pts_input.value()),
+                fine_search_range=float(
+                    self.mda_fine_range_input.value()
+                ),
+                fine_search_pts=int(self.mda_fine_pts_input.value()),
+                image_x=int(image_x),
+                image_y=int(image_y),
+                config_file=self.mm_config,
+                stage_centering_model=stationary_stage_model,
+            )
+            starting_z = float(engine.try_get_ZPosition())
+
+            try:
+                sequence_running = bool(self.core.isSequenceRunning())
+            except (AttributeError, RuntimeError):
+                sequence_running = False
+            if sequence_running:
+                self.core.stopSequenceAcquisition()
+
+            self.status.setText(
+                "Status: laser autofocusing at the current FOV center..."
+            )
+            self.repaint()
+            _, best_z, _ = engine.autofocus_w_raman(
+                last_z=starting_z,
+                pt=np.array([0.5, 0.5], dtype=float),
+                t=0,
+                p=0,
+            )
+            best_z = float(best_z)
+            if not np.isfinite(best_z):
+                raise RuntimeError("autofocus returned a non-finite Z position")
+            engine.try_set_ZPosition(best_z)
+            self.core.waitForSystem()
+            self.status.setText(
+                f"Status: laser autofocus complete -- Z={best_z:.3f} um "
+                f"(dZ={best_z - starting_z:+.3f} um)"
+            )
+        except Exception as e:
+            if engine is not None and starting_z is not None:
+                try:
+                    engine.try_set_ZPosition(starting_z)
+                    self.core.waitForSystem()
+                except Exception:
+                    pass
+            self.status.setText(f"Status: laser autofocus failed -- {e}")
+        finally:
+            self.laser_autofocus_btn.setEnabled(True)
 
     def _move_clicked_to_center(self, yx):
         """Move the stage so the clicked pixel lands at (cy, cx)."""
