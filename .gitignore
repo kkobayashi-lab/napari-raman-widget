@@ -34,3 +34,5 @@ Thumbs.db
 
 debug*/
 WINDOWS_ENVIRONMENT.md
+*.env
+*.zarr

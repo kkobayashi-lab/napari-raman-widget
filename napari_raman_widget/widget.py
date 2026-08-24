@@ -19,6 +19,7 @@ from .acquisition_viewer import LargeAcquisitionViewerWindow
 from .field_help import apply_tooltips
 from .log_window import LogWindow, _StdoutRedirector
 from .lazy_visualization import install_lazy_mda_viewer
+from .loading_paths import LOADING_PATHS
 from .mda_timing import (
     IMAGING_FRAME_OVERHEAD_S,
     RAMAN_POINT_OVERHEAD_S,
@@ -34,9 +35,7 @@ from .plot_windows import (
 from .ui_helpers import make_collapsible
 
 
-DEFAULT_LIGHTFIELD_CONFIG = (
-    r"C:\Users\spraman\Documents\LightField\Experiments\RamanConfocal.lfe"
-)
+DEFAULT_LIGHTFIELD_CONFIG = LOADING_PATHS["LIGHTFIELD_EXPERIMENT_PATH"]
 DEFAULT_BEAM_CENTER_XY = (512.0, 512.0)
 ND_FILTER_DEVICE = "DigitalIO"
 ND_FILTER_MASK = 1 << 1  # Dev1/port0/line1
@@ -255,8 +254,8 @@ class HardwareWidget(QWidget):
         loading_layout.addWidget(QLabel("Micro-Manager config (.cfg):"))
         cfg_row = QHBoxLayout()
         self.cfg_path = QLineEdit()
-        self.cfg_path.setText(r"C:\Users\spraman\Desktop\config\exp_1ms_polysterenebeads_125mW_02_18_bakkk_v2.cfg")
-        self.cfg_path.setPlaceholderText(r"C:\Users\spraman\Desktop\config\exp_1ms_polysterenebeads_125mW_02_18_bakkk_v2.cfg")
+        self.cfg_path.setText(LOADING_PATHS["MICRO_MANAGER_CONFIG_PATH"])
+        self.cfg_path.setPlaceholderText("Set MICRO_MANAGER_CONFIG_PATH in .env")
         cfg_browse = QPushButton("...")
         cfg_browse.setFixedWidth(30)
         cfg_browse.clicked.connect(self.browse_cfg)
@@ -267,8 +266,8 @@ class HardwareWidget(QWidget):
         loading_layout.addWidget(QLabel("Transformer model (.json):"))
         tf_row = QHBoxLayout()
         self.tf_path = QLineEdit()
-        self.tf_path.setText(r"C:\Users\spraman\Desktop\config\model_2026-07-16.json")
-        self.tf_path.setPlaceholderText(r"C:\Users\spraman\Desktop\config\model_2026-07-16.json")
+        self.tf_path.setText(LOADING_PATHS["TRANSFORMER_MODEL_PATH"])
+        self.tf_path.setPlaceholderText("Set TRANSFORMER_MODEL_PATH in .env")
         tf_browse = QPushButton("...")
         tf_browse.setFixedWidth(30)
         tf_row.addWidget(self.tf_path)
@@ -278,14 +277,16 @@ class HardwareWidget(QWidget):
         loading_layout.addWidget(QLabel("LightField experiment:"))
         self.lightfield_config = QLineEdit()
         self.lightfield_config.setText(DEFAULT_LIGHTFIELD_CONFIG)
-        self.lightfield_config.setPlaceholderText(DEFAULT_LIGHTFIELD_CONFIG)
+        self.lightfield_config.setPlaceholderText(
+            "Set LIGHTFIELD_EXPERIMENT_PATH in .env"
+        )
         loading_layout.addWidget(self.lightfield_config)
 
         loading_layout.addWidget(QLabel("Vandermonde model (.json):"))
         vdm_row = QHBoxLayout()
         self.sel_vdm_path = QLineEdit()
-        self.sel_vdm_path.setText(r"C:\Users\spraman\Desktop\config\2026_07_23_vandermonde_model.json")
-        self.sel_vdm_path.setPlaceholderText("vandermonde_model.json")
+        self.sel_vdm_path.setText(LOADING_PATHS["VANDERMONDE_MODEL_PATH"])
+        self.sel_vdm_path.setPlaceholderText("Set VANDERMONDE_MODEL_PATH in .env")
         vdm_browse = QPushButton("...")
         vdm_browse.setFixedWidth(30)
         vdm_browse.clicked.connect(self.browse_vandermonde)
