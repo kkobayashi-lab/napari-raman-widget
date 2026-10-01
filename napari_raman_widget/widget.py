@@ -794,7 +794,8 @@ class HardwareWidget(QWidget):
         grid_layout.addLayout(yr_row)
 
         self._grid_corner_help = QLabel(
-            "Move to each corner and capture its XY, or type the coordinates."
+            "Capture each corner's XY and the grid Z, or type the coordinates. "
+            "The last corner captured sets the constant grid Z."
         )
         grid_layout.addWidget(self._grid_corner_help)
 
@@ -805,7 +806,7 @@ class HardwareWidget(QWidget):
         self.grid_tl_x_input.setPlaceholderText("X")
         self.grid_tl_y_input = QLineEdit()
         self.grid_tl_y_input.setPlaceholderText("Y")
-        self.grid_capture_tl_btn = QPushButton("Capture current XY")
+        self.grid_capture_tl_btn = QPushButton("Capture current XYZ")
         self.grid_capture_tl_btn.clicked.connect(
             lambda _checked=False: self._capture_grid_corner("top_left")
         )
@@ -821,7 +822,7 @@ class HardwareWidget(QWidget):
         self.grid_br_x_input.setPlaceholderText("X")
         self.grid_br_y_input = QLineEdit()
         self.grid_br_y_input.setPlaceholderText("Y")
-        self.grid_capture_br_btn = QPushButton("Capture current XY")
+        self.grid_capture_br_btn = QPushButton("Capture current XYZ")
         self.grid_capture_br_btn.clicked.connect(
             lambda _checked=False: self._capture_grid_corner("bottom_right")
         )
@@ -829,6 +830,20 @@ class HardwareWidget(QWidget):
         br_row.addWidget(self.grid_br_y_input)
         br_row.addWidget(self.grid_capture_br_btn)
         grid_layout.addLayout(br_row)
+
+        z_row = QHBoxLayout()
+        z_row.addWidget(QLabel("Grid Z (um):"))
+        self.grid_z_input = QLineEdit()
+        self.grid_z_input.setPlaceholderText("Use first MDA position Z")
+        self.grid_z_input.setToolTip(
+            "Constant Z saved for this grid. Blank uses the first MDA position Z. "
+            "Tilt correction overrides this value with the fitted surface."
+        )
+        z_row.addWidget(self.grid_z_input)
+        self.grid_capture_z_btn = QPushButton("Capture current Z")
+        self.grid_capture_z_btn.clicked.connect(self._capture_grid_z)
+        z_row.addWidget(self.grid_capture_z_btn)
+        grid_layout.addLayout(z_row)
 
         self._grid_center_widgets = [
             self._grid_xrange_label, self.grid_xrange_input,
@@ -2120,6 +2135,8 @@ class HardwareWidget(QWidget):
 
     def _toggle_grid_tilt_fields(self, checked):
         """Show or hide the grid tilt-reference workflow."""
+        self.grid_z_input.setEnabled(not checked)
+        self.grid_capture_z_btn.setEnabled(not checked)
         for widget in self._grid_tilt_widgets:
             widget.setVisible(checked)
         if checked:
@@ -2199,12 +2216,13 @@ class HardwareWidget(QWidget):
             self.grid_tilt_fit_label.setText(f"Tilt fit: {e}")
 
     def _capture_grid_corner(self, corner):
-        """Copy the current stage XY into one of the corner input pairs."""
+        """Capture a corner XY and the constant grid Z."""
         if self.core is None:
             self.status.setText("Status: not connected")
             return
         try:
             x, y = self.core.getXYPosition()
+            z = self.core.getPosition()
             if corner == "top_left":
                 x_input, y_input, name = (
                     self.grid_tl_x_input, self.grid_tl_y_input, "top-left"
@@ -2215,11 +2233,25 @@ class HardwareWidget(QWidget):
                 )
             x_input.setText(f"{x:.3f}")
             y_input.setText(f"{y:.3f}")
+            self.grid_z_input.setText(f"{z:.4f}")
             self.status.setText(
-                f"Status: captured {name} at X {x:.3f}, Y {y:.3f}"
+                f"Status: captured {name} at X {x:.3f}, Y {y:.3f}; "
+                f"grid Z {z:.4f} um"
             )
         except Exception as e:
             self.status.setText(f"Status: couldn't capture grid corner -- {e}")
+
+    def _capture_grid_z(self, _checked=False):
+        """Capture the current focus height as the constant grid Z."""
+        if self.core is None:
+            self.status.setText("Status: not connected")
+            return
+        try:
+            z = self.core.getPosition()
+            self.grid_z_input.setText(f"{z:.4f}")
+            self.status.setText(f"Status: captured grid Z {z:.4f} um")
+        except Exception as e:
+            self.status.setText(f"Status: couldn't capture grid Z -- {e}")
 
     def _toggle_autofocus_fields(self, method):
         """Show/hide the MDA autofocus fields based on the chosen object.
@@ -4647,6 +4679,16 @@ class HardwareWidget(QWidget):
         snake_axis = self.grid_scan_order_combo.currentData()
         tilt_degree = int(self.grid_tilt_degree_input.value())
         tilt_reference_points = None
+        base_z = None
+        if not self.grid_tilt_check.isChecked():
+            try:
+                z_text = self.grid_z_input.text().strip()
+                base_z = float(z_text) if z_text else None
+                if base_z is not None and not np.isfinite(base_z):
+                    raise ValueError
+            except ValueError:
+                self.status.setText("Status: enter a finite grid Z in um")
+                return
         if self.grid_tilt_check.isChecked():
             try:
                 tilt_reference_points = self._grid_tilt_reference_points()
@@ -4697,6 +4739,7 @@ class HardwareWidget(QWidget):
                     corner_positions=corner_positions,
                     x_count=x_count, y_count=y_count,
                     tilt_reference_points=tilt_reference_points,
+                    base_z=base_z,
                     tilt_degree=tilt_degree,
                     snake_axis=snake_axis,
                     autofocus_object=autofocus_object,
@@ -4705,6 +4748,16 @@ class HardwareWidget(QWidget):
             nx, ny, *_grid_details = self._grid_size_preview()
             xs = [position.x for position in region_seq.stage_positions]
             ys = [position.y for position in region_seq.stage_positions]
+            zs = [position.z for position in region_seq.stage_positions]
+            if tilt_reference_points is not None:
+                z_detail = (
+                    f"Z corrected (degree {tilt_degree}): "
+                    f"{min(zs):.4f}..{max(zs):.4f} um"
+                )
+            elif zs[0] is None:
+                z_detail = "Z not corrected: unset (uses acquisition-start Z)"
+            else:
+                z_detail = f"Z not corrected: {zs[0]:.4f} um"
             region = {
                 "sequence": region_seq,
                 "sources": sources,
@@ -4716,6 +4769,7 @@ class HardwareWidget(QWidget):
                     f"{nx} x {ny} = {len(region_seq.stage_positions):,} "
                     f"positions; X {min(xs):.3f}..{max(xs):.3f}; "
                     f"Y {min(ys):.3f}..{max(ys):.3f}; "
+                    f"{z_detail}; "
                     f"{self.grid_scan_order_combo.currentText()}"
                 ),
             }
@@ -4732,10 +4786,6 @@ class HardwareWidget(QWidget):
             n_total_positions = len(
                 self.selection_results["new_seq"].stage_positions
             )
-            z_detail = (
-                f"degree {tilt_degree} surface"
-                if tilt_reference_points is not None else "default"
-            )
             log.append(
                 f"\n--- added grid {len(self._grid_regions)} "
                 f"({n_region_positions} positions) ---\n"
@@ -4743,7 +4793,7 @@ class HardwareWidget(QWidget):
             self.status.setText(
                 f"Status: added grid {len(self._grid_regions)} "
                 f"({n_region_positions} positions; {n_total_positions} total, "
-                f"{repeats} pts each at ({fov_x},{fov_y}), Z={z_detail}) -- "
+                f"{repeats} pts each at ({fov_x},{fov_y}), {z_detail}) -- "
                 "add another grid or Run Raman MDA"
             )
         except Exception as e:
