@@ -15,6 +15,7 @@ from napari_raman_widget.widget import (
     _parse_raman_z_indices,
     _raman_free_autofocus_allowed,
     _spatial_yx,
+    _uncheck_stage_polling,
 )
 
 
@@ -63,6 +64,40 @@ class TestCellposeDiameter(unittest.TestCase):
 
     def test_positive_diameter_is_preserved(self):
         self.assertEqual(_cellpose_diameter(15.5), 15.5)
+
+
+class TestStagePolling(unittest.TestCase):
+    def test_unchecks_xy_and_z_polling(self):
+        class FakeCheckBox:
+            def __init__(self):
+                self.checked = True
+
+            def isChecked(self):
+                return self.checked
+
+            def setChecked(self, checked):
+                self.checked = checked
+
+        xy_poll = FakeCheckBox()
+        z_poll = FakeCheckBox()
+        stages = [
+            SimpleNamespace(_is_2axis=True, _poll_cb=xy_poll),
+            SimpleNamespace(_is_2axis=False, _poll_cb=z_poll),
+        ]
+        controls = SimpleNamespace(findChildren=lambda _type: stages)
+        dock = SimpleNamespace(widget=lambda: controls)
+        main_window = SimpleNamespace(
+            _dock_widgets={"Stages Control": dock}
+        )
+
+        self.assertTrue(_uncheck_stage_polling(main_window))
+        self.assertFalse(xy_poll.checked)
+        self.assertFalse(z_poll.checked)
+
+    def test_missing_stage_controls_is_a_noop(self):
+        main_window = SimpleNamespace(_dock_widgets={})
+
+        self.assertFalse(_uncheck_stage_polling(main_window))
 
 
 class TestRamanZIndices(unittest.TestCase):

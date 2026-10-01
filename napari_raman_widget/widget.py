@@ -117,6 +117,29 @@ def _cellpose_diameter(value):
     return None if diameter == 0 else diameter
 
 
+def _uncheck_stage_polling(main_window):
+    """Stop live XY- and Z-stage polling in napari-micromanager."""
+    if main_window is None:
+        return False
+
+    docks = getattr(main_window, "_dock_widgets", {})
+    stage_dock = docks.get("Stages Control")
+    if stage_dock is None:
+        return False
+
+    stage_controls = stage_dock.widget()
+    if stage_controls is None:
+        return False
+
+    unchecked = False
+    for stage_widget in stage_controls.findChildren(QWidget):
+        poll_checkbox = getattr(stage_widget, "_poll_cb", None)
+        if poll_checkbox is not None and poll_checkbox.isChecked():
+            poll_checkbox.setChecked(False)
+            unchecked = True
+    return unchecked
+
+
 def _cellpose_model_names():
     """Return built-in and Cellpose-registered user model names."""
     try:
@@ -2504,23 +2527,34 @@ class HardwareWidget(QWidget):
         events = self.core.mda.events
         if events is self._mda_completion_events:
             return
-        if self._mda_completion_events is not None:
-            try:
-                self._mda_completion_events.sequenceFinished.disconnect(
-                    self._on_raman_mda_finished
-                )
-                self._mda_completion_events.sequenceCanceled.disconnect(
-                    self._on_raman_mda_canceled
-                )
-                self._mda_completion_events.frameReady.disconnect(
-                    self._on_mda_frame_completed
-                )
-            except Exception:
-                pass
+        self._disconnect_mda_completion_events()
+        events.sequenceStarted.connect(self._on_mda_started_uncheck_stage_polling)
         events.sequenceCanceled.connect(self._on_raman_mda_canceled)
         events.sequenceFinished.connect(self._on_raman_mda_finished)
         events.frameReady.connect(self._on_mda_frame_completed)
         self._mda_completion_events = events
+
+    def _disconnect_mda_completion_events(self):
+        """Disconnect handlers from the previous MDA event source."""
+        events = self._mda_completion_events
+        if events is None:
+            return
+        connections = (
+            (events.sequenceStarted, self._on_mda_started_uncheck_stage_polling),
+            (events.sequenceCanceled, self._on_raman_mda_canceled),
+            (events.sequenceFinished, self._on_raman_mda_finished),
+            (events.frameReady, self._on_mda_frame_completed),
+        )
+        for signal, callback in connections:
+            try:
+                signal.disconnect(callback)
+            except Exception:
+                pass
+        self._mda_completion_events = None
+
+    def _on_mda_started_uncheck_stage_polling(self, *_args):
+        """Prevent the stage-position timer from contending with an MDA."""
+        _uncheck_stage_polling(self.main_window)
 
     def _connect_raman_visualization(self, engine):
         """Connect one active Raman engine to the lazy napari spectrum view."""
@@ -2866,6 +2900,7 @@ class HardwareWidget(QWidget):
             )
             self.daq = self.collector.daq
             self.default_engine = self.core.mda.engine
+            self._connect_mda_completion_events()
 
             tf = self.tf_path.text().strip()
             if tf:
@@ -2916,6 +2951,7 @@ class HardwareWidget(QWidget):
 
     def disconnect(self):
         self._cancel_scheduled_raman_mda()
+        self._disconnect_mda_completion_events()
         for button in (
             self.click_center_btn,
             self.click_laser_btn,
@@ -5009,7 +5045,6 @@ class HardwareWidget(QWidget):
             self.mda_dir_input.text().strip() or "data/run"
         )
         overwrite_output = self.mda_overwrite_check.isChecked()
-        out_dir.mkdir(parents=True, exist_ok=True)
         af_range = float(self.mda_af_range_input.value())
         search_pts = int(self.mda_search_pts_input.value())
         fine_search_range = float(self.mda_fine_range_input.value())
