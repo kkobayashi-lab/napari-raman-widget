@@ -12,7 +12,7 @@ from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QPushButton,
-    QScrollArea, QSpinBox,
+    QScrollArea, QSlider, QSpinBox,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QMessageBox
 )
 from .acquisition_viewer import LargeAcquisitionViewerWindow
@@ -369,6 +369,28 @@ class HardwareWidget(QWidget):
         drag_row.addWidget(self.stage_drag_speed_input)
         hardware_layout.addLayout(drag_row)
 
+        z_scroll_row = QHBoxLayout()
+        z_scroll_row.addWidget(QLabel("Z scroll:"))
+        self.stage_z_scroll_slider = QSlider(Qt.Horizontal)
+        self.stage_z_scroll_slider.setRange(1, 100)
+        self.stage_z_scroll_slider.setValue(10)
+        self.stage_z_scroll_slider.setEnabled(False)
+        self.stage_z_scroll_slider.setAccessibleName("Z movement per wheel notch")
+        self.stage_z_scroll_label = QLabel("1.0 um/notch")
+        self.stage_z_scroll_slider.valueChanged.connect(
+            lambda value: self.stage_z_scroll_label.setText(
+                f"{value / 10:.1f} um/notch"
+            )
+        )
+        self.drag_stage_btn.toggled.connect(
+            lambda _checked: self.stage_z_scroll_slider.setEnabled(
+                self.drag_stage_btn.isChecked()
+            )
+        )
+        z_scroll_row.addWidget(self.stage_z_scroll_slider, 1)
+        z_scroll_row.addWidget(self.stage_z_scroll_label)
+        hardware_layout.addLayout(z_scroll_row)
+
         shutter_row = QHBoxLayout()
         shutter_row.addWidget(QLabel("Laser shutter:"))
         self.open_shutter_btn = QPushButton("Open (RM)")
@@ -461,6 +483,7 @@ class HardwareWidget(QWidget):
 
         raman_box.setLayout(raman_layout)
         outer.addWidget(raman_box)
+        raman_box.hide()  # Retain controls for the underlying acquisition code.
 
         # ================= LASER AIMING CALIBRATION SECTION =================
         calib_box = make_collapsible("Laser aiming calibration", expanded=False)
@@ -605,6 +628,7 @@ class HardwareWidget(QWidget):
 
         ref_box.setLayout(ref_layout)
         outer.addWidget(ref_box)
+        ref_box.hide()
 
         # ================= SPATIAL MAPPING SECTION =================
         scan_box = make_collapsible("Spatial mapping", expanded=False)
@@ -697,6 +721,7 @@ class HardwareWidget(QWidget):
 
         scan_box.setLayout(scan_layout)
         outer.addWidget(scan_box)
+        scan_box.hide()
 
         # ================= GENERATE STAGE GRID SECTION =================
         grid_box = make_collapsible("Generate stage grid", expanded=False)
@@ -1043,7 +1068,7 @@ class HardwareWidget(QWidget):
         cy_row.addWidget(QLabel("Center Y:"))
         self.sel_cy_input = QSpinBox()
         self.sel_cy_input.setRange(0, 100000)
-        self.sel_cy_input.setValue(510)
+        self.sel_cy_input.setValue(int(DEFAULT_BEAM_CENTER_XY[1]))
         cy_row.addWidget(self.sel_cy_input)
         sel_layout.addLayout(cy_row)
 
@@ -1051,7 +1076,7 @@ class HardwareWidget(QWidget):
         cx_row.addWidget(QLabel("Center X:"))
         self.sel_cx_input = QSpinBox()
         self.sel_cx_input.setRange(0, 100000)
-        self.sel_cx_input.setValue(510)
+        self.sel_cx_input.setValue(int(DEFAULT_BEAM_CENTER_XY[0]))
         cx_row.addWidget(self.sel_cx_input)
         sel_layout.addLayout(cx_row)
 
@@ -1437,7 +1462,7 @@ class HardwareWidget(QWidget):
         loops_row.addWidget(QLabel("Loops (time points):"))
         self.mda_loops_input = QSpinBox()
         self.mda_loops_input.setRange(1, 1_000_000)
-        self.mda_loops_input.setValue(100)
+        self.mda_loops_input.setValue(1)
         loops_row.addWidget(self.mda_loops_input)
         mda_layout.addLayout(loops_row)
 
@@ -1445,7 +1470,7 @@ class HardwareWidget(QWidget):
         interval_row.addWidget(QLabel("Interval (s):"))
         self.mda_interval_input = QDoubleSpinBox()
         self.mda_interval_input.setRange(0.0, 1_000_000)
-        self.mda_interval_input.setValue(600)
+        self.mda_interval_input.setValue(0)
         self.mda_interval_input.setDecimals(1)
         interval_row.addWidget(self.mda_interval_input)
         mda_layout.addLayout(interval_row)
@@ -1464,15 +1489,15 @@ class HardwareWidget(QWidget):
         refocus_row = QHBoxLayout()
         refocus_row.addWidget(QLabel("Refocus & segment every (timepoints):"))
         self.mda_refocus_input = QSpinBox()
-        self.mda_refocus_input.setRange(1, 1_000_000)
-        self.mda_refocus_input.setValue(1)
+        self.mda_refocus_input.setRange(0, 1_000_000)
+        self.mda_refocus_input.setValue(0)
         refocus_row.addWidget(self.mda_refocus_input)
         mda_layout.addLayout(refocus_row)
 
         zrel_row = QHBoxLayout()
         zrel_row.addWidget(QLabel("Z relative (comma-sep um):"))
         self.mda_zrel_input = QLineEdit()
-        self.mda_zrel_input.setText("0, 4")
+        self.mda_zrel_input.setText("0")
         self.mda_zrel_input.setPlaceholderText("e.g. 0, 3.33")
         zrel_row.addWidget(self.mda_zrel_input)
         mda_layout.addLayout(zrel_row)
@@ -1634,6 +1659,12 @@ class HardwareWidget(QWidget):
         self._napari_window = getattr(self.viewer.window, "_qt_window", None)
         if self._napari_window is not None:
             self._napari_window.installEventFilter(self)
+        # Intercept wheel input before Vispy zooms or napari changes slices.
+        qt_viewer = getattr(self.viewer.window, "_qt_viewer", None)
+        canvas = getattr(qt_viewer, "canvas", None)
+        self._stage_scroll_canvas = getattr(canvas, "native", None)
+        if self._stage_scroll_canvas is not None:
+            self._stage_scroll_canvas.installEventFilter(self)
         QApplication.instance().aboutToQuit.connect(
             self._disconnect_on_shutdown
         )
@@ -3020,6 +3051,14 @@ class HardwareWidget(QWidget):
 
     def eventFilter(self, watched, event):
         if (
+            event.type() == QEvent.Wheel
+            and watched is getattr(self, "_stage_scroll_canvas", None)
+            and self.drag_stage_btn.isChecked()
+        ):
+            self._stage_z_scroll(event.angleDelta().y() / 120.0)
+            event.accept()
+            return True
+        if (
             watched is self._napari_window
             and event.type() == QEvent.KeyPress
             and event.key() == Qt.Key_Escape
@@ -3978,7 +4017,7 @@ class HardwareWidget(QWidget):
             if self._stage_drag_cb not in self.viewer.mouse_drag_callbacks:
                 self.viewer.mouse_drag_callbacks.append(self._stage_drag_cb)
             self.status.setText(
-                "Status: stage drag ARMED -- hold and drag the image"
+                "Status: stage drag ARMED -- drag for XY; scroll for Z"
             )
         else:
             self._stop_stage_drag()
@@ -4012,8 +4051,33 @@ class HardwareWidget(QWidget):
             self._stop_stage_drag()
             if self.drag_stage_btn.isChecked():
                 self.status.setText(
-                    "Status: stage drag ARMED -- hold and drag the image"
+                    "Status: stage drag ARMED -- drag for XY; scroll for Z"
                 )
+
+    def _stage_z_scroll(self, notches):
+        """Move focus once per wheel event; never queue moves while busy."""
+        if not self.drag_stage_btn.isChecked() or not notches:
+            return
+        if self.core is None:
+            self.drag_stage_btn.setChecked(False)
+            self.status.setText("Status: stage scroll stopped -- disconnected")
+            return
+        if self.core.mda.is_running():
+            self.drag_stage_btn.setChecked(False)
+            self.status.setText("Status: stage scroll stopped -- MDA is running")
+            return
+        try:
+            focus_stage = self.core.getFocusDevice()
+            if not focus_stage:
+                raise RuntimeError("no Z focus stage is configured")
+            if self.core.deviceBusy(focus_stage):
+                return
+            dz = float(notches) * self.stage_z_scroll_slider.value() / 10.0
+            self.core.setRelativePosition(focus_stage, dz)
+            self.status.setText(f"Status: stage scroll dZ={dz:+.2f} um")
+        except Exception as e:
+            self.drag_stage_btn.setChecked(False)
+            self.status.setText(f"Status: stage scroll failed -- {e}")
 
     def _stop_stage_drag(self):
         """Stop issuing stage moves for the current drag gesture."""

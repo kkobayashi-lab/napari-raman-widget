@@ -237,11 +237,17 @@ HELP = {
     "drag_stage_btn": (
         "Enable stage movement: hold the left mouse button and drag in the "
         "viewer. The stage follows the drag direction; distance controls speed. "
-        "Release the mouse to stop."
+        "Release the mouse to stop XY movement. Scroll over the image for Z: "
+        "up increases Z, down decreases Z. Press Escape to disarm."
     ),
     "stage_drag_speed_input": (
         "Maximum click-and-drag stage speed in micrometers per second. The "
         "cursor reaches this speed 100 pixels from the press point."
+    ),
+    "stage_z_scroll_slider": (
+        "Z movement per mouse-wheel notch while drag mode is armed, from "
+        "0.1 to 10 micrometers. Scroll up for positive Z, down for negative Z. "
+        "Wheel input over the image replaces zoom; busy-stage input is ignored."
     ),
     "open_shutter_btn": (
         "Open the laser shutter by switching the Channel config to RM."
@@ -373,8 +379,8 @@ HELP = {
         "Delay in seconds after confirming the preview before the MDA starts."
     ),
     "mda_refocus_input": (
-        "Cadence in time points for focus and tracking updates; 1 = every "
-        "time point."
+        "Cadence in time points for focus and tracking updates; 0 = initial "
+        "time point only, 1 = every time point."
     ),
     "mda_zrel_input": (
         "Relative Z planes (comma-separated um) that replace the sequence Z "

@@ -21,6 +21,16 @@ base folder in **Data Output**. Changing it applies to the next save
 immediately and does not reconnect hardware or change the process working
 directory.
 
+## Viewer stage controls
+
+In **Hardware Control**, enable **Drag image to move stage** to move XY by
+holding and dragging the image. While this mode is armed, scrolling over the
+image moves the Z focus stage: up increases Z and down decreases Z. The
+**Z scroll** slider just below the drag controls sets the distance per wheel
+notch from 0.1 to 10 micrometers (default 1.0). Scrolling replaces image zoom
+in this mode. Press Escape or turn the mode off to restore normal scrolling.
+Stage motion is disabled during MDA; wheel input is ignored while Z is busy.
+
 ## Install
 
 ```bash
