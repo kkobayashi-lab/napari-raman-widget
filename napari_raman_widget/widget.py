@@ -360,6 +360,10 @@ class HardwareWidget(QWidget):
         click_row.addWidget(self.click_laser_btn)
         hardware_layout.addLayout(click_row)
 
+        self.center_laser_btn = QPushButton("Center laser")
+        self.center_laser_btn.clicked.connect(self.center_laser)
+        hardware_layout.addWidget(self.center_laser_btn)
+
         drag_row = QHBoxLayout()
         self.drag_stage_btn = QPushButton("Drag image to move stage")
         self.drag_stage_btn.setCheckable(True)
@@ -1682,6 +1686,31 @@ class HardwareWidget(QWidget):
                 auto_start=True,
             )
         return volts[0]
+
+    def center_laser(self):
+        """Hold the laser at the same calibrated center used on connection."""
+        if self.core is None or self.daq is None:
+            self.status.setText("Status: not connected")
+            return
+        if self.transformer is None:
+            self.status.setText("Status: no transformer loaded")
+            return
+
+        mda = getattr(self.core, "mda", None)
+        is_running = getattr(mda, "is_running", False)
+        if is_running() if callable(is_running) else bool(is_running):
+            self.status.setText("Status: stop the active MDA before centering the laser")
+            return
+
+        center_x, center_y = DEFAULT_BEAM_CENTER_XY
+        try:
+            volts = self._aim_beam_at_pixel(center_x, center_y)
+            self.status.setText(
+                f"Status: laser centered at ({center_x:.0f}, {center_y:.0f}) "
+                f"[X={volts[0]:.3f}, Y={volts[1]:.3f} V]"
+            )
+        except Exception as e:
+            self.status.setText(f"Status: laser centering failed -- {e}")
 
     def _find_points_layer(self):
         """Return the active Points layer, or the most recent one."""

@@ -433,6 +433,62 @@ class TestAutomaticBeamCentering(unittest.TestCase):
 
 
 class TestHardwareControls(unittest.TestCase):
+    def test_center_laser_aims_at_connection_center(self):
+        aims = []
+        statuses = []
+        widget = SimpleNamespace(
+            core=SimpleNamespace(mda=SimpleNamespace(is_running=lambda: False)),
+            daq=object(),
+            transformer=object(),
+            status=SimpleNamespace(setText=statuses.append),
+            _aim_beam_at_pixel=lambda x, y: (
+                aims.append((x, y)) or np.array([0.2, -0.3])
+            ),
+        )
+
+        HardwareWidget.center_laser(widget)
+
+        self.assertEqual(aims, [DEFAULT_BEAM_CENTER_XY])
+        self.assertIn("laser centered at (512, 512)", statuses[-1])
+
+    def test_center_laser_does_not_move_without_prerequisites_or_during_mda(self):
+        for core, daq, transformer, expected in [
+            (None, object(), object(), "not connected"),
+            (SimpleNamespace(), None, object(), "not connected"),
+            (SimpleNamespace(), object(), None, "no transformer loaded"),
+            (SimpleNamespace(mda=SimpleNamespace(is_running=lambda: True)),
+             object(), object(), "stop the active MDA"),
+            (SimpleNamespace(mda=SimpleNamespace(is_running=True)),
+             object(), object(), "stop the active MDA"),
+        ]:
+            with self.subTest(expected=expected, core=core):
+                statuses = []
+                widget = SimpleNamespace(
+                    core=core, daq=daq, transformer=transformer,
+                    status=SimpleNamespace(setText=statuses.append),
+                    _aim_beam_at_pixel=lambda *_args: self.fail("must not move"),
+                )
+
+                HardwareWidget.center_laser(widget)
+
+                self.assertIn(expected, statuses[-1])
+
+    def test_center_laser_reports_hardware_failure(self):
+        statuses = []
+
+        def fail_to_aim(*_args):
+            raise RuntimeError("DAQ unavailable")
+
+        widget = SimpleNamespace(
+            core=SimpleNamespace(), daq=object(), transformer=object(),
+            status=SimpleNamespace(setText=statuses.append),
+            _aim_beam_at_pixel=fail_to_aim,
+        )
+
+        HardwareWidget.center_laser(widget)
+
+        self.assertIn("laser centering failed -- DAQ unavailable", statuses[-1])
+
     def test_laser_autofocus_button_focuses_at_current_fov_center(self):
         autofocus_calls = []
         z_moves = []

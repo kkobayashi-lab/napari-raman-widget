@@ -273,6 +273,11 @@ HELP = {
         "FOV. Uses the coarse and fine autofocus range/point settings from "
         "Raman MDA, leaves XY fixed, and moves Z to the best focus."
     ),
+    "center_laser_btn": (
+        "Point and hold the laser at calibrated pixel (512, 512), the same "
+        "center used when hardware connects. Requires a DAQ and transformer; "
+        "stop any active MDA first."
+    ),
 
     # ============ AUTOMATED CELL SELECTION ============
     "sel_cy_input": (
