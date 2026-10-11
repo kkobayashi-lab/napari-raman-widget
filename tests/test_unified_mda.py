@@ -79,6 +79,38 @@ def test_install_is_idempotent_and_extension_settings_round_trip(owner):
     assert panel.value().metadata["external"] == {"preserved": True}
 
 
+@pytest.mark.parametrize("dense", [False, True])
+def test_grid_shutter_checkbox_round_trip_and_event_behavior(owner, dense):
+    from raman_mda_engine.grid_plan import GRID_KEY, iter_grid_events
+
+    widget, panel, app = owner
+    metadata = {GRID_KEY: {"version": 1, "regions": [
+        {"x": [0, 1, 2], "y": [0, 0, 1], "z": 0, "snake_axis": None}]}} if dense else {}
+    sequence = MDASequence(
+        channels=["BF"], metadata=metadata,
+        grid_plan=None if dense else {"rows": 1, "columns": 2},
+        time_plan={"loops": 2, "interval": 0},
+    )
+    panel.setValue(sequence)
+    checkbox = panel.keep_shutter_open.leave_open_g
+    assert not checkbox.isChecked()
+    checkbox.setChecked(True)
+    saved = panel.value()
+    assert saved.keep_shutter_open_across == (("p",) if dense else ("g",))
+    events = list(iter_grid_events(saved))
+    assert [event.keep_shutter_open for event in events] == [True, False, True, False]
+    panel.setValue(MDASequence.model_validate_json(saved.model_dump_json()))
+    assert checkbox.isChecked()
+    assert panel.value().keep_shutter_open_across == saved.keep_shutter_open_across
+    # Toggling grid leaves the existing Z/time shutter choices intact.
+    panel.keep_shutter_open.leave_open_z.setChecked(True)
+    panel.keep_shutter_open.leave_open_t.setChecked(True)
+    checkbox.setChecked(False)
+    assert panel.value().keep_shutter_open_across == ("z", "t")
+    panel.setValue(sequence)
+    assert not checkbox.isChecked()
+
+
 def test_applying_selection_preserves_experiment_channels_z_and_time(owner):
     widget, panel, app = owner
     original = MDASequence(channels=[{"config": "BF", "exposure": 23}],
@@ -199,6 +231,7 @@ def test_simulated_raman_run_streams_data_and_restores_engine(owner, tmp_path, c
     if camera:
         channels.insert(0, {"config": "BF", "exposure": 1})
     panel.setValue(MDASequence(channels=channels))
+    widget.mda_imgp_input.setText("all" if camera else "none")
     source = SimpleNamespace(name="cell:A", role="cell", _img_shape=(512, 512),
                              get_mda_points=lambda event, transform=True: np.array([[0.5, 0.5]]))
     widget.selection_results = {"selection_type": "grid", "new_seq": MDASequence(stage_positions=[Position(x=0, y=0, z=0)]),
@@ -217,8 +250,7 @@ def test_simulated_raman_run_streams_data_and_restores_engine(owner, tmp_path, c
         assert panel.value().stage_positions == ()
         assert len(panel.targets[0]["points"]) == 1
         assert "2 virtual positions" in panel.grid_summary.text()
-    # Grids default to no camera measurement; explicitly request it here.
-    widget.mda_imgp_input.setText("all" if camera else "none")
+    assert widget.mda_imgp_input.text() == ("all" if camera else "none")
     panel.update_summary()
     assert widget.mda_collection_summary.text().startswith(
         f"{(2 if dense else 1) * frames} spectral collections;")
@@ -292,11 +324,13 @@ def test_simulated_camera_only_uses_native_writer_without_raman(owner, tmp_path)
 
 
 @pytest.mark.parametrize("dense", [False, True])
-def test_grid_handoff_preserves_mda_frames_per_point(owner, dense):
+@pytest.mark.parametrize("camera_positions", ["all", "none", "0"])
+def test_grid_handoff_preserves_mda_frames_per_point(owner, dense, camera_positions):
     widget, panel, _app = owner
     widget.mda_repeats_input.setValue(3)
     widget.mda_af_mode_combo.setCurrentText("cell")
     widget.mda_afp_input.setText("none")
+    widget.mda_imgp_input.setText(camera_positions)
     source = SimpleNamespace(name="cells", role="cell", _img_shape=(512, 512),
                              get_mda_points=lambda event, transform=True: np.array([[0.5, 0.5]]))
     sequence = MDASequence(stage_positions=[Position(x=0, y=0, z=0)])
@@ -309,4 +343,5 @@ def test_grid_handoff_preserves_mda_frames_per_point(owner, dense):
     assert widget.mda_repeats_input.value() == 3
     assert widget.mda_af_mode_combo.currentText() == "cell"
     assert widget.mda_afp_input.text() == "none"
+    assert widget.mda_imgp_input.text() == camera_positions
     assert panel.targets[0]["points"]["0"] == [[0.5, 0.5]]

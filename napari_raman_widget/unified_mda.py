@@ -419,6 +419,7 @@ def install_unified_mda(owner):
             self._ready = False
             super().__init__(**kwargs)
             extend_z_editor(self.z_plan)
+            extend_shutter_editor(self.keep_shutter_open)
             self.extensions_scroll = QScrollArea(self)
             self.extensions_scroll.setWidgetResizable(True)
             self.extensions_scroll.setMaximumHeight(360)
@@ -457,7 +458,11 @@ def install_unified_mda(owner):
             # CoreConnectedMDAWidget substitutes the current stage position when
             # the native table is empty. Dense grids must retain an empty table.
             if GRID_KEY in metadata:
-                return seq.replace(metadata=metadata, stage_positions=(), grid_plan=None)
+                # Dense grids traverse virtual stage positions rather than g.
+                shutter_axes = tuple("p" if axis == "g" else axis
+                                     for axis in seq.keep_shutter_open_across)
+                return seq.replace(metadata=metadata, stage_positions=(), grid_plan=None,
+                                   keep_shutter_open_across=shutter_axes)
             return seq.replace(metadata=metadata)
 
         def setValue(self, value):
@@ -469,6 +474,9 @@ def install_unified_mda(owner):
             offsets = value.metadata.get("channel_z_offsets_um", {})
             if offsets:
                 value = value.replace(channels=[c.replace(z_offset=offsets.get(c.config, c.z_offset)) for c in value.channels])
+            if GRID_KEY in value.metadata:
+                value = value.replace(keep_shutter_open_across=tuple(
+                    "g" if axis == "p" else axis for axis in value.keep_shutter_open_across))
             super().setValue(value)
             if self._ready:
                 self.targets = deepcopy(meta.get("targets", []))
@@ -573,6 +581,29 @@ def install_unified_mda(owner):
     return panel
 
 
+def extend_shutter_editor(widget):
+    """Add grid traversal to the native Z/time shutter controls."""
+    native_value = widget.value
+    native_set_value = widget.setValue
+    widget.leave_open_g = QCheckBox("g", widget)
+    widget.leave_open_g.setToolTip("Keep the shutter open between neighboring grid tiles.")
+    widget.layout().insertWidget(widget.layout().count() - 1, widget.leave_open_g)
+
+    def value(_self):
+        axes = native_value()
+        if widget.leave_open_g.isChecked() and widget.leave_open_g.isEnabled():
+            axes += ("g",)
+        return axes
+
+    def set_value(_self, axes):
+        native_set_value(axes)
+        widget.leave_open_g.setChecked("g" in axes)
+
+    widget.value = MethodType(value, widget)
+    widget.setValue = MethodType(set_value, widget)
+    widget.leave_open_g.toggled.connect(widget.valueChanged)
+
+
 def extend_z_editor(widget):
     """Support imported irregular planes inside the native MDA Z tab."""
     from useq import ZAbsolutePositions, ZRelativePositions, ZRangeAround, ZTopBottom
@@ -668,8 +699,8 @@ def apply_prepared_positions(owner):
     # Grid preparation owns geometry; retain MDA's requested frame count.
     if selection.get("selection_type") != "grid":
         ext.raman.repeats = owner.sel_repeats_input.value()
-    if selection.get("selection_type") == "grid":
-        ext.raman.camera_positions = "none"
+    # Keep MDA's camera position policy so selected BF/other camera channels
+    # are acquired at the requested grid positions.
     metadata = deepcopy(sequence.metadata)
     metadata.pop(GRID_KEY, None)
     if dense:

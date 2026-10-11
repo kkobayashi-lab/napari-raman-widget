@@ -51,13 +51,21 @@ class LazyMDAViewer:
         self._frame_shape = None
         self._mda_running = True
 
+    def _storage_sizes(self, sequence):
+        from raman_mda_engine.grid_plan import GRID_KEY, grid_count
+
+        sizes = dict(getattr(sequence, "sizes", {}))
+        if GRID_KEY in getattr(sequence, "metadata", {}):
+            sizes["p"] = grid_count(sequence)
+        # Napari shares dimensions between layers, aligned from the right.
+        # Retain singleton axes so different runs cannot shift p into t or z.
+        for axis in ("t", "p", "g", "c", "z"):
+            sizes[axis] = max(1, sizes.get(axis, 0))
+        return sizes
+
     def _storage_axes(self, sequence):
-        sizes = getattr(sequence, "sizes", {})
-        return tuple(
-            axis
-            for axis in getattr(sequence, "axis_order", ())
-            if sizes.get(axis, 0)
-        )
+        # Display order is independent of hardware traversal order.
+        return ("t", "p", "g", "c", "z")
 
     def _camera_dtype(self):
         try:
@@ -84,7 +92,8 @@ class LazyMDAViewer:
             frame_shape = (*image.shape[:2], 3)
             dtype = image.dtype
         self._frame_shape = frame_shape
-        shape = tuple(int(sequence.sizes[axis]) for axis in axes) + frame_shape
+        sizes = self._storage_sizes(sequence)
+        shape = tuple(int(sizes[axis]) for axis in axes) + frame_shape
         chunks = (1,) * len(axes) + frame_shape
         tmpdir = tempfile.TemporaryDirectory()
         array = zarr.open(
