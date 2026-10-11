@@ -60,6 +60,7 @@ def estimate_mda_time(
     image_positions,
     raman_channel="RM",
     point_repeats=1,
+    batch=False,
 ):
     """Estimate exposure, fixed overhead, and scheduled interval time.
 
@@ -73,11 +74,35 @@ def estimate_mda_time(
     raman_events = 0
     imaging_frames = 0
     raman_z = set(int(index) for index in raman_z_indices)
-    image_p = set(int(index) for index in image_positions)
+    image_p = image_positions if isinstance(image_positions, range) else set(int(index) for index in image_positions)
     raman_exposure_s = float(raman_exposure_ms) / 1000.0
     point_repeats = max(1, int(point_repeats))
 
-    for event in sequence.iter_events():
+    # useq autofocus plans retain their previous event while iterating. A preview
+    # must not consume the autofocus state of the sequence that will be executed.
+    from useq import MDASequence
+    preview_sequence = (
+        MDASequence.model_validate_json(sequence.model_dump_json())
+        if isinstance(sequence, MDASequence) else sequence
+    )
+    virtual_count = 1
+    dense = isinstance(preview_sequence, MDASequence) and "raman_grid" in preview_sequence.metadata
+    if dense:
+        from copy import deepcopy
+        from raman_mda_engine.grid_plan import grid_count, iter_grid_events
+        virtual_count = grid_count(preview_sequence)
+        metadata = deepcopy(preview_sequence.metadata)
+        region = metadata["raman_grid"]["regions"][0]
+        region["x"][2] = region["y"][2] = 1
+        metadata["raman_grid"]["regions"] = [region]
+        preview_sequence = preview_sequence.replace(metadata=metadata)
+        events = iter_grid_events(preview_sequence)
+    else:
+        events = preview_sequence.iter_events()
+    for event in events:
+        from useq import AcquireImage
+        if not isinstance(getattr(event, "action", None), (AcquireImage, type(None))):
+            continue
         elapsed = max(elapsed, _event_min_start_seconds(event))
         channel = (
             event.channel.config
@@ -93,18 +118,22 @@ def estimate_mda_time(
                     for source in aiming_sources
                     if _is_cell_source(source)
                 ) * point_repeats
+                if batch and point_count:
+                    point_count = 1
+                point_count *= virtual_count
                 raman_points += point_count
                 if point_count:
-                    raman_events += 1
+                    raman_events += virtual_count
                 event_seconds = point_count * (
                     raman_exposure_s + RAMAN_POINT_OVERHEAD_S
                 )
-        elif event.index.get("p", 0) in image_p:
+        elif (dense and bool(image_p)) or event.index.get("p", 0) in image_p:
             exposure_ms = getattr(event, "exposure", None) or 0.0
-            imaging_frames += 1
+            frame_count = len(image_p) if dense else 1
+            imaging_frames += frame_count
             event_seconds = (
                 float(exposure_ms) / 1000.0 + IMAGING_FRAME_OVERHEAD_S
-            )
+            ) * frame_count
 
         active += event_seconds
         elapsed += event_seconds

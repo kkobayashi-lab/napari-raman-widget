@@ -264,12 +264,11 @@ class TestMdaAxisOrder(unittest.TestCase):
         ):
             HardwareWidget._prepare_for_selection(widget)
 
-        self.assertEqual(len(updated), 1)
-        self.assertEqual(updated[0].axis_order, original.axis_order)
-        self.assertEqual(updated[0].time_plan.loops, 1)
+        self.assertEqual(updated, [])
+        self.assertEqual(original.axis_order, tuple("tpzc"))
+        self.assertEqual(original.z_plan.positions(), [-1.0, 0.0, 1.0])
+        self.assertEqual(original.time_plan.loops, 3)
 
-
-class TestRamanFreeAutofocus(unittest.TestCase):
     def test_disabled_autofocus_is_allowed(self):
         self.assertTrue(_raman_free_autofocus_allowed(False, "laser"))
 

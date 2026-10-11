@@ -164,6 +164,11 @@ def _spatial_yx(point):
     return point[-2:]
 
 
+def _grid_position_count(sequence):
+    from raman_mda_engine.grid_plan import grid_count
+    return grid_count(sequence)
+
+
 def _source_has_role(source, role):
     """Use explicit source roles while retaining legacy name-based behavior."""
     source_role = getattr(source, "role", None)
@@ -227,7 +232,6 @@ class HardwareWidget(QWidget):
         self.main_window = None
         self.selection_results = None
         self._grid_regions = []
-        self.mda_channel_rows = []
         self.mda_writer = None
         self._mda_completion_events = None
         self._raman_mda_pending = False
@@ -731,6 +735,9 @@ class HardwareWidget(QWidget):
             "Add one or more grids from the current center or captured corners.\n"
             "All grids share the same fixed Raman point settings (non-batch)."
         ))
+        self.grid_dense_check = QCheckBox("Dense grid (procedural; keep positions out of MDA)")
+        self.grid_dense_check.setChecked(True)
+        grid_layout.addWidget(self.grid_dense_check)
 
         definition_row = QHBoxLayout()
         definition_row.addWidget(QLabel("Grid definition:"))
@@ -741,17 +748,6 @@ class HardwareWidget(QWidget):
         )
         definition_row.addWidget(self.grid_definition_combo)
         grid_layout.addLayout(definition_row)
-
-        grid_af_row = QHBoxLayout()
-        grid_af_row.addWidget(QLabel("Autofocus object:"))
-        self.grid_af_combo = QComboBox()
-        self.grid_af_combo.addItems(
-            ["None", "laser", "software", "quartz", "glass", "cell"]
-        )
-        grid_af_row.addWidget(self.grid_af_combo)
-        grid_layout.addLayout(grid_af_row)
-        # let the grid combo also drive the MDA autofocus-field visibility
-        self.grid_af_combo.currentTextChanged.connect(self._toggle_autofocus_fields)
 
         # Fixed point in image (pixel) coordinates -- same point at every FOV.
         fovx_row = QHBoxLayout()
@@ -933,16 +929,6 @@ class HardwareWidget(QWidget):
         order_row.addWidget(self.grid_scan_order_combo)
         grid_layout.addLayout(order_row)
 
-        # Number of identical points placed per position (>=2 for the DAQ,
-        # which needs at least 2 samples per channel).
-        reps_row = QHBoxLayout()
-        reps_row.addWidget(QLabel("Repeats (points per position, >=2):"))
-        self.grid_repeats_input = QSpinBox()
-        self.grid_repeats_input.setRange(2, 1000)
-        self.grid_repeats_input.setValue(2)
-        reps_row.addWidget(self.grid_repeats_input)
-        grid_layout.addLayout(reps_row)
-
         preview_row = QHBoxLayout()
         self.grid_size_label = QLabel()
         self.grid_size_label.setStyleSheet("font-weight: bold;")
@@ -1037,7 +1023,6 @@ class HardwareWidget(QWidget):
             self.grid_xrange_input, self.grid_yrange_input,
             self.grid_xstep_input, self.grid_ystep_input,
             self.grid_xcount_input, self.grid_ycount_input,
-            self.grid_repeats_input,
         ):
             control.valueChanged.connect(self._update_grid_size_preview)
         for control in (
@@ -1067,6 +1052,9 @@ class HardwareWidget(QWidget):
         self.grid_clear_btn.clicked.connect(self.clear_grids)
         grid_region_buttons.addWidget(self.grid_clear_btn)
         grid_layout.addLayout(grid_region_buttons)
+        self.apply_grid_mda_btn = QPushButton("Use grids in MDA")
+        self.apply_grid_mda_btn.clicked.connect(self.apply_grids_to_mda)
+        grid_layout.addWidget(self.apply_grid_mda_btn)
         self._refresh_grid_region_list()
 
         grid_box.setLayout(grid_layout)
@@ -1287,281 +1275,15 @@ class HardwareWidget(QWidget):
         sel_box.setLayout(sel_layout)
         outer.addWidget(sel_box)
 
-        # ================= RUN RAMAN MDA SECTION =================
-        mda_box = make_collapsible("Run Raman MDA", expanded=False)
+        # Acquisition configuration belongs to the shared MDA dock.
+        from .unified_mda import build_extension_controls, apply_prepared_positions
+        build_extension_controls(self)
+        self.apply_mda_positions_btn = QPushButton("Apply prepared positions to MDA")
+        self.apply_mda_positions_btn.clicked.connect(lambda: apply_prepared_positions(self))
+        sel_layout.addWidget(self.apply_mda_positions_btn)
+        mda_box = make_collapsible("Pixel-to-stage calibration", expanded=False)
         mda_layout = QVBoxLayout()
 
-        mda_layout.addWidget(QLabel(
-            "Prepare cell selections first; every cell layer is acquired "
-            "with the shared MDA settings."
-        ))
-
-        mda_dir_row = QHBoxLayout()
-        mda_dir_row.addWidget(QLabel("Writer output dir:"))
-        self.mda_dir_input = QLineEdit()
-        self.mda_dir_input.setText("data/run")
-        mda_dir_row.addWidget(self.mda_dir_input)
-        self.mda_overwrite_check = QCheckBox("Overwrite this folder")
-        self.mda_overwrite_check.setChecked(False)
-        self.mda_overwrite_check.setToolTip(
-            "Save directly into this writer folder and replace all of its "
-            "existing contents when the MDA starts."
-        )
-        mda_dir_row.addWidget(self.mda_overwrite_check)
-        mda_layout.addLayout(mda_dir_row)
-
-        afp_row = QHBoxLayout()
-        afp_row.addWidget(QLabel("Autofocus positions (comma-sep):"))
-        self.mda_afp_input = QLineEdit()
-        self.mda_afp_input.setText("")
-        self.mda_afp_input.setPlaceholderText("(blank = from selection)")
-        afp_row.addWidget(self.mda_afp_input)
-        mda_layout.addLayout(afp_row)
-
-        imgp_row = QHBoxLayout()
-        imgp_row.addWidget(QLabel("Imaging positions (comma-sep):"))
-        self.mda_imgp_input = QLineEdit()
-        self.mda_imgp_input.setText("")
-        self.mda_imgp_input.setPlaceholderText("(blank = same as autofocus p)")
-        imgp_row.addWidget(self.mda_imgp_input)
-        mda_layout.addLayout(imgp_row)
-
-        af_range_row = QHBoxLayout()
-        self._af_range_label = QLabel("Autofocus search range:")
-        af_range_row.addWidget(self._af_range_label)
-        self.mda_af_range_input = QDoubleSpinBox()
-        self.mda_af_range_input.setRange(0.1, 1000)
-        self.mda_af_range_input.setValue(6)
-        self.mda_af_range_input.setDecimals(2)
-        self.mda_af_range_input.setSingleStep(0.5)
-        af_range_row.addWidget(self.mda_af_range_input)
-        mda_layout.addLayout(af_range_row)
-
-        # Coarse autofocus search points (all autofocus objects)
-        search_pts_row = QHBoxLayout()
-        self._search_pts_label = QLabel("Autofocus search pts:")
-        search_pts_row.addWidget(self._search_pts_label)
-        self.mda_search_pts_input = QSpinBox()
-        self.mda_search_pts_input.setRange(2, 500)
-        self.mda_search_pts_input.setValue(8)
-        search_pts_row.addWidget(self.mda_search_pts_input)
-        mda_layout.addLayout(search_pts_row)
-
-        # Laser autofocus FINE scan range
-        fine_range_row = QHBoxLayout()
-        self._fine_range_label = QLabel("Laser fine search range (+/- um):")
-        fine_range_row.addWidget(self._fine_range_label)
-        self.mda_fine_range_input = QDoubleSpinBox()
-        self.mda_fine_range_input.setRange(0.1, 1000)
-        self.mda_fine_range_input.setValue(1.5)
-        self.mda_fine_range_input.setDecimals(2)
-        self.mda_fine_range_input.setSingleStep(0.5)
-        fine_range_row.addWidget(self.mda_fine_range_input)
-        mda_layout.addLayout(fine_range_row)
-
-        # Laser autofocus FINE scan points
-        fine_pts_row = QHBoxLayout()
-        self._fine_pts_label = QLabel("Laser fine search pts:")
-        fine_pts_row.addWidget(self._fine_pts_label)
-        self.mda_fine_pts_input = QSpinBox()
-        self.mda_fine_pts_input.setRange(2, 500)
-        self.mda_fine_pts_input.setValue(8)
-        fine_pts_row.addWidget(self.mda_fine_pts_input)
-        mda_layout.addLayout(fine_pts_row)
-
-        # Show/hide autofocus fields based on the selected autofocus object.
-        self.sel_af_combo.currentTextChanged.connect(self._toggle_autofocus_fields)
-        self._toggle_autofocus_fields(self.sel_af_combo.currentText())
-
-        # Segment-and-track toggle (independent of autofocus)
-        self.mda_seg_track_check = QCheckBox(
-            "Segment and track (update aiming)"
-        )
-        self.mda_seg_track_check.setChecked(False)
-        self.mda_seg_track_check.toggled.connect(self._toggle_seg_track_fields)
-        mda_layout.addWidget(self.mda_seg_track_check)
-        # Seg-track options (shown only when the box is checked)
-        seg_ch_row = QHBoxLayout()
-        self._seg_ch_label = QLabel("Segment channel:")
-        seg_ch_row.addWidget(self._seg_ch_label)
-        self.mda_seg_ch_combo = QComboBox()
-        self.mda_seg_ch_combo.addItem("BF")
-        seg_ch_row.addWidget(self.mda_seg_ch_combo)
-        mda_layout.addLayout(seg_ch_row)
-        seg_scale_row = QHBoxLayout()
-        self._seg_scale_label = QLabel("Image rescale factor:")
-        seg_scale_row.addWidget(self._seg_scale_label)
-        self.mda_seg_scale_input = QDoubleSpinBox()
-        self.mda_seg_scale_input.setRange(0.1, 100.0)
-        self.mda_seg_scale_input.setValue(2.0)
-        self.mda_seg_scale_input.setDecimals(1)
-        self.mda_seg_scale_input.setSingleStep(0.5)
-        seg_scale_row.addWidget(self.mda_seg_scale_input)
-        mda_layout.addLayout(seg_scale_row)
-        
-        # Cellpose model dropdown
-        seg_model_row = QHBoxLayout()
-        self._seg_model_label = QLabel("Cellpose model:")
-        seg_model_row.addWidget(self._seg_model_label)
-        self.mda_seg_model_combo = QComboBox()
-        model_names = _cellpose_model_names()
-        for model_name in model_names:
-            self.mda_seg_model_combo.addItem(model_name, model_name)
-        if "cyto2" in model_names:
-            self.mda_seg_model_combo.setCurrentText("cyto2")
-        self.mda_seg_model_browse = QPushButton("...")
-        self.mda_seg_model_browse.setFixedWidth(30)
-        self.mda_seg_model_browse.setToolTip(
-            "Select a user-trained Cellpose weights file"
-        )
-        self.mda_seg_model_browse.clicked.connect(
-            lambda _checked=False: self.browse_cellpose_model(
-                self.mda_seg_model_combo
-            )
-        )
-        seg_model_row.addWidget(self.mda_seg_model_combo)
-        seg_model_row.addWidget(self.mda_seg_model_browse)
-        mda_layout.addLayout(seg_model_row)
-        # Expected object diameter passed to Cellpose
-        seg_diameter_row = QHBoxLayout()
-        self._seg_diameter_label = QLabel("Cell diameter (px):")
-        seg_diameter_row.addWidget(self._seg_diameter_label)
-        self.mda_seg_diameter_input = QDoubleSpinBox()
-        self.mda_seg_diameter_input.setRange(0.0, 500.0)
-        self.mda_seg_diameter_input.setValue(15.0)
-        self.mda_seg_diameter_input.setDecimals(1)
-        self.mda_seg_diameter_input.setSpecialValueText(
-            "Model training diameter"
-        )
-        self.mda_seg_diameter_input.setToolTip(
-            "Expected cell diameter in pixels in the original segmentation "
-            "image. Set to 0 to use the diameter stored with the Cellpose "
-            "model."
-        )
-        seg_diameter_row.addWidget(self.mda_seg_diameter_input)
-        mda_layout.addLayout(seg_diameter_row)
-        # Crop-around-mask dropdown
-        seg_crop_row = QHBoxLayout()
-        self._seg_crop_label = QLabel("Crop image around mask:")
-        seg_crop_row.addWidget(self._seg_crop_label)
-        self.mda_seg_crop_combo = QComboBox()
-        self.mda_seg_crop_combo.addItems(["True", "False"])
-        seg_crop_row.addWidget(self.mda_seg_crop_combo)
-        mda_layout.addLayout(seg_crop_row)
-        # Tracking config file
-        seg_track_cfg_row = QHBoxLayout()
-        self._seg_track_cfg_label = QLabel("Tracking config (.json):")
-        seg_track_cfg_row.addWidget(self._seg_track_cfg_label)
-        self.mda_track_cfg_input = QLineEdit()
-        self.mda_track_cfg_input.setText("particle_config.json")
-        self.mda_track_cfg_input.setPlaceholderText("particle_config.json")
-        self._seg_track_cfg_browse = QPushButton("...")
-        self._seg_track_cfg_browse.setFixedWidth(30)
-        self._seg_track_cfg_browse.clicked.connect(self.browse_tracking_cfg)
-        seg_track_cfg_row.addWidget(self.mda_track_cfg_input)
-        seg_track_cfg_row.addWidget(self._seg_track_cfg_browse)
-        mda_layout.addLayout(seg_track_cfg_row)
-        # hidden until seg-track is checked
-        self._toggle_seg_track_fields(False)
-
-        mda_exp_row = QHBoxLayout()
-        mda_exp_row.addWidget(QLabel("Exposure per cell (ms):"))
-        self.mda_exp_input = QDoubleSpinBox()
-        self.mda_exp_input.setRange(1, 1_000_000)
-        self.mda_exp_input.setValue(1000)
-        self.mda_exp_input.setDecimals(1)
-        mda_exp_row.addWidget(self.mda_exp_input)
-        mda_layout.addLayout(mda_exp_row)
-
-        loops_row = QHBoxLayout()
-        loops_row.addWidget(QLabel("Loops (time points):"))
-        self.mda_loops_input = QSpinBox()
-        self.mda_loops_input.setRange(1, 1_000_000)
-        self.mda_loops_input.setValue(1)
-        loops_row.addWidget(self.mda_loops_input)
-        mda_layout.addLayout(loops_row)
-
-        interval_row = QHBoxLayout()
-        interval_row.addWidget(QLabel("Interval (s):"))
-        self.mda_interval_input = QDoubleSpinBox()
-        self.mda_interval_input.setRange(0.0, 1_000_000)
-        self.mda_interval_input.setValue(0)
-        self.mda_interval_input.setDecimals(1)
-        interval_row.addWidget(self.mda_interval_input)
-        mda_layout.addLayout(interval_row)
-
-        delay_row = QHBoxLayout()
-        delay_row.addWidget(QLabel("Start delay (s):"))
-        self.mda_delay_input = QDoubleSpinBox()
-        self.mda_delay_input.setRange(0.0, 1_000_000)
-        self.mda_delay_input.setValue(0)
-        self.mda_delay_input.setDecimals(1)
-        delay_row.addWidget(self.mda_delay_input)
-        mda_layout.addLayout(delay_row)
-
-        # Refocus / re-segment cadence: run autofocus AND segment-and-track
-        # only every Nth timepoint (1 = every timepoint).
-        refocus_row = QHBoxLayout()
-        refocus_row.addWidget(QLabel("Refocus & segment every (timepoints):"))
-        self.mda_refocus_input = QSpinBox()
-        self.mda_refocus_input.setRange(0, 1_000_000)
-        self.mda_refocus_input.setValue(0)
-        refocus_row.addWidget(self.mda_refocus_input)
-        mda_layout.addLayout(refocus_row)
-
-        zrel_row = QHBoxLayout()
-        zrel_row.addWidget(QLabel("Z relative (comma-sep um):"))
-        self.mda_zrel_input = QLineEdit()
-        self.mda_zrel_input.setText("0")
-        self.mda_zrel_input.setPlaceholderText("e.g. 0, 3.33")
-        zrel_row.addWidget(self.mda_zrel_input)
-        mda_layout.addLayout(zrel_row)
-
-        rz_row = QHBoxLayout()
-        rz_row.addWidget(QLabel("Raman z indices (None = off):"))
-        self.mda_rz_input = QLineEdit()
-        self.mda_rz_input.setText("0")
-        self.mda_rz_input.setPlaceholderText("e.g. 0, 1 or None")
-        rz_row.addWidget(self.mda_rz_input)
-        mda_layout.addLayout(rz_row)
-
-        mda_layout.addWidget(QLabel(
-            "Acquisition channels (channel / exposure / Z offset):"
-        ))
-        self.mda_channel_rows_layout = QVBoxLayout()
-        mda_layout.addLayout(self.mda_channel_rows_layout)
-
-        self.mda_add_channel_btn = QPushButton("+ Add channel")
-        self.mda_add_channel_btn.clicked.connect(
-            lambda: self._add_mda_channel_row()
-        )
-        mda_layout.addWidget(self.mda_add_channel_btn)
-
-        mda_btns_row = QHBoxLayout()
-        self.run_mda_btn = QPushButton("Run Raman MDA")
-        self.run_mda_btn.clicked.connect(self.run_raman_mda)
-        self.stop_mda_btn = QPushButton("Stop")
-        self.stop_mda_btn.clicked.connect(self.stop_raman_mda)
-        mda_btns_row.addWidget(self.run_mda_btn, 3)
-        mda_btns_row.addWidget(self.stop_mda_btn, 1)
-
-        mda_layout.addLayout(mda_btns_row)
-
-        self.mda_live_eta_label = QLabel("Live ETA: --")
-        self.mda_live_eta_label.setWordWrap(True)
-        mda_layout.addWidget(self.mda_live_eta_label)
-
-        # --- separator ---
-        sep = QLabel("-" * 45)
-        sep.setAlignment(Qt.AlignCenter)
-        mda_layout.addWidget(sep)
-
-        self.view_acquisition_btn = QPushButton("Open saved acquisition")
-        self.view_acquisition_btn.clicked.connect(
-            self.open_acquisition_viewer
-        )
-        mda_layout.addWidget(self.view_acquisition_btn)
- 
         # --- pixel-to-stage calibration ---
         self.px2stage_check = QCheckBox("Pixel-to-stage calibration")
         self.px2stage_check.setChecked(False)
@@ -2093,17 +1815,16 @@ class HardwareWidget(QWidget):
         x_spacing = 0.0 if nx == 1 else x_span / (nx - 1)
         y_spacing = 0.0 if ny == 1 else y_span / (ny - 1)
         positions = nx * ny
-        repeats = int(self.grid_repeats_input.value())
-        return nx, ny, positions, repeats, x_span, y_span, x_spacing, y_spacing
+        return nx, ny, positions, x_span, y_span, x_spacing, y_spacing
 
     def _update_grid_size_preview(self, _value=None):
         """Refresh the compact grid-size readout as controls change."""
         try:
-            nx, ny, positions, repeats, *_rest = self._grid_size_preview()
+            nx, ny, positions, *_rest = self._grid_size_preview()
             order = self.grid_scan_order_combo.currentText()
             self.grid_size_label.setText(
                 f"Grid: {nx} x {ny} = {positions:,} positions; "
-                f"{positions * repeats:,} acquisition points; {order}"
+                f"{order}; frames per point configured in MDA"
             )
         except ValueError:
             self.grid_size_label.setText(
@@ -2113,7 +1834,7 @@ class HardwareWidget(QWidget):
     def _show_grid_size_preview(self):
         """Open a quick summary of the currently defined grid."""
         try:
-            (nx, ny, positions, repeats, x_span, y_span,
+            (nx, ny, positions, x_span, y_span,
              x_spacing, y_spacing) = self._grid_size_preview()
         except ValueError:
             QMessageBox.warning(
@@ -2127,8 +1848,7 @@ class HardwareWidget(QWidget):
             f"Grid shape: {nx} x {ny}\n"
             f"Scan order: {self.grid_scan_order_combo.currentText()}\n"
             f"Stage positions: {positions:,}\n"
-            f"Points per position: {repeats}\n"
-            f"Total acquisition points: {positions * repeats:,}\n\n"
+            "Frames per point: configured in MDA\n\n"
             f"X span: {x_span:.3f} um; spacing: {x_spacing:.3f} um\n"
             f"Y span: {y_span:.3f} um; spacing: {y_spacing:.3f} um",
         )
@@ -2261,7 +1981,7 @@ class HardwareWidget(QWidget):
         - other : show coarse range/pts only (fine is laser-specific).
         """
         method = (method or "").lower()
-        has_autofocus = method not in ("none", "")
+        has_autofocus = method not in ("none", "", "off", "hardware")
         is_laser = method == "laser"
 
         # coarse fields: shown for any real autofocus object
@@ -2279,7 +1999,7 @@ class HardwareWidget(QWidget):
     def _reapply_toggles(self):
         self._toggle_seg_track_fields(self.mda_seg_track_check.isChecked())
         self._toggle_zscan_fields(self.scan_zscan_check.isChecked())
-        self._toggle_autofocus_fields(self.sel_af_combo.currentText())
+        self._toggle_autofocus_fields(self.mda_af_mode_combo.currentText())
         self._toggle_px2stage_fields(self.px2stage_check.isChecked())
         self._toggle_recal_fields(self.recal_check.isChecked())
         self._toggle_grid_definition_fields()
@@ -2342,101 +2062,6 @@ class HardwareWidget(QWidget):
         if entry in self.channel_rows:
             self.channel_rows.remove(entry)
 
-    def _add_mda_channel_row(
-        self, *, channel=None, exposure=10.0, z_offset=0.0
-    ):
-        """Append a channel row to the MDA section."""
-        row = QHBoxLayout()
-        combo = QComboBox()
-        combo.setEditable(False)
-        try:
-            available_all = (
-                list(self.core.getAvailableConfigs("Channel"))
-                if self.core else []
-            )
-        except Exception:
-            available_all = []
-        if available_all:
-            combo.addItems(available_all)
-            if channel is None:
-                used = {
-                    entry["combo"].currentText()
-                    for entry in self.mda_channel_rows
-                }
-                if "RM" in available_all and "RM" not in used:
-                    channel = "RM"
-                else:
-                    channel = next(
-                        (name for name in available_all if name not in used),
-                        available_all[0],
-                    )
-            if channel and channel in available_all:
-                combo.setCurrentText(channel)
-        else:
-            combo.addItem("(connect first)")
-            combo.setEnabled(False)
-
-        exp_spin = QDoubleSpinBox()
-        exp_spin.setRange(1, 1_000_000)
-        exp_spin.setValue(exposure)
-        exp_spin.setDecimals(1)
-        exp_spin.setSuffix(" ms")
-
-        offset_spin = QDoubleSpinBox()
-        offset_spin.setRange(-1000, 1000)
-        offset_spin.setValue(z_offset)
-        offset_spin.setDecimals(2)
-        offset_spin.setSingleStep(0.1)
-        offset_spin.setSuffix(" um")
-        offset_spin.setToolTip(
-            "Added directly to the focused Z position for this channel"
-        )
-
-        remove_btn = QPushButton("x")
-        remove_btn.setFixedWidth(30)
-
-        row.addWidget(combo, 2)
-        row.addWidget(exp_spin, 1)
-        row.addWidget(offset_spin, 1)
-        row.addWidget(remove_btn)
-        self.mda_channel_rows_layout.addLayout(row)
-
-        entry = {
-            "row": row,
-            "combo": combo,
-            "exp": exp_spin,
-            "offset": offset_spin,
-            "remove": remove_btn,
-        }
-        self.mda_channel_rows.append(entry)
-        combo.currentTextChanged.connect(
-            lambda text, spin=exp_spin: self._set_mda_channel_exposure_state(
-                text, spin
-            )
-        )
-        self._set_mda_channel_exposure_state(combo.currentText(), exp_spin)
-        remove_btn.clicked.connect(lambda: self._remove_mda_channel_row(entry))
-
-    @staticmethod
-    def _set_mda_channel_exposure_state(channel, exposure_widget):
-        """RM uses the dedicated Raman exposure setting, not camera exposure."""
-        is_raman = channel == "RM"
-        exposure_widget.setEnabled(not is_raman)
-        exposure_widget.setToolTip(
-            "Uses 'Exposure per cell' above"
-            if is_raman else "Camera exposure for this channel"
-        )
-
-    def _remove_mda_channel_row(self, entry):
-        while entry["row"].count():
-            item = entry["row"].takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
-        self.mda_channel_rows_layout.removeItem(entry["row"])
-        if entry in self.mda_channel_rows:
-            self.mda_channel_rows.remove(entry)
-
     def _refresh_channel_combos(self):
         """Repopulate every channel combo with the current MM channel list."""
         available_no_bf = self._available_channels()
@@ -2463,24 +2088,6 @@ class HardwareWidget(QWidget):
                 combo.setEnabled(False)
             combo.blockSignals(False)
 
-        for entry in self.mda_channel_rows:
-            combo = entry["combo"]
-            current = combo.currentText()
-            combo.blockSignals(True)
-            combo.clear()
-            if available_all:
-                combo.addItems(available_all)
-                combo.setEnabled(True)
-                if current in available_all:
-                    combo.setCurrentText(current)
-            else:
-                combo.addItem("(connect first)")
-                combo.setEnabled(False)
-            combo.blockSignals(False)
-            self._set_mda_channel_exposure_state(
-                combo.currentText(), entry["exp"]
-            )
-        
         for combo in (self.mda_seg_ch_combo, self.sel_seg_ch_combo):
             current = combo.currentText()
             combo.blockSignals(True)
@@ -2495,48 +2102,11 @@ class HardwareWidget(QWidget):
             combo.blockSignals(False)
 
     def _prepare_for_selection(self):
-        """Stop live mode and reset Z/time plans while preserving axis order."""
+        """Stop live imaging; selection utilities construct a detached survey plan."""
         try:
             self.core.stopSequenceAcquisition()
-        except Exception as e:
-            print(f"[live mode stop] {e}")
-
-        if self.main_window is None:
-            print("[mda setup] no main_window -- can't configure MDA widget")
-            return
-
-        try:
-            from raman_mda_engine.utils import get_mda_widget_from_napari
-
-            mda_settings = get_mda_widget_from_napari(self.main_window)
-        except Exception as e:
-            print(f"[mda setup] couldn't locate MDA widget: {e}")
-            return
-
-        try:
-            from useq import ZRangeAround, TIntervalLoops
-            import datetime as _dt
-            seq = mda_settings.value()
-            new_seq = seq.replace(
-                z_plan=ZRangeAround(range=0.0, step=1.0),
-                time_plan=TIntervalLoops(
-                    interval=_dt.timedelta(seconds=0), loops=1
-                ),
-            )
-            if hasattr(mda_settings, "setValue"):
-                mda_settings.setValue(new_seq)
-                print(
-                    "[mda setup] preserved "
-                    f"axis_order={new_seq.axis_order}, z_plan, t=1loop OK"
-                )
-            else:
-                print("[mda setup] no setValue method -- can't push sequence back")
-                print(
-                    "[mda setup] available: "
-                    f"{[m for m in dir(mda_settings) if 'value' in m.lower() or 'set' in m.lower()][:10]}"
-                )
-        except Exception as e:
-            print(f"[mda setup] failed to update sequence: {e}")
+        except Exception as error:
+            print(f"[live mode stop] {error}")
 
     # -------- dataset generation --------
     def open_acquisition_viewer(self):
@@ -2905,9 +2475,10 @@ class HardwareWidget(QWidget):
 
         try:
             from pymmcore_plus import CMMCorePlus
-            from raman_control.princeton import (
-                SpectraCollector as PrincetonSpectraCollector,
-            )
+            try:
+                from raman_control.princeton import SpectraCollector as PrincetonSpectraCollector
+            except ImportError:
+                PrincetonSpectraCollector = None
             from cns_control.coordtransformer import CoordTransformer
 
             self.core = CMMCorePlus.instance()
@@ -2958,12 +2529,17 @@ class HardwareWidget(QWidget):
             lightfield_config = self.lightfield_config.text().strip()
             if not lightfield_config:
                 lightfield_config = DEFAULT_LIGHTFIELD_CONFIG
-            self.collector = PrincetonSpectraCollector(
-                lightFieldConfig=lightfield_config
-            )
-            self.daq = self.collector.daq
+            try:
+                self.collector = PrincetonSpectraCollector(lightFieldConfig=lightfield_config)
+                self.daq = self.collector.daq
+            except Exception as error:
+                self.collector = None
+                self.daq = None
+                print(f"[Raman optional] camera MDA remains available: {error}")
             self.default_engine = self.core.mda.engine
             self._connect_mda_completion_events()
+            from .unified_mda import install_unified_mda
+            install_unified_mda(self)
 
             tf = self.tf_path.text().strip()
             if tf:
@@ -2973,7 +2549,8 @@ class HardwareWidget(QWidget):
             vdm_msg = self._load_vandermonde()
 
             self._refresh_channel_combos()
-            msg = "Status: connected OK (Princeton/LightField)"
+            msg = "Status: microscope connected"
+            msg += " (Princeton/LightField ready)" if self.collector is not None else " (Raman unavailable; camera MDA ready)"
             if not cfg:
                 msg += " (no cfg loaded)"
             if not tf:
@@ -3013,6 +2590,20 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: transformer reload failed -- {e}")
 
     def disconnect(self):
+        if self._acquisition_controller is not None:
+            if self.core.mda.is_running():
+                self._acquisition_controller.stop()
+                self.status.setText("Status: stopping MDA; disconnect after it finishes")
+                return
+            self._acquisition_controller.disconnect()
+            self._acquisition_controller = None
+        if self._unified_mda is not None:
+            self._mda_extension_panel.setParent(self)
+            self._mda_extension_panel.hide()
+            self._unified_mda._disconnect()
+            self._unified_mda.control_btns._disconnect()
+            self._unified_mda.deleteLater()
+            self._unified_mda = None
         self._cancel_scheduled_raman_mda()
         self._disconnect_mda_completion_events()
         for button in (
@@ -3948,7 +3539,7 @@ class HardwareWidget(QWidget):
             }
             HardwareWidget._refresh_cell_layer_controls(self)
             self._activate_selected_cell_layer()
-            n_new = len(new_seq.stage_positions)
+            n_new = _grid_position_count(new_seq)
             log.append("\n--- selection complete ---\n")
             extra = (
                 f" ({n_new} centered positions)" if center_cell else ""
@@ -4426,7 +4017,7 @@ class HardwareWidget(QWidget):
             log.append("\n--- manual layers ready ---\n")
             self.status.setText(
                 f"Status: manual selection ready ({len(sources)} layer(s)) -- "
-                f"{hint}, then Run Raman MDA"
+                f"{hint}, then apply prepared positions to MDA"
             )
         except Exception as e:
             log.append(f"\n--- manual selection failed: {e} ---\n")
@@ -4493,11 +4084,11 @@ class HardwareWidget(QWidget):
             }
             HardwareWidget._refresh_cell_layer_controls(self)
             self._activate_selected_cell_layer()
-            n_new = len(new_seq.stage_positions)
+            n_new = _grid_position_count(new_seq)
             log.append("\n--- centering complete ---\n")
             self.status.setText(
                 f"Status: centered {n_new} cell position(s) -- "
-                "then Run Raman MDA"
+                "then apply prepared positions to MDA"
             )
         except Exception as e:
             log.append(f"\n--- centering failed: {e} ---\n")
@@ -4508,10 +4099,9 @@ class HardwareWidget(QWidget):
         return {
             "fov_x": int(self.grid_fovx_input.value()),
             "fov_y": int(self.grid_fovy_input.value()),
-            "repeats": int(self.grid_repeats_input.value()),
-            "autofocus_object": self.grid_af_combo.currentText(),
             "pattern_size": float(self.sel_sqsize_input.value()),
             "pattern_n": int(self.sel_sqn_input.value()),
+            "dense": self.grid_dense_check.isChecked(),
         }
 
     @staticmethod
@@ -4519,10 +4109,9 @@ class HardwareWidget(QWidget):
         labels = {
             "fov_x": "FOV X",
             "fov_y": "FOV Y",
-            "repeats": "repeats",
-            "autofocus_object": "autofocus",
             "pattern_size": "point-pattern size",
             "pattern_n": "point-pattern N",
+            "dense": "dense grid mode",
         }
         return [
             labels[key]
@@ -4537,7 +4126,7 @@ class HardwareWidget(QWidget):
         self.grid_region_list.clear()
         total_positions = 0
         for index, region in enumerate(self._grid_regions, start=1):
-            total_positions += len(region["sequence"].stage_positions)
+            total_positions += _grid_position_count(region["sequence"])
             self.grid_region_list.addItem(
                 f"Grid {index}: {region['summary']}"
             )
@@ -4551,17 +4140,19 @@ class HardwareWidget(QWidget):
             )
         else:
             self.grid_region_summary.setText(
-                "No grids added. FOV, repeats, autofocus, and point-pattern "
+                "No grids added. FOV and point-pattern "
                 "settings are shared across all grids."
             )
         self.grid_remove_btn.setEnabled(has_grids)
         self.grid_clear_btn.setEnabled(has_grids)
+        controller = getattr(self, "_acquisition_controller", None)
+        if hasattr(self, "apply_grid_mda_btn"):
+            self.apply_grid_mda_btn.setEnabled(has_grids and not (controller and controller.busy))
 
         for name in (
             "grid_fovx_input",
             "grid_fovy_input",
-            "grid_repeats_input",
-            "grid_af_combo",
+            "grid_dense_check",
             "sel_sqsize_input",
             "sel_sqn_input",
         ):
@@ -4582,7 +4173,7 @@ class HardwareWidget(QWidget):
         self._refresh_grid_region_list()
 
     def _rebuild_grid_selection_results(self):
-        """Flatten all grid regions into the existing single-MDA contract."""
+        """Combine grid regions, keeping dense definitions compact."""
         if not self._grid_regions:
             if (
                 self.selection_results is not None
@@ -4602,9 +4193,8 @@ class HardwareWidget(QWidget):
         self.selection_results = {
             "selection_type": "grid",
             "sources": first["sources"],
-            "autofocus_p": range(len(new_seq.stage_positions)),
+            "autofocus_p": range(_grid_position_count(new_seq)),
             "new_seq": new_seq,
-            "autofocus_object": shared_settings["autofocus_object"],
             "grid_source_settings": dict(shared_settings),
             "grid_regions": list(self._grid_regions),
             "batch": False,
@@ -4630,7 +4220,7 @@ class HardwareWidget(QWidget):
             )
         self.status.setText(
             f"Status: removed grid with "
-            f"{len(removed['sequence'].stage_positions)} positions; "
+            f"{_grid_position_count(removed['sequence'])} positions; "
             f"{len(self._grid_regions)} grid(s) remain"
         )
 
@@ -4639,6 +4229,19 @@ class HardwareWidget(QWidget):
         count = len(self._grid_regions)
         self._reset_grid_regions()
         self.status.setText(f"Status: cleared {count} grid(s)")
+
+    def apply_grids_to_mda(self):
+        """Apply the grid preparation from its own visible action button."""
+        from .unified_mda import apply_prepared_positions
+        controller = self._acquisition_controller
+        if controller is not None and controller.busy:
+            self.status.setText("Status: stop the acquisition before applying grids")
+            return
+        if not self._grid_regions:
+            self.status.setText("Status: add a grid first")
+            return
+        self._rebuild_grid_selection_results()
+        apply_prepared_positions(self)
 
     def run_grid_selection(self):
         """Build a centered or corner-defined grid of stage positions."""
@@ -4659,10 +4262,8 @@ class HardwareWidget(QWidget):
         if self.grid_sampling_combo.currentData() == "count":
             x_count = int(self.grid_xcount_input.value())
             y_count = int(self.grid_ycount_input.value())
-        repeats = int(self.grid_repeats_input.value())
         sq_size = float(self.sel_sqsize_input.value())
         sq_n = int(self.sel_sqn_input.value())
-        autofocus_object = self.grid_af_combo.currentText()
         source_settings = self._current_grid_source_settings()
         if self._grid_regions:
             expected = self._grid_regions[0]["source_settings"]
@@ -4735,29 +4336,34 @@ class HardwareWidget(QWidget):
                     fov_x=fov_x, fov_y=fov_y,
                     x_range=x_range, y_range=y_range,
                     x_step=x_step, y_step=y_step,
-                    repeats=repeats,
+                    repeats=1,
                     corner_positions=corner_positions,
                     x_count=x_count, y_count=y_count,
                     tilt_reference_points=tilt_reference_points,
                     base_z=base_z,
                     tilt_degree=tilt_degree,
                     snake_axis=snake_axis,
-                    autofocus_object=autofocus_object,
+                    include_autofocus_anchor=True,
+                    compact=self.grid_dense_check.isChecked(),
                 )
 
             nx, ny, *_grid_details = self._grid_size_preview()
-            xs = [position.x for position in region_seq.stage_positions]
-            ys = [position.y for position in region_seq.stage_positions]
-            zs = [position.z for position in region_seq.stage_positions]
-            if tilt_reference_points is not None:
-                z_detail = (
-                    f"Z corrected (degree {tilt_degree}): "
-                    f"{min(zs):.4f}..{max(zs):.4f} um"
-                )
-            elif zs[0] is None:
-                z_detail = "Z not corrected: unset (uses acquisition-start Z)"
+            if "raman_grid" in region_seq.metadata:
+                definition = region_seq.metadata["raman_grid"]["regions"][0]
+                x_min, x_max, nx = definition["x"]
+                y_min, y_max, ny = definition["y"]
+                xs, ys = [x_min, x_max], [y_min, y_max]
+                z_detail = (f"Z corrected (degree {tilt_degree})" if definition["tilt"] else
+                            "Z unset (uses acquisition-start Z)" if definition["z"] is None else
+                            f"Z: {definition['z']:.4f} um")
             else:
-                z_detail = f"Z not corrected: {zs[0]:.4f} um"
+                xs = [position.x for position in region_seq.stage_positions]
+                ys = [position.y for position in region_seq.stage_positions]
+                zs = [position.z for position in region_seq.stage_positions]
+                z_detail = (f"Z corrected (degree {tilt_degree}): {min(zs):.4f}..{max(zs):.4f} um"
+                            if tilt_reference_points is not None else
+                            "Z unset (uses acquisition-start Z)" if zs[0] is None else
+                            f"Z: {zs[0]:.4f} um")
             region = {
                 "sequence": region_seq,
                 "sources": sources,
@@ -4766,7 +4372,7 @@ class HardwareWidget(QWidget):
                 "tilt_degree": tilt_degree,
                 "snake_axis": snake_axis,
                 "summary": (
-                    f"{nx} x {ny} = {len(region_seq.stage_positions):,} "
+                    f"{nx} x {ny} = {_grid_position_count(region_seq):,} "
                     f"positions; X {min(xs):.3f}..{max(xs):.3f}; "
                     f"Y {min(ys):.3f}..{max(ys):.3f}; "
                     f"{z_detail}; "
@@ -4782,10 +4388,8 @@ class HardwareWidget(QWidget):
             self._refresh_grid_region_list()
             self.grid_region_list.setCurrentRow(len(self._grid_regions) - 1)
 
-            n_region_positions = len(region_seq.stage_positions)
-            n_total_positions = len(
-                self.selection_results["new_seq"].stage_positions
-            )
+            n_region_positions = _grid_position_count(region_seq)
+            n_total_positions = _grid_position_count(self.selection_results["new_seq"])
             log.append(
                 f"\n--- added grid {len(self._grid_regions)} "
                 f"({n_region_positions} positions) ---\n"
@@ -4793,8 +4397,8 @@ class HardwareWidget(QWidget):
             self.status.setText(
                 f"Status: added grid {len(self._grid_regions)} "
                 f"({n_region_positions} positions; {n_total_positions} total, "
-                f"{repeats} pts each at ({fov_x},{fov_y}), {z_detail}) -- "
-                "add another grid or Run Raman MDA"
+                f"aiming point at ({fov_x},{fov_y}), {z_detail}) -- "
+                "attach the Raman grid plan to MDA to acquire"
             )
         except Exception as e:
             log.append(f"\n--- stage grid failed: {e} ---\n")
@@ -4956,458 +4560,15 @@ class HardwareWidget(QWidget):
         return True
 
     def run_raman_mda(self):
-        if self._scheduled_raman_mda is not None:
-            self.status.setText(
-                "Status: an MDA is already waiting for its delayed start"
-            )
+        """Deprecated compatibility adapter for the shared MDA run control."""
+        import warnings
+        warnings.warn("Run experiments from the MDA panel", DeprecationWarning, stacklevel=2)
+        if self._unified_mda is None:
+            self.status.setText("Status: connect the microscope first")
             return
-        if self._raman_mda_pending:
-            self.status.setText("Status: an MDA is already running")
-            return
-        if self.core is None:
-            self.status.setText("Status: not connected")
-            return
-        if self.collector is None or self.transformer is None:
-            self.status.setText(
-                "Status: collector/transformer missing -- reconnect"
-            )
-            return
-        if self.selection_results is None:
-            self.status.setText(
-                "Status: no selection results -- "
-                "run automated selection first"
-            )
-            return
-
-        if self.selection_results.get("selection_type") == "grid":
-            expected = self.selection_results["grid_source_settings"]
-            mismatches = self._grid_source_setting_mismatches(
-                expected, self._current_grid_source_settings()
-            )
-            if mismatches:
-                self.status.setText(
-                    "Status: grid settings changed after grids were added "
-                    f"({', '.join(mismatches)}); restore them or clear and "
-                    "re-add the grids"
-                )
-                return
-
-        sources = self.selection_results["sources"]
-        autofocus_p = self.selection_results["autofocus_p"]
-        new_seq = self.selection_results["new_seq"]
-        cell_sources = [
-            source for source in sources if _source_has_role(source, "cell")
-        ]
-        if not cell_sources:
-            self.status.setText("Status: selection has no cell layers")
-            return
-        source_names = [source.name for source in cell_sources]
-        if len(set(source_names)) != len(source_names):
-            self.status.setText(
-                "Status: cell layer names must be unique before running MDA"
-            )
-            return
-        image_p = autofocus_p
-        afp_text = self.mda_afp_input.text().strip()
-        if afp_text and afp_text.lower() != "none":
-            try:
-                autofocus_p = np.array(
-                    self._parse_int_list(afp_text, "Autofocus positions")
-                )
-            except ValueError as e:
-                self.status.setText(f"Status: {e}")
-                return
-            n_pos = len(new_seq.stage_positions)
-            bad = [p for p in autofocus_p if p < 0 or p >= n_pos]
-            if bad:
-                self.status.setText(
-                    f"Status: autofocus positions out of range {bad} "
-                    f"(sequence has {n_pos} positions)"
-                )
-                return
-            print(f"[autofocus_p] manual override: {autofocus_p.tolist()}")
-        
-        imgp_text = self.mda_imgp_input.text().strip()
-        if imgp_text and imgp_text.lower() != "none":
-            try:
-                image_p = np.array(
-                    self._parse_int_list(imgp_text, "Imaging positions")
-                )
-            except ValueError as e:
-                self.status.setText(f"Status: {e}")
-                return
-            n_pos = len(new_seq.stage_positions)
-            bad = [p for p in image_p if p < 0 or p >= n_pos]
-            if bad:
-                self.status.setText(
-                    f"Status: imaging positions out of range {bad} "
-                    f"(sequence has {n_pos} positions)"
-                )
-                return
-            print(f"[image_p] manual override: {image_p.tolist()}")
-
-        af_choice = self.selection_results.get(
-            "autofocus_object", self.sel_af_combo.currentText()
-        )
-        autofocus_enabled = af_choice not in ("None", "none", "", None)
-        autofocus_object = af_choice if autofocus_enabled else "laser"
-        segment_and_track = self.mda_seg_track_check.isChecked()
-        batch = self.selection_results.get(
-            "batch", self.sel_batch_combo.currentText() == "True"
-        )
-        pre_acq = self.selection_results.get("pre_acq", True)
-        is_grid_selection = self.selection_results.get("selection_type") == "grid"
-        point_repeats = (
-            1 if is_grid_selection else int(self.sel_repeats_input.value())
-        )
-        frames_per_point = (
-            int(self.selection_results["grid_source_settings"]["repeats"])
-            if is_grid_selection
-            else point_repeats
-        )
-        stage_centering_model = None
-        if autofocus_enabled and autofocus_object == "laser":
-            objective = self._ensure_current_vandermonde()
-            if objective is None or self.vandermonde is None:
-                self.status.setText(
-                    "Status: laser autofocus requires a valid "
-                    "pixel-to-stage Vandermonde model for the current objective"
-                )
-                return
-            coefficients, degree = self.vandermonde
-            stage_centering_model = (
-                np.asarray(coefficients, dtype=float).copy(),
-                int(degree),
-            )
-
-        try:
-            z_relative = self._parse_float_list(
-                self.mda_zrel_input.text(), "Z relative"
-            )
-        except ValueError as e:
-            self.status.setText(f"Status: {e}")
-            return
-
-        acquisition_channels = []
-        seen_channels = set()
-        for entry in self.mda_channel_rows:
-            if not entry["combo"].isEnabled():
-                continue
-            channel_name = entry["combo"].currentText()
-            if not channel_name or channel_name == "(connect first)":
-                continue
-            if channel_name in seen_channels:
-                self.status.setText(
-                    f"Status: duplicate acquisition channel {channel_name!r}"
-                )
-                return
-            seen_channels.add(channel_name)
-            acquisition_channels.append(
-                (
-                    channel_name,
-                    float(entry["exp"].value()),
-                    float(entry["offset"].value()),
-                )
-            )
-        if not acquisition_channels:
-            self.status.setText(
-                "Status: add at least one acquisition channel "
-                "(add RM for Raman)"
-            )
-            return
-
-        raman_enabled = "RM" in seen_channels
-        if raman_enabled:
-            try:
-                raman_z_indices = _parse_raman_z_indices(
-                    self.mda_rz_input.text()
-                )
-            except ValueError as e:
-                self.status.setText(f"Status: {e}")
-                return
-            if not raman_z_indices:
-                self.status.setText(
-                    "Status: RM is selected but Raman z indices is off"
-                )
-                return
-        else:
-            raman_z_indices = []
-
-        if not raman_enabled and not _raman_free_autofocus_allowed(
-            autofocus_enabled, autofocus_object
-        ):
-            self.status.setText(
-                "Status: unsupported autofocus mode for Raman-free MDA: "
-                f"{autofocus_object}"
-            )
-            return
-
-        sq_size = float(self.sel_sqsize_input.value())
-        sq_n = int(self.sel_sqn_input.value())
-        if (
-            raman_enabled
-            and batch
-            and self._make_point_transformer(sq_size, sq_n).multiplier < 2
-        ):
-            self.status.setText(
-                "Status: batch mode needs a pattern with >= 2 points "
-                "(increase N)"
-            )
-            return
-
-        out_dir = self._output_path(
-            self.mda_dir_input.text().strip() or "data/run"
-        )
-        overwrite_output = self.mda_overwrite_check.isChecked()
-        af_range = float(self.mda_af_range_input.value())
-        search_pts = int(self.mda_search_pts_input.value())
-        fine_search_range = float(self.mda_fine_range_input.value())
-        fine_search_pts = int(self.mda_fine_pts_input.value())
-        total_exp = float(self.mda_exp_input.value())
-        loops = int(self.mda_loops_input.value())
-        interval = float(self.mda_interval_input.value())
-        delay = float(self.mda_delay_input.value())
-        refocus_every = int(self.mda_refocus_input.value())
-        segment_channel = self.mda_seg_ch_combo.currentText() or "BF"
-        seg_scale = float(self.mda_seg_scale_input.value())
-        cell_diameter = _cellpose_diameter(
-            self.mda_seg_diameter_input.value()
-        )
-        try:
-            cellpose_model = self._selected_cellpose_model(
-                self.mda_seg_model_combo
-            )
-        except (FileNotFoundError, ValueError) as error:
-            self.status.setText(f"Status: {error}")
-            return
-        segment_crop = self.mda_seg_crop_combo.currentText() == "True"
-        tracking_config = self.mda_track_cfg_input.text().strip() or "particle_config.json"
-        cy = int(self.sel_cy_input.value())
-        cx = int(self.sel_cx_input.value())
-        circle_center=(cx,cy)
-        # print(circle_center)
-        circle_radius = int(self.sel_r_input.value())
-        # print(circle_radius)
-
-        log = LogWindow(title="Raman MDA log")
-        log.show()
-        self._plot_windows.append(log)
-
-        self.status.setText("Status: starting Raman MDA...")
-        self.repaint()
-
-        try:
-            import datetime as _dt
-            from useq import Channel, TIntervalLoops, ZRelativePositions
-            from raman_mda_engine import RamanAcquisitionWriter, RamanEngine
-            from cns_control.utils import set_up_new_seq
-
-            try:
-                img_x = int(self.core.getImageWidth())
-                img_y = int(self.core.getImageHeight())
-            except Exception:
-                img_x, img_y = self._get_image_xy()
-
-            with _StdoutRedirector(log):
-                engine = RamanEngine(
-                    mmc=self.core,
-                    spectra_collector=self.collector,
-                    transformer=self.transformer,
-                    batch=batch,
-                    pre_acq=pre_acq,
-                    autofocus=autofocus_enabled,
-                    autofocus_p=autofocus_p,
-                    image_p=image_p,
-                    autofocus_object=autofocus_object,
-                    segment_and_track=segment_and_track,
-                    scale=seg_scale,
-                    segment_channel=segment_channel,
-                    cellpose_model=cellpose_model,
-                    cell_diameter=cell_diameter,
-                    segment_crop=segment_crop,
-                    tracking_config=tracking_config,
-                    autofocus_search_range=af_range,
-                    search_pts=search_pts,
-                    fine_search_range=fine_search_range,
-                    fine_search_pts=fine_search_pts,
-                    refocus_every=refocus_every,
-                    image_x=img_x,
-                    image_y=img_y,
-                    skip_imaging_for_same_pos=True,
-                    config_file = self.mm_config,
-                    circle_center=circle_center,
-                    circle_radius=circle_radius,
-                    stage_centering_model=stage_centering_model,
-                    point_repeats=point_repeats,
-                )
-                engine.aiming_sources = sources
-
-                if raman_enabled:
-                    point_transformer = self._make_point_transformer(
-                        sq_size, sq_n
-                    )
-                    if batch:
-                        final_seq = set_up_new_seq(
-                            self.main_window, point_transformer, engine,
-                            seq=new_seq, total_exposure=total_exp,
-                            batch=batch, z_plan="middle",
-                        )
-                    else:
-                        final_seq = set_up_new_seq(
-                            self.main_window, point_transformer, engine,
-                            seq=new_seq,
-                            total_exposure=(
-                                total_exp * point_transformer.multiplier
-                            ),
-                            batch=batch, z_plan="middle",
-                        )
-                else:
-                    metadata = dict(new_seq.metadata)
-                    metadata.pop("raman", None)
-                    final_seq = new_seq.replace(
-                        metadata=metadata,
-                    )
-
-                time_interval = _dt.timedelta(seconds=interval)
-                if final_seq.time_plan is None:
-                    new_time_plan = TIntervalLoops(
-                        loops=loops,
-                        interval=time_interval,
-                    )
-                else:
-                    new_time_plan = final_seq.time_plan.replace(
-                        loops=loops,
-                        interval=time_interval,
-                    )
-                new_z_plan = ZRelativePositions(relative=z_relative)
-
-                template = (
-                    final_seq.channels[0]
-                    if final_seq.channels
-                    else Channel(config="BF")
-                )
-                acquisition_channel_objs = tuple(
-                    template.replace(
-                        config=channel_name,
-                        exposure=(
-                            None if channel_name == "RM" else channel_exposure
-                        ),
-                    )
-                    for (
-                        channel_name,
-                        channel_exposure,
-                        _channel_offset,
-                    ) in acquisition_channels
-                )
-
-                metadata = dict(final_seq.metadata)
-                metadata["channel_z_offsets_um"] = {
-                    channel_name: channel_offset
-                    for (
-                        channel_name,
-                        _channel_exposure,
-                        channel_offset,
-                    ) in acquisition_channels
-                }
-                if raman_enabled:
-                    raman_metadata = dict(metadata.get("raman") or {})
-                    raman_metadata["z"] = list(raman_z_indices)
-                    raman_metadata["cell_layers"] = _cell_layer_metadata(sources)
-                    raman_metadata["frames_per_point"] = frames_per_point
-                    metadata["raman"] = raman_metadata
-                final_seq = final_seq.replace(
-                    time_plan=new_time_plan,
-                    z_plan=new_z_plan,
-                    channels=acquisition_channel_objs,
-                    metadata=metadata,
-                )
-
-                estimate = estimate_mda_time(
-                    final_seq,
-                    sources,
-                    engine.default_rm_exposure,
-                    raman_z_indices,
-                    image_p,
-                    point_repeats=point_repeats,
-                )
-                scheduled_start = self._show_mda_time_preview(
-                    estimate,
-                    engine.default_rm_exposure,
-                    delay,
-                    output_dir=out_dir,
-                    overwrite=overwrite_output,
-                )
-
-                self.core.register_mda_engine(engine)
-                self._connect_raman_visualization(engine)
-
-                previous_writer = self.mda_writer
-                if previous_writer is not None and not getattr(
-                    previous_writer, "closed", True
-                ):
-                    previous_writer.disconnect()
-                self.mda_writer = RamanAcquisitionWriter(
-                    out_dir,
-                    core=self.core,
-                    wavenumbers=self.collector.get_wavenumbers(),
-                    image_positions=image_p,
-                    batch=batch,
-                    overwrite=overwrite_output,
-                )
-
-                print(
-                    f"Prepared MDA: {loops} loops, interval={interval}s, "
-                    f"start_delay={delay}s, "
-                    f"axis_order={final_seq.axis_order}, "
-                    f"z_rel={z_relative}, raman_z={raman_z_indices}, "
-                    f"autofocus={autofocus_enabled} ({af_choice}), "
-                    f"segment_and_track={segment_and_track}, "
-                    f"search_pts={search_pts}, fine_range={fine_search_range}, "
-                    f"fine_pts={fine_search_pts}, refocus_every={refocus_every}, "
-                    f"image=({img_x}x{img_y}), "
-                    "channels="
-                    f"{[(ch, offset) for ch, _, offset in acquisition_channels]}"
-                )
-                print(
-                    f"[debug] engine._autofocus={engine._autofocus}, "
-                    f"engine._segment_and_track={engine._segment_and_track}"
-                )
-                mode = (
-                    "Raman MDA" if raman_enabled else "Raman-free MDA"
-                )
-                self._schedule_raman_mda_start(
-                    final_seq,
-                    delay,
-                    scheduled_start,
-                    mode,
-                    log,
-                    estimate.acquisition_count,
-                )
-        except Exception as e:
-            if self.mda_writer is not None and not getattr(
-                self.mda_writer, "closed", True
-            ):
-                self.mda_writer.close(status="failed")
-            self._raman_mda_pending = False
-            self._raman_mda_writer = None
-            log.append(f"\n--- MDA failed: {e} ---\n")
-            self.status.setText(f"Status: MDA failed -- {e}")
+        self._unified_mda.run_mda()
 
     def stop_raman_mda(self):
-        if self._cancel_scheduled_raman_mda():
-            return
-        if self.core is None:
-            self.status.setText("Status: not connected")
-            return
-        try:
-            # cancel() requests a clean stop; the MDA finishes its current
-            # event and then exits. For an immediate halt, also stop sequence
-            # acq.
-            self.core.mda.cancel()
-            try:
-                self.core.stopSequenceAcquisition()
-            except Exception:
-                pass
-            self.status.setText("Status: stop requested OK")
-        except Exception as e:
-            self.status.setText(f"Status: stop failed -- {e}")
+        """Deprecated compatibility adapter for shared cancellation."""
+        if self._acquisition_controller is not None:
+            self._acquisition_controller.stop()

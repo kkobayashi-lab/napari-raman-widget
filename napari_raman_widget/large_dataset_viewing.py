@@ -321,11 +321,6 @@ class AcquisitionIndex:
         image_files = _scan(imaging_folder, _IMAGE_RE, ImageKey)
         if not image_files and ome_folder.is_dir():
             image_files, image_channel_names = _scan_ome(ome_folder)
-        if not image_files:
-            raise FileNotFoundError(
-                "No legacy plane TIFFs or OME-TIFF acquisition files found in "
-                f"{imaging_folder}"
-            )
         sequence = None
         if sequence_file is not None:
             sequence = json.loads(sequence_file.read_text(encoding="utf-8"))
@@ -334,6 +329,12 @@ class AcquisitionIndex:
         else:
             raman_files, location_files, metadata_files = _scan_raman(
                 raman_folder
+            )
+
+        if not image_files and not raman_files:
+            raise FileNotFoundError(
+                "No legacy plane TIFFs or OME-TIFF acquisition files found in "
+                f"{imaging_folder}, and no Raman measurements found in {raman_folder}"
             )
 
         return cls(
@@ -735,6 +736,17 @@ class AcquisitionIndex:
         if self.sequence is None:
             raise ValueError("Stitching needs a useq-sequence.json file")
         positions = self.sequence.get("stage_positions") or []
+        if "raman_grid" in self.sequence.get("metadata", {}):
+            from useq import MDASequence
+            from raman_mda_engine.grid_plan import grid_count, grid_position
+            sequence = MDASequence.model_validate(self.sequence)
+            # Materialize coordinates only when an analysis explicitly requests
+            # the full stage map, never while editing or acquiring the grid.
+            return np.asarray([
+                (position.x, position.y, position.z or 0.0)
+                for index in range(grid_count(sequence))
+                for position in [grid_position(sequence, index)]
+            ], dtype=float)
         if not positions:
             raise ValueError("Sequence metadata has no stage positions")
         return np.asarray(
@@ -763,7 +775,7 @@ class AcquisitionIndex:
             "positions": len({key.p for key in image_keys}),
             "channels": sorted({key.c for key in image_keys}),
             "z_planes": sorted({key.z for key in image_keys}),
-            "image_shape": self.image_shape,
+            "image_shape": self.image_shape if image_keys else None,
         }
 
     def load_image(self, key: ImageKey) -> np.ndarray:

@@ -1,6 +1,7 @@
 # napari-raman-widget
 
-A napari dock widget for controlling the Raman microscopy rig.
+A napari application for controlling the Raman microscopy rig. Version 1.0 unifies
+camera and Raman experiments in the MDA dock. See [the migration guide](MIGRATION-1.0.md).
 
 ## What it does
 
@@ -13,10 +14,11 @@ Provides a single collapsible sidebar panel inside napari with sections for:
 - Collecting reference spectra with autofocus
 - Running spatial Raman mapping (grid scan) over a shape
 - Automated cell selection inside a mask
-- Running a Raman MDA with fluorescence channels and Z stacks
+- Preparing targets and grids for the shared MDA panel
+- Configuring and running camera, Raman, and mixed acquisitions in MDA
 
 Relative output paths (reference `.npy` files, `grid_scan_*.zarr`,
-recalibrated models, and the MDA writer directory) are resolved beneath the
+recalibrated models) are resolved beneath the
 base folder in **Data Output**. Changing it applies to the next save
 immediately and does not reconnect hardware or change the process working
 directory.
@@ -93,7 +95,8 @@ the rig.
 `napari-raman-widget` is distributed under the terms of the [BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html) license.
 # napari-raman-widget
 
-A napari dock widget for controlling the Raman microscopy rig.
+A napari application for controlling the Raman microscopy rig. Version 1.0 unifies
+camera and Raman experiments in the MDA dock. See [the migration guide](MIGRATION-1.0.md).
 
 ## What it does
 
@@ -106,7 +109,8 @@ Provides a single collapsible sidebar panel inside napari with sections for:
 - Collecting reference spectra with autofocus
 - Running spatial Raman mapping (grid scan) over a shape
 - Automated cell selection inside a mask
-- Running a Raman MDA with fluorescence channels and Z stacks
+- Preparing targets and grids for the shared MDA panel
+- Configuring and running camera, Raman, and mixed acquisitions in MDA
 
 It also includes three usability features layered on top of the panel:
 
@@ -116,7 +120,7 @@ It also includes three usability features layered on top of the panel:
   the panel's existing actions (see [AI assistant](#ai-assistant-chat-panel)).
 
 Relative output paths (reference `.npy` files, `grid_scan_*.zarr`,
-recalibrated models, and the MDA writer directory) are resolved beneath the
+recalibrated models) are resolved beneath the
 base folder in **Data Output**. Changing it applies to the next save
 immediately and does not reconnect hardware or change the process working
 directory.

@@ -235,6 +235,9 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             self.show_btn,
         ):
             widget.setEnabled(enabled)
+        if enabled and self.acquisition is not None and not self.acquisition.image_files:
+            for widget in (self.channel_combo, self.stitched_check, self.preview_size):
+                widget.setEnabled(False)
 
     def _connect_auto_refresh(self):
         """Refresh the plots after any view selection changes."""
@@ -255,7 +258,6 @@ class LargeAcquisitionViewerWindow(QMainWindow):
         if (
             self._auto_refresh_suspended
             or self.acquisition is None
-            or self.geometry is None
         ):
             return
         self._auto_refresh_timer.start()
@@ -371,14 +373,17 @@ class LargeAcquisitionViewerWindow(QMainWindow):
                 raman_folder=raman,
                 sequence_file=sequence,
             )
-            geometry = load_vandermonde_geometry(model, objective)
+            geometry = (
+                load_vandermonde_geometry(model, objective)
+                if acquisition.image_files else None
+            )
             raman_fovs = acquisition.raman_fov_source_positions
             if not raman_fovs:
                 raise FileNotFoundError(
                     f"No Raman data files found in {acquisition.raman_folder}"
                 )
 
-            first_t = min(key.t for key in acquisition.image_files)
+            first_t = min((key.t for key in acquisition.image_files), default=0)
             channels = sorted(
                 {
                     key.c
@@ -390,6 +395,8 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             for channel in channels:
                 label = _image_channel_label(acquisition, channel)
                 self.channel_combo.addItem(f"{label} (c={channel})", channel)
+            if not channels:
+                self.channel_combo.addItem("No camera measurements", None)
             self.acquisition = acquisition
             self.geometry = geometry
             self.raman_index.setRange(0, len(raman_fovs) - 1)
@@ -438,7 +445,7 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
             self.index_btn.setEnabled(True)
             self._auto_refresh_suspended = False
-        if self.acquisition is not None and self.geometry is not None:
+        if self.acquisition is not None:
             self._schedule_auto_refresh()
 
     @staticmethod
@@ -539,7 +546,7 @@ class LargeAcquisitionViewerWindow(QMainWindow):
     def show_selection(self):
         """Load and draw exactly one spectrum plus one tile or mosaic."""
         self._auto_refresh_timer.stop()
-        if self.acquisition is None or self.geometry is None:
+        if self.acquisition is None:
             self.status_label.setText("Index an acquisition first.")
             return
         self.show_btn.setEnabled(False)
@@ -567,7 +574,10 @@ class LargeAcquisitionViewerWindow(QMainWindow):
             self.image_ax.clear()
             _plot_raman_spectrum(self.spectrum_ax, *spectrum_data)
 
-            if self.stitched_check.isChecked():
+            match = None
+            if not self.acquisition.image_files:
+                pass
+            elif self.stitched_check.isChecked():
                 mosaic, marker, metadata, match = raman_stitched_preview(
                     self.acquisition,
                     raman_index,
@@ -625,7 +635,8 @@ class LargeAcquisitionViewerWindow(QMainWindow):
 
             if match is None:
                 self.image_ax.set_title(
-                    "No image contains this Raman position"
+                    "No camera measurements saved" if not self.acquisition.image_files
+                    else "No image contains this Raman position"
                 )
             self.image_ax.set_axis_off()
             self.figure.tight_layout()
