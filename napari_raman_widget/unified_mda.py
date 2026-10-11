@@ -18,6 +18,7 @@ from .experiment import (
 )
 from .mda_timing import estimate_mda_time, format_duration
 from .ui_helpers import make_collapsible
+from .grid_calibration import extend_grid_calibration
 from raman_mda_engine.grid_plan import GRID_KEY, grid_count
 
 
@@ -420,6 +421,7 @@ def install_unified_mda(owner):
             super().__init__(**kwargs)
             extend_z_editor(self.z_plan)
             extend_shutter_editor(self.keep_shutter_open)
+            self.grid_use_vandermonde, self.grid_calibration_status = extend_grid_calibration(self.grid_plan, owner)
             self.extensions_scroll = QScrollArea(self)
             self.extensions_scroll.setWidgetResizable(True)
             self.extensions_scroll.setMaximumHeight(360)
@@ -453,7 +455,10 @@ def install_unified_mda(owner):
             metadata = {**deepcopy(self._extra_metadata), **deepcopy(seq.metadata)}
             metadata[METADATA_KEY] = {
                 "schema_version": 1, "extensions": read_extensions(owner).to_dict(),
-                "targets": deepcopy(self.targets), "calibration": deepcopy(self.calibration),
+                "targets": deepcopy(self.targets), "calibration": {
+                    **deepcopy(self.calibration),
+                    "grid_use_vandermonde": self.grid_use_vandermonde.isChecked(),
+                },
             }
             # CoreConnectedMDAWidget substitutes the current stage position when
             # the native table is empty. Dense grids must retain an empty table.
@@ -470,6 +475,8 @@ def install_unified_mda(owner):
             meta = value.metadata.get(METADATA_KEY, {})
             if meta.get("schema_version", 1) != 1:
                 raise ValueError("Unsupported experiment settings version")
+            if self._ready:
+                self.grid_use_vandermonde.setChecked(meta.get("calibration", {}).get("grid_use_vandermonde", True))
             # Import legacy offsets into native channel definitions exactly once.
             offsets = value.metadata.get("channel_z_offsets_um", {})
             if offsets:

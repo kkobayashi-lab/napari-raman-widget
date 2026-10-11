@@ -111,6 +111,71 @@ def test_grid_shutter_checkbox_round_trip_and_event_behavior(owner, dense):
     assert not checkbox.isChecked()
 
 
+def test_grid_uses_vandermonde_scale_overlap_and_current_objective(owner):
+    widget, panel, app = owner
+    widget.vandermonde = (np.array([[12, 13], [0, -0.3], [0.2, 0]]), 1)
+    widget._ensure_current_vandermonde = lambda: "6"
+    panel.setValue(MDASequence(channels=["BF"], grid_plan={"rows": 2, "columns": 3, "overlap": 10}))
+    plan = panel.value().grid_plan
+    width, height = widget.core.getImageWidth(), widget.core.getImageHeight()
+    assert plan.fov_width == pytest.approx(width * 0.2)
+    assert plan.fov_height == pytest.approx(height * 0.3)
+    points = list(plan)
+    xs = sorted(set(point.x for point in points))
+    ys = sorted(set(point.y for point in points))
+    assert np.diff(xs) == pytest.approx([width * 0.2 * 0.9] * 2)
+    assert np.diff(ys) == pytest.approx([height * 0.3 * 0.9])
+    assert "objective 6" in panel.grid_calibration_status.text()
+    # Model refresh is authoritative even if imported FOV values are different.
+    saved = MDASequence.model_validate_json(panel.value().model_dump_json())
+    panel.setValue(saved)
+    widget.vandermonde = (np.array([[0, 0], [0, 0.4], [0.5, 0]]), 1)
+    widget._ensure_current_vandermonde = lambda: "7"
+    assert panel.value().grid_plan.fov_width == pytest.approx(width * 0.5)
+    assert "objective 7" in panel.grid_calibration_status.text()
+    # An objective without a model cannot keep the previous objective's scale.
+    widget.vandermonde = None
+    assert panel.value().grid_plan.fov_width == pytest.approx(width * widget.core.getPixelSizeUm())
+    assert "Micro-Manager" in panel.grid_calibration_status.text()
+
+
+@pytest.mark.parametrize("definition", [
+    {"width": 600, "height": 500, "overlap": 20},
+    {"left": -300, "right": 300, "bottom": -250, "top": 250, "overlap": 20},
+])
+def test_grid_area_and_bounds_use_calibrated_field_count(owner, definition):
+    widget, panel, app = owner
+    widget.vandermonde = (np.array([[0, 0], [0, 0.3], [0.2, 0]]), 1)
+    widget._ensure_current_vandermonde = lambda: "6"
+    panel.setValue(MDASequence(grid_plan=definition))
+    plan = panel.value().grid_plan
+    expected = MDASequence(grid_plan={
+        **definition,
+        "fov_width": widget.core.getImageWidth() * 0.2,
+        "fov_height": widget.core.getImageHeight() * 0.3,
+    }).grid_plan
+    assert list(plan) == list(expected)
+    # Objective updates refresh the preview without requiring a manual edit.
+    widget.vandermonde = (np.array([[0, 0], [0, 0.6], [0.4, 0]]), 1)
+    widget.core.events.propertyChanged.emit("Objective", "State", "6")
+    assert "Vandermonde" in panel.grid_calibration_status.text()
+    assert panel.grid_plan._fov_width == pytest.approx(widget.core.getImageWidth() * 0.4)
+    assert len(list(panel.value().grid_plan)) < len(list(plan))
+
+
+def test_grid_vandermonde_opt_out_is_saved_and_uses_core_calibration(owner):
+    widget, panel, app = owner
+    widget.vandermonde = (np.array([[0, 0], [0, 0.3], [0.2, 0]]), 1)
+    widget._ensure_current_vandermonde = lambda: "6"
+    panel.setValue(MDASequence(grid_plan={"rows": 2, "columns": 2}))
+    panel.grid_use_vandermonde.setChecked(False)
+    saved = panel.value()
+    assert saved.grid_plan.fov_width == pytest.approx(widget.core.getImageWidth() * widget.core.getPixelSizeUm())
+    panel.setValue(MDASequence.model_validate_json(saved.model_dump_json()))
+    assert not panel.grid_use_vandermonde.isChecked()
+    assert panel.value().grid_plan.fov_width == saved.grid_plan.fov_width
+
+
 def test_applying_selection_preserves_experiment_channels_z_and_time(owner):
     widget, panel, app = owner
     original = MDASequence(channels=[{"config": "BF", "exposure": 23}],
