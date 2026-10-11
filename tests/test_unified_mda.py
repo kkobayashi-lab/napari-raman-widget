@@ -364,12 +364,17 @@ def test_simulated_raman_run_streams_data_and_restores_engine(owner, tmp_path, c
         assert "raman_grid" not in panel.value().metadata
 
 
-def test_simulated_camera_only_uses_native_writer_without_raman(owner, tmp_path):
+@pytest.mark.parametrize("grid", [False, True])
+def test_simulated_camera_only_uses_run_folder_without_raman(owner, tmp_path, grid):
+    import h5py
+    from napari_raman_widget.large_dataset_viewing import AcquisitionIndex
+
     widget, panel, app = owner
     widget.collector = None
     widget.transformer = None
     widget._start_live_mda_timing = lambda count: None
-    panel.setValue(MDASequence(channels=[{"config": "BF", "exposure": 1}]))
+    panel.setValue(MDASequence(channels=[{"config": "BF", "exposure": 1}],
+                              grid_plan={"rows": 1, "columns": 2} if grid else None))
     panel.save_info.setValue({"save_dir": str(tmp_path), "save_name": "camera",
                              "format": "tiff-sequence", "should_save": True})
     controller = widget._acquisition_controller
@@ -384,8 +389,33 @@ def test_simulated_camera_only_uses_native_writer_without_raman(owner, tmp_path)
     assert not controller.busy
     assert widget.core.mda.engine is previous
     assert controller.writer is None
-    assert list(tmp_path.rglob("*.tif")) or list(tmp_path.rglob("*.tiff"))
-    assert not list(tmp_path.rglob("raman.h5"))
+    run = tmp_path / "camera"
+    assert (run / "useq-sequence.json").is_file()
+    assert list(run.rglob("*.tiff"))
+    with h5py.File(run / "raman.h5") as store:
+        assert store.attrs["completion_status"] == "completed"
+        assert store["raman/events"].shape[0] == 0
+    acquisition = AcquisitionIndex.build(run)
+    assert len(acquisition.image_keys) == (2 if grid else 1)
+    assert acquisition.load_image(acquisition.image_keys[0]).shape == (512, 512)
+
+
+@pytest.mark.parametrize("fmt", ["ome-zarr", "ome-tiff", "tiff-sequence"])
+def test_save_format_is_hidden_and_imported_formats_use_run_folder(owner, tmp_path, fmt):
+    widget, panel, app = owner
+    panel.save_info.setValue({"save_dir": str(tmp_path), "save_name": "camera",
+                             "format": fmt, "should_save": True})
+    panel.setValue(MDASequence.model_validate_json(panel.value().model_dump_json()))
+    panel.lock(True)
+    panel.lock(False)
+    combo = panel.save_info._writer_combo
+    assert combo.isHidden()
+    assert not combo.isEnabled()
+    assert combo.currentText() == "tiff-sequence"
+    assert panel.save_info.currentPath() == tmp_path / "camera"
+    assert panel.save_info.name_label.text() == "Subfolder:"
+    assert combo.findText(fmt) >= 0
+    assert "one run folder" in panel.output_description.text()
 
 
 @pytest.mark.parametrize("dense", [False, True])

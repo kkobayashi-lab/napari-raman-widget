@@ -2483,6 +2483,9 @@ class HardwareWidget(QWidget):
 
             self.core = CMMCorePlus.instance()
 
+            from cns_control.utils import stop_live_acquisitions
+            stop_live_acquisitions(self.core)
+            _uncheck_stage_polling(self.main_window)
             try:
                 self.core.unloadAllDevices()
                 time.sleep(0.5)
@@ -2590,11 +2593,19 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: transformer reload failed -- {e}")
 
     def disconnect(self):
-        if self._acquisition_controller is not None:
-            if self.core.mda.is_running():
-                self._acquisition_controller.stop()
-                self.status.setText("Status: stopping MDA; disconnect after it finishes")
+        if self._acquisition_controller is not None and self.core.mda.is_running():
+            self._acquisition_controller.stop()
+            self.status.setText("Status: stopping MDA; disconnect after it finishes")
+            return
+        if self.core is not None:
+            try:
+                from cns_control.utils import stop_live_acquisitions
+                stop_live_acquisitions(self.core)
+                _uncheck_stage_polling(self.main_window)
+            except Exception as error:
+                self.status.setText(f"Status: disconnect failed -- {error}")
                 return
+        if self._acquisition_controller is not None:
             self._acquisition_controller.disconnect()
             self._acquisition_controller = None
         if self._unified_mda is not None:

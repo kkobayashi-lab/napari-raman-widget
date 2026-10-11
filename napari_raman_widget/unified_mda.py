@@ -120,7 +120,7 @@ def build_extension_controls(owner):
 
     run = section("Run status")
     field(run, "mda_delay_input", "Start delay (s)", 0.0)
-    field(run, "mda_overwrite_check", "Overwrite combined acquisition folder", False)
+    field(run, "mda_overwrite_check", "Overwrite acquisition folder", False)
     owner.mda_live_eta_label = QLabel("Live ETA: --")
     owner.mda_live_eta_label.setWordWrap(True)
     run.addRow(owner.mda_live_eta_label)
@@ -237,16 +237,14 @@ class AcquisitionController(QObject):
         estimate = estimate_mda_time(prepared.sequence, prepared.sources, prepared.raman_exposure,
                                      prepared.raman_planes, prepared.image_positions,
                                      point_repeats=ext.raman.repeats, batch=ext.raman.batch)
-        combined = prepared.raman_enabled or ext.tracking.enabled or GRID_KEY in prepared.sequence.metadata
+        requires_save = prepared.raman_enabled or ext.tracking.enabled or GRID_KEY in prepared.sequence.metadata
         output = self.panel.save_info.currentPath().expanduser().resolve() if self.panel.save_info.isChecked() else None
-        if combined and output is None:
+        if requires_save and output is None:
             raise ValueError("Enable Save Acquisition for Raman or tracked runs")
         if output is not None and not ext.overwrite:
             output = self.panel.get_next_available_path(output)
-        if output is not None and combined and output.exists() and not output.is_dir():
-            raise ValueError("Combined output must be a folder")
-        if ext.overwrite and not combined:
-            raise ValueError("Overwrite is available only for combined acquisition folders")
+        if output is not None and output.exists() and not output.is_dir():
+            raise ValueError("Acquisition output must be a folder")
         message = (f"Output: {output or 'not saved'}\n"
                    f"Camera frames: {estimate.imaging_frames:,}\nRaman collections: {estimate.raman_points:,}\n"
                    f"Estimated duration: {format_duration(estimate.duration_seconds)}\n"
@@ -254,7 +252,7 @@ class AcquisitionController(QObject):
                    f"Hardware autofocus: {bool(native_af)}; custom autofocus: {'off' if native_af else ext.autofocus.mode}\n"
                    f"Tracking: {ext.tracking.enabled}\n\n"
                    "Autofocus, tracking, and motion add time. Their internal images are not saved as camera channels.")
-        if ext.overwrite and output.exists():
+        if ext.overwrite and output is not None and output.exists():
             message += f"\n\nOverwrite permanently replaces all contents of {output}."
         if QMessageBox.question(self.panel, "Review acquisition", message,
                                 QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel) != QMessageBox.Ok:
@@ -263,7 +261,7 @@ class AcquisitionController(QObject):
         if owner.core.mda.is_running() or owner.core is not self.panel._mmc:
             raise ValueError("Microscope state changed during review")
         self._hardware_snapshot = (owner.collector, deepcopy(owner.transformer))
-        self.pending = (prepared, output, estimate, stage_model, combined)
+        self.pending = (prepared, output, estimate, stage_model)
         self.panel.lock(True)
         owner._scheduled_raman_mda = {"sequence": prepared.sequence}
         owner.mda_live_eta_label.setText("Live ETA: waiting for scheduled start")
@@ -282,7 +280,7 @@ class AcquisitionController(QObject):
         if self.pending is None:
             return
         owner = self.owner
-        prepared, output, estimate, stage_model, combined = self.pending
+        prepared, output, estimate, stage_model = self.pending
         self.pending = None
         owner._scheduled_raman_mda = None
         ext = prepared.extensions
@@ -326,7 +324,7 @@ class AcquisitionController(QObject):
             else:
                 engine = MDAEngine(owner.core)
             owner.core.register_mda_engine(engine)
-            if combined:
+            if output is not None:
                 from raman_mda_engine import RamanAcquisitionWriter
                 self.writer = RamanAcquisitionWriter(
                     output, core=owner.core,
@@ -341,7 +339,7 @@ class AcquisitionController(QObject):
             owner._start_live_mda_timing(estimate.acquisition_count)
             owner.mda_dir_input.setText(str(output or ""))
             self.cancelled = False
-            owner.core.run_mda(prepared.sequence, output=None if combined else output)
+            owner.core.run_mda(prepared.sequence, output=None)
             owner.status.setText("Status: MDA started")
         except Exception:
             self.finish(reason="failed")
@@ -436,7 +434,10 @@ def install_unified_mda(owner):
             self.detach_grid_btn = QPushButton("Detach dense Raman grid")
             self.detach_grid_btn.clicked.connect(self.detach_grid)
             self.layout().insertWidget(3, self.detach_grid_btn)
-            self._native_format = self.save_info._writer_combo.currentText()
+            # Keep upstream writers available, but expose one folder layout here.
+            self.save_info._writer_combo.currentTextChanged.connect(self._use_run_folder)
+            self._use_run_folder()
+            self.save_info.layout().addWidget(self.save_info.save_name, 1, 1, 1, 3)
             owner._mda_extension_panel.show()
             self._ready = True
             self.control_btns.cancel_btn.released.disconnect()
@@ -447,6 +448,13 @@ def install_unified_mda(owner):
                     if hasattr(control, signal):
                         getattr(control, signal).connect(lambda *_: self.valueChanged.emit())
                         break
+
+        def _use_run_folder(self, *_args):
+            combo = self.save_info._writer_combo
+            combo.hide()
+            combo.setEnabled(False)
+            if combo.currentText() != "tiff-sequence":
+                combo.setCurrentText("tiff-sequence")
 
         def value(self):
             seq = super().value()
@@ -540,20 +548,9 @@ def install_unified_mda(owner):
                                           "Positions are generated during acquisition; the native position table stays empty.")
             try:
                 plan = prepare_acquisition(sequence, read_extensions(owner), self.targets)
-                combined = plan.raman_enabled or plan.extensions.tracking.enabled or dense
-                combo = self.save_info._writer_combo
-                if combined:
-                    if combo.isEnabled():
-                        self._native_format = combo.currentText()
-                    combo.setEnabled(False)
-                    if combo.currentText() != "tiff-sequence":
-                        combo.setCurrentText("tiff-sequence")
-                elif not combo.isEnabled():
-                    combo.setCurrentText(self._native_format)
-                combo.setEnabled(not combined)
+                self._use_run_folder()
                 self.output_description.setText(
                     "Save destination is one run folder: camera OME-TIFF, Raman HDF5, and experiment settings."
-                    if combined else "Camera data uses the selected MDA save format."
                 )
                 estimate = estimate_mda_time(plan.sequence, plan.sources, plan.raman_exposure,
                                              plan.raman_planes, plan.image_positions,

@@ -152,7 +152,7 @@ def _scan_raman(directory: Path):
     return spectra, locations, metadata
 
 
-def _ome_local_position_and_shape(path: Path):
+def _ome_local_position_and_shape(path: Path, *, native_grid=False):
     """Return original position, T/C/Z sizes, and channel labels for one TIFF."""
     with tifffile.TiffFile(path) as tif:
         xml = tif.ome_metadata
@@ -182,6 +182,9 @@ def _ome_local_position_and_shape(path: Path):
     name = image.attrib.get("Name", "")
     match = re.search(r"p(\d+)$", name, re.IGNORECASE)
     original_position = int(match.group(1)) if match else 0
+    if native_grid:
+        # OME flattens native P/G into series; grid tiles can share a name.
+        original_position = int(image.attrib["ID"].rsplit(":", 1)[-1])
     sizes = tuple(int(pixels.attrib[f"Size{axis}"]) for axis in "TCZ")
     dimension_order = pixels.attrib.get("DimensionOrder", "XYZCT")
     storage_axes = tuple(
@@ -201,7 +204,7 @@ def _ome_local_position_and_shape(path: Path):
     return original_position, sizes, channel_names, page_count, storage_axes
 
 
-def _scan_ome(directory: Path):
+def _scan_ome(directory: Path, *, native_grid=False):
     found: dict[ImageKey, OmePlaneRef] = {}
     channel_names: tuple[str, ...] = ()
     paths = sorted(
@@ -210,7 +213,7 @@ def _scan_ome(directory: Path):
         for path in directory.glob(pattern)
     )
     for path in dict.fromkeys(paths):
-        info = _ome_local_position_and_shape(path)
+        info = _ome_local_position_and_shape(path, native_grid=native_grid)
         if info is None:
             continue
         (
@@ -317,13 +320,17 @@ class AcquisitionIndex:
             if not sequence_file.is_file():
                 raise FileNotFoundError(f"Sequence file not found: {sequence_file}")
 
-        image_channel_names: tuple[str, ...] = ()
-        image_files = _scan(imaging_folder, _IMAGE_RE, ImageKey)
-        if not image_files and ome_folder.is_dir():
-            image_files, image_channel_names = _scan_ome(ome_folder)
         sequence = None
         if sequence_file is not None:
             sequence = json.loads(sequence_file.read_text(encoding="utf-8"))
+        native_grid = bool(sequence and (sequence.get("grid_plan") or any(
+            (position.get("sequence") or {}).get("grid_plan")
+            for position in sequence.get("stage_positions", [])
+        )))
+        image_channel_names: tuple[str, ...] = ()
+        image_files = _scan(imaging_folder, _IMAGE_RE, ImageKey)
+        if not image_files and ome_folder.is_dir():
+            image_files, image_channel_names = _scan_ome(ome_folder, native_grid=native_grid)
         if raman_folder.is_file():
             raman_files, location_files, metadata_files = _scan_h5(raman_folder)
         else:
