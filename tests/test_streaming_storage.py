@@ -156,6 +156,32 @@ def test_streaming_run_roundtrips_through_lazy_index(tmp_path):
     assert images.shape == (2, 3, 2, 2, 4, 5)
 
 
+def test_pixel_stage_calibration_reads_current_writer_output(tmp_path):
+    from napari_raman_widget.pixel_stage_data import load_pixel_stage_data
+
+    core = _FakeCore()
+    writer = RamanAcquisitionWriter(
+        tmp_path / "calibration-run", core=core,
+        wavenumbers=np.array([100.0, 200.0, 300.0]),
+        image_positions=[0, 2, 4],
+    )
+    sequence = MDASequence(
+        stage_positions=[(0, 0, 0), (10, 0, 0), (20, 0, 0),
+                         (0, 10, 0), (20, 10, 0)],
+        channels=["BF"],
+    )
+    core.mda.events.sequenceStarted.emit(sequence, {})
+    for event in sequence.iter_events():
+        if event.index["p"] in (0, 2, 4):
+            core.mda.events.frameReady.emit(
+                np.full((4, 5), event.index["p"], dtype=np.uint16), event, {},
+            )
+    core.mda.events.sequenceFinished.emit(sequence)
+    frames, xy = load_pixel_stage_data(writer.path)
+    np.testing.assert_array_equal(frames[:, 0, 0], [0, 2, 4])
+    np.testing.assert_array_equal(xy, [[0, 0], [20, 0], [20, 10]])
+
+
 def test_same_point_in_different_cell_layers_remains_distinct(tmp_path):
     core = _FakeCore()
     writer = RamanAcquisitionWriter(

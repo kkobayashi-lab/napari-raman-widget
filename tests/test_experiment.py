@@ -67,15 +67,14 @@ def test_raman_exposure_is_channel_exposure_and_sparse_camera_is_optional():
     assert plan.sequence.z_plan == sequence.z_plan
 
 
-@pytest.mark.parametrize("mode", ["software", "laser", "cell", "glass", "quartz"])
 @pytest.mark.parametrize("nested", [False, True])
-def test_hardware_autofocus_takes_priority_without_changing_editor(mode, nested):
+def test_unconfigured_hardware_autofocus_is_stripped(nested):
     from useq import HardwareAutofocus
 
     ext = ExperimentExtensions()
-    ext.autofocus.mode = mode
+    ext.autofocus.mode = "laser"
+    ext.autofocus.axes = ()
     ext.autofocus.positions = "invalid custom positions"
-    ext.autofocus.every = -1
     af = {"axes": ("p",)}
     sequence = MDASequence(
         channels=["BF"], z_plan={"relative": [0, 2]},
@@ -83,14 +82,12 @@ def test_hardware_autofocus_takes_priority_without_changing_editor(mode, nested)
         autofocus_plan=None if nested else af,
     )
     plan = prepare_acquisition(sequence, ext, [])
-    assert plan.extensions.autofocus.mode == "hardware"
-    assert plan.sequence.autofocus_plan == sequence.autofocus_plan
-    assert plan.sequence.stage_positions == sequence.stage_positions
-    assert plan.sequence.metadata[METADATA_KEY]["extensions"]["autofocus"]["mode"] == "hardware"
-    assert any(isinstance(event.action, HardwareAutofocus) for event in plan.sequence)
-    assert ext.autofocus.mode == mode
+    assert plan.extensions.autofocus.mode == "off"
+    assert plan.sequence.autofocus_plan is None
+    assert not any(isinstance(event.action, HardwareAutofocus) for event in plan.sequence)
+    assert ext.autofocus.mode == "laser"
     assert ext.autofocus.positions == "invalid custom positions"
-    assert ext.autofocus.every == -1
+
 
 
 def test_custom_autofocus_rejects_absolute_z_without_hardware_autofocus():
@@ -147,7 +144,7 @@ def test_dense_grid_eta_and_target_snapshot_do_not_expand_positions():
     ext = ExperimentExtensions()
     ext.raman.camera_positions = "none"
     plan = prepare_acquisition(sequence, ext, records)
-    assert isinstance(plan.autofocus_positions, range)
+    assert plan.autofocus_positions == ()
     assert len(plan.sources[0]._points_by_position) == 1
     estimate = estimate_mda_time(plan.sequence, plan.sources, 100, [0], [])
     assert estimate.raman_points == 4_000_000

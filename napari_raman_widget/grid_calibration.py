@@ -6,6 +6,9 @@ import numpy as np
 from qtpy.QtWidgets import QCheckBox, QLabel
 
 
+CELLVIS_96_PLATE = "Cellvis 96-well (6.0 mm)"
+
+
 def vandermonde_fov(model, width, height):
     """Return field dimensions from the polynomial's Jacobian at zero offset.
 
@@ -27,6 +30,123 @@ def vandermonde_fov(model, width, height):
     if abs(np.linalg.det(coefficients[[2, 1]])) <= np.prod(scales) * 1e-6:
         raise ValueError("Calibration's X and Y directions are degenerate")
     return tuple(float(value) for value in fov)
+
+
+def extend_wellplate_calibration(table, owner):
+    """Use the current objective's model for HCS previews and generated positions."""
+    from superqt.utils import signals_blocked
+    from useq import register_well_plates
+    from .wellplate_calibration import CalibratedWellPlatePlan, extend_plate_mapping
+
+    # Register before constructing the wizard, which populates its plate selector
+    # from useq's registry. Keep the generic 6.4 mm preset available for other plates.
+    # Specs: https://www.cellvis.com/_96-well-glass-bottom-plates_/products_by_category.php?cat_id=11
+    register_well_plates({CELLVIS_96_PLATE: {
+        "rows": 8, "columns": 12, "well_spacing": 9.0,
+        "well_size": 6.0, "circular_wells": True,
+    }})
+    new_wizard = table._hcs_wizard is None
+    wizard = table._hcs
+    extend_plate_mapping(wizard)
+    if new_wizard and table._plate_plan is None:
+        wizard.plate_page.widget.plate_name.setCurrentText(CELLVIS_96_PLATE)
+    page = wizard.points_plan_page
+    status = QLabel(page)
+    status.setWordWrap(True)
+    page.layout().addWidget(status)
+    native_value = table.value
+    refreshing = False
+
+    def field_size(_self=None):
+        ensure = getattr(owner, "_ensure_current_vandermonde", None)
+        objective = ensure() if ensure else None
+        model = getattr(owner, "vandermonde", None)
+        try:
+            if objective is None or model is None:
+                raise ValueError("Well plate requires a current-objective Vandermonde calibration")
+            fov = vandermonde_fov(model, owner.core.getImageWidth(), owner.core.getImageHeight())
+        except ValueError as error:
+            status.setText(str(error))
+            return None, None
+        status.setText(
+            f"Well plate FOV: {fov[0]:g} × {fov[1]:g} µm — "
+            f"Vandermonde, objective {objective} (center scale). "
+            "Camera binning must match the calibration."
+        )
+        return fov
+
+    # Existing pixel-size/configuration callbacks now call our field-size provider.
+    page._get_fov_size = MethodType(field_size, page)
+
+    def refresh(*_):
+        nonlocal refreshing
+        if refreshing:
+            return
+        refreshing = True
+        try:
+            page._on_px_size_changed()
+            plan = table._plate_plan
+            fov = field_size()
+            if plan is not None and None not in fov:
+                points = plan.well_points_plan
+                if (points.fov_width, points.fov_height) != fov:
+                    # Reconstruct the plan: useq caches its generated image positions.
+                    points = points.model_copy(update=dict(zip(("fov_width", "fov_height"), fov)))
+                    table._plate_plan = plan.replace(well_points_plan=points)
+                    with signals_blocked(table):
+                        table._update_table_positions(table._plate_plan)
+        finally:
+            refreshing = False
+
+    def value(_self, *args, **kwargs):
+        refresh()
+        if table._plate_plan is not None and None in field_size():
+            raise ValueError(status.text())
+        result = native_value(*args, **kwargs)
+        # Native MDASequence serializes WellPlatePlan as its base type. Emit real
+        # positions; the application saves the full HCS plan in its metadata.
+        return tuple(result) if isinstance(result, CalibratedWellPlatePlan) else result
+
+    def wizard_value(_self):
+        refresh()
+        if None in field_size():
+            return None
+        calibrated = wizard.calibration_page.widget.value()
+        if not wizard._calibrated or calibrated is None:
+            return None
+        selected = wizard.plate_page.widget.value()
+        if selected.plate != calibrated.plate:
+            return None
+        return calibrated.replace(selected_wells=selected.selected_wells,
+                                  well_points_plan=page.widget.value())
+
+    table.value = MethodType(value, table)
+    wizard.value = MethodType(wizard_value, wizard)
+    connections = []
+
+    def connect(signal, callback):
+        signal.connect(callback)
+        connections.append((signal, callback))
+
+    path_control = getattr(owner, "sel_vdm_path", None)
+    if path_control is not None:
+        connect(path_control.textChanged, refresh)
+
+    def property_changed(device, prop, *_):
+        if device == "Objective" or (device == owner.core.getCameraDevice() and prop == "Binning"):
+            refresh()
+
+    connect(owner.core.events.propertyChanged, property_changed)
+
+    def cleanup(*_):
+        for signal, callback in connections:
+            with suppress(TypeError, RuntimeError):
+                signal.disconnect(callback)
+        connections.clear()
+
+    table.destroyed.connect(cleanup)
+    refresh()
+    return status
 
 
 def extend_grid_calibration(widget, owner):

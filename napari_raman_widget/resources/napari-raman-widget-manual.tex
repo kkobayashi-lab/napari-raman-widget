@@ -515,10 +515,11 @@ closes it before the channel changes. Use this only when illumination during sta
 travel is acceptable for the sample.
 
 \section{Pixel-to-stage calibration}
-Check \ui{Pixel-to-stage calibration} to reveal these controls:
+Expand \ui{Pixel-to-stage calibration} to reveal these controls:
 \fieldtable
-Dataset (.zarr) & required & Generated dataset containing a JSON
-\code{useq\_sequence} attribute and one image per stage position.\\
+Saved acquisition & required & Run folder containing camera OME-TIFFs and
+\code{useq-sequence.json}. Legacy plane TIFFs and generated \code{.zarr}
+datasets remain supported. Raman spectra are not required.\\
 Vandermonde degree & 1; 1--5 & Polynomial degree. Degree d needs at least
 (d+1)(d+2)/2 valid picked points. Prefer the lowest degree with adequate residuals.\\
 Pick points & button & Opens images position by position. Click the same recognizable
@@ -530,6 +531,12 @@ RMSE where possible, fits the selected degree, and updates the active objective
 inside the JSON while preserving calibrations for other objectives. The saved path
 is also copied into Loading's Vandermonde field for immediate center-cell use.\\
 \endfieldtable
+
+Acquire the same stationary feature at multiple explicit XY stage positions,
+spread across both axes, while keeping it visible. The picker uses the first
+available common time/channel/Z plane and only positions with saved images;
+missing positions are not filled. Dense Raman grids are supported, but native
+MDA grid tiles require an explicit-position calibration acquisition instead.
 
 Connect and verify the \ui{Objective index} in \ui{Loading} before opening
 \ui{Pick points}. The picker records that index, and saving is refused if the

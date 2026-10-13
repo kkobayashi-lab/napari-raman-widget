@@ -1103,14 +1103,11 @@ class HardwareWidget(QWidget):
 
         sel_layout.addWidget(QLabel("Automated point selection:"))
 
-        af_row = QHBoxLayout()
-        af_row.addWidget(QLabel("Autofocus object:"))
+        # Kept as a compatibility attribute for assistant integrations.
+        # Reference selection now belongs to MDA's autofocus controls.
         self.sel_af_combo = QComboBox()
-        self.sel_af_combo.addItems(
-            ["laser", "software", "quartz", "glass", "cell", "None"]
-        )
-        af_row.addWidget(self.sel_af_combo)
-        sel_layout.addLayout(af_row)
+        self.sel_af_combo.addItem("None")
+        self.sel_af_combo.hide()
 
         seg_ch_row = QHBoxLayout()
         seg_ch_row.addWidget(QLabel("Segmentation channel:"))
@@ -1289,24 +1286,19 @@ class HardwareWidget(QWidget):
         mda_layout = QVBoxLayout()
 
         # --- pixel-to-stage calibration ---
-        self.px2stage_check = QCheckBox("Pixel-to-stage calibration")
-        self.px2stage_check.setChecked(False)
-        self.px2stage_check.toggled.connect(self._toggle_px2stage_fields)
-        mda_layout.addWidget(self.px2stage_check)
-
         self._px2s_help = QLabel(
             "Pick the same feature in each grid position, then fit a\n"
             "pixel->stage Vandermonde model. Uses stage XY from the\n"
-            "dataset's useq_sequence attribute."
+            "saved acquisition's sequence metadata."
         )
         self._px2s_help.setWordWrap(True)
         mda_layout.addWidget(self._px2s_help)
 
         px2s_ds_row = QHBoxLayout()
-        self._px2s_ds_label = QLabel("Dataset (.zarr):")
+        self._px2s_ds_label = QLabel("Saved acquisition:")
         px2s_ds_row.addWidget(self._px2s_ds_label)
         self.px2stage_ds_path = QLineEdit()
-        self.px2stage_ds_path.setPlaceholderText("data/dataset/ds_run_7.zarr")
+        self.px2stage_ds_path.setPlaceholderText("Saved run folder (or legacy .zarr)")
         self._px2s_ds_browse = QPushButton("...")
         self._px2s_ds_browse.setFixedWidth(30)
         self._px2s_ds_browse.clicked.connect(self.browse_px2stage_ds)
@@ -1339,18 +1331,6 @@ class HardwareWidget(QWidget):
         self.px2stage_save_btn.clicked.connect(self.fit_and_save_pixel_stage)
         mda_layout.addWidget(self.px2stage_save_btn)
 
-        # collect the px2stage widgets so they can be hidden as a group
-        self._px2stage_widgets = [
-            self._px2s_help,
-            self._px2s_ds_label, self.px2stage_ds_path, self._px2s_ds_browse,
-            self._px2s_deg_label, self.px2stage_degree_input,
-            self.px2stage_pick_btn,
-            self._px2s_name_label, self.px2stage_name_input,
-            self.px2stage_save_btn,
-        ]
-        # hidden until the box is checked
-        self._toggle_px2stage_fields(False)
- 
         mda_box.setLayout(mda_layout)
         outer.addWidget(mda_box)
 
@@ -1794,11 +1774,6 @@ class HardwareWidget(QWidget):
         self.mda_track_cfg_input.setVisible(checked)
         self._seg_track_cfg_browse.setVisible(checked)
 
-    def _toggle_px2stage_fields(self, checked):
-        """Show/hide the pixel-to-stage calibration fields."""
-        for w in self._px2stage_widgets:
-            w.setVisible(checked)
-
     def _toggle_recal_fields(self, checked):
         """Show/hide the recalibration fields."""
         for w in self._recal_widgets:
@@ -2029,7 +2004,6 @@ class HardwareWidget(QWidget):
         self._toggle_seg_track_fields(self.mda_seg_track_check.isChecked())
         self._toggle_zscan_fields(self.scan_zscan_check.isChecked())
         self._toggle_autofocus_fields(self.mda_af_mode_combo.currentText())
-        self._toggle_px2stage_fields(self.px2stage_check.isChecked())
         self._toggle_recal_fields(self.recal_check.isChecked())
         self._toggle_grid_definition_fields()
         self._toggle_grid_sampling_fields()
@@ -2356,19 +2330,19 @@ class HardwareWidget(QWidget):
 
     
     def browse_px2stage_ds(self):
-        # zarr stores are directories
         path = QFileDialog.getExistingDirectory(
-            self, "Select dataset (.zarr)", "data/dataset"
+            self, "Select saved acquisition folder (or legacy .zarr)", "data"
         )
         if path:
             self.px2stage_ds_path.setText(path)
  
     def open_pixel_stage_picker(self):
-        """Open the frame-by-frame point picker on the selected dataset."""
-        import json as _json
+        """Open the point picker on saved camera frames and matching stage XY."""
+        self.px2stage_picker = None
+        self.px2stage_xy = None
         path = self.px2stage_ds_path.text().strip()
         if not path:
-            self.status.setText("Status: select a dataset (.zarr) first")
+            self.status.setText("Status: select a saved acquisition folder first")
             return
         objective = self._current_objective()
         if not objective:
@@ -2377,30 +2351,15 @@ class HardwareWidget(QWidget):
             )
             return
         try:
-            ds = xr.open_zarr(path)
-            if "useq_sequence" not in ds.attrs:
-                self.status.setText(
-                    "Status: dataset has no useq_sequence attr -- "
-                    "regenerate it with the current loader"
-                )
-                return
-            seq = _json.loads(ds.attrs["useq_sequence"])
-            self.px2stage_xy = np.array(
-                [[s["x"], s["y"]] for s in seq["stage_positions"]]
-            )
-            # one frame per position: first t / c / z
-            imgs = ds["image"].isel(t=0, c=0, z=0).values
-            if len(imgs) != len(self.px2stage_xy):
-                print(
-                    f"[px2stage] warning: {len(imgs)} frames vs "
-                    f"{len(self.px2stage_xy)} stage positions"
-                )
+            from .pixel_stage_data import load_pixel_stage_data
+            imgs, xy = load_pixel_stage_data(path)
             import matplotlib
             matplotlib.use("QtAgg")
             import matplotlib.pyplot as plt
             from cns_control.calibration import StagePointPicker
             plt.ion()
             self.px2stage_picker = StagePointPicker(imgs)
+            self.px2stage_xy = xy
             self.px2stage_objective = objective
             plt.show()
             self.status.setText(
@@ -2408,6 +2367,8 @@ class HardwareWidget(QWidget):
                 f"objective {objective}) -- click through, then Fit & save"
             )
         except Exception as e:
+            self.px2stage_picker = None
+            self.px2stage_xy = None
             self.status.setText(f"Status: picker failed -- {e}")
  
     def fit_and_save_pixel_stage(self):
@@ -2432,9 +2393,10 @@ class HardwareWidget(QWidget):
             )
             points = np.asarray(self.px2stage_picker.points, dtype=float)
             xy = self.px2stage_xy
-            n = min(len(points), len(xy))
-            points, xy = points[:n], xy[:n]
-            valid = ~np.isnan(points).any(axis=1)
+            n = len(points)
+            if points.shape != xy.shape or points.ndim != 2 or points.shape[1] != 2:
+                raise ValueError("Picked points do not match saved stage positions")
+            valid = np.isfinite(points).all(axis=1)
             degree = int(self.px2stage_degree_input.value())
             n_terms = (degree + 1) * (degree + 2) // 2
             if valid.sum() < n_terms:
@@ -2448,6 +2410,12 @@ class HardwareWidget(QWidget):
                 xy_center = xy[valid].mean(axis=0)
                 points_c = points[valid] - img_center
                 xy_c = xy[valid] - xy_center
+                from cns_control.calibration import _vandermonde_terms
+                if np.linalg.matrix_rank(_vandermonde_terms(points_c, degree)) < n_terms:
+                    raise ValueError(
+                        "Picked points do not span the selected polynomial degree; "
+                        "use positions spread across both image axes or a lower degree"
+                    )
                 print(f"Fitting on {valid.sum()}/{n} points")
                 print(f"img_center={img_center}, xy_center={xy_center}")
                 # RMSE comparison across degrees (offset domain)
@@ -3498,7 +3466,7 @@ class HardwareWidget(QWidget):
         cy = int(self.sel_cy_input.value())
         cx = int(self.sel_cx_input.value())
         r = int(self.sel_r_input.value())
-        autofocus_object = self.sel_af_combo.currentText()
+        autofocus_object = "None"
         N_per_fov = int(self.sel_npf_input.value())
         sq_size = float(self.sel_sqsize_input.value())
         sq_n = int(self.sel_sqn_input.value())
@@ -3554,7 +3522,7 @@ class HardwareWidget(QWidget):
                 sources, autofocus_p, new_seq = automated_point_selections(
                     self.core, self.viewer, self.main_window,
                     point_transformer,
-                    N=N_per_fov + 1,
+                    N=N_per_fov,
                     center=(cy, cx),
                     radius=r,
                     autofocus_object=autofocus_object,
@@ -4014,7 +3982,7 @@ class HardwareWidget(QWidget):
             self.status.setText("Status: no default engine -- reconnect")
             return
 
-        autofocus_object = self.sel_af_combo.currentText()
+        autofocus_object = "None"
         N_per_fov = int(self.sel_npf_input.value())
         sq_size = float(self.sel_sqsize_input.value())
         sq_n = int(self.sel_sqn_input.value())
@@ -4091,7 +4059,7 @@ class HardwareWidget(QWidget):
                 "Status: objective state index unavailable"
             )
             return
-        autofocus_object = self.sel_af_combo.currentText()
+        autofocus_object = "None"
         cy = int(self.sel_cy_input.value())
         cx = int(self.sel_cx_input.value())
         sq_size = float(self.sel_sqsize_input.value())

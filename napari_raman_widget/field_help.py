@@ -297,12 +297,12 @@ HELP = {
         "permitted region before selection."
     ),
     "sel_af_combo": (
-        "Autofocus strategy saved with the selection. None disables autofocus "
-        "in the later MDA."
+        "Cell selection does not configure autofocus. Choose references and "
+        "configure laser autofocus in MDA's Autofocus tab."
     ),
     "sel_npf_input": (
-        "Requested cell count per FOV. Automated selection passes N+1 to its "
-        "helper; in manual batch mode it is the exact clicks per FOV."
+        "Requested cell count per FOV. Autofocus references are selected separately. "
+        "In manual batch mode this is the exact clicks per FOV."
     ),
     "sel_center_cell_check": (
         "Split detections into one new stage position per cell, each shifted "
@@ -348,8 +348,8 @@ HELP = {
         "Output base folder; blank uses data/run."
     ),
     "mda_afp_input": (
-        "Optional comma-separated 0-based position indices to autofocus, e.g. "
-        "0,2,5. Blank or 'None' = use the selection. Out-of-range is rejected."
+        "0-based MDA position indices to autofocus, e.g. 0,2,5. Use all for "
+        "every position or none to disable. Each selected FOV needs a reference."
     ),
     "mda_imgp_input": (
         "Optional comma-separated 0-based indices to image. Initialized from "
@@ -417,8 +417,10 @@ HELP = {
     # ---- pixel-to-stage calibration (inside Run Raman MDA) ----
     "px2stage_check": "Reveal the Vandermonde pixel-to-stage calibration workflow.",
     "px2stage_ds_path": (
-        "Generated dataset (.zarr) with a JSON useq_sequence attribute and one "
-        "image per stage position."
+        "Saved acquisition folder containing camera OME-TIFFs and "
+        "useq-sequence.json, or a legacy .zarr dataset. Uses one common "
+        "time/channel/Z plane and pairs images by their saved position indices. "
+        "Raman measurements are not required."
     ),
     "px2stage_degree_input": (
         "Polynomial degree. Degree d needs >= (d+1)(d+2)/2 valid points; "

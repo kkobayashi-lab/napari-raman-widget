@@ -176,7 +176,14 @@ def _ome_local_position_and_shape(path: Path, *, native_grid=False):
         if selected is not None:
             break
     if selected is None:
-        raise ValueError(f"OME metadata does not reference {path.name}")
+        # Standalone OME-TIFFs can omit UUID/FileName links altogether.
+        images = root.findall("ome:Image", namespace)
+        if len(images) == 1:
+            pixels = images[0].find("ome:Pixels", namespace)
+            if pixels is not None and not pixels.findall("ome:TiffData/ome:UUID", namespace):
+                selected = (images[0], pixels)
+        if selected is None:
+            raise ValueError(f"OME metadata does not reference {path.name}")
 
     image, pixels = selected
     name = image.attrib.get("Name", "")
@@ -283,6 +290,7 @@ class AcquisitionIndex:
         imaging_folder,
         raman_folder=None,
         sequence_file=None,
+        images_only=False,
     ) -> "AcquisitionIndex":
         imaging_folder = Path(imaging_folder).expanduser().resolve()
         if not imaging_folder.is_dir():
@@ -307,9 +315,9 @@ class AcquisitionIndex:
             )
         else:
             raman_folder = Path(raman_folder).expanduser().resolve()
-        if not raman_folder.exists():
+        if not images_only and not raman_folder.exists():
             raise FileNotFoundError(f"Raman source not found: {raman_folder}")
-        if not (raman_folder.is_dir() or raman_folder.is_file()):
+        if not images_only and not (raman_folder.is_dir() or raman_folder.is_file()):
             raise ValueError(f"Invalid Raman source: {raman_folder}")
 
         if sequence_file is None:
@@ -331,7 +339,9 @@ class AcquisitionIndex:
         image_files = _scan(imaging_folder, _IMAGE_RE, ImageKey)
         if not image_files and ome_folder.is_dir():
             image_files, image_channel_names = _scan_ome(ome_folder, native_grid=native_grid)
-        if raman_folder.is_file():
+        if images_only:
+            raman_files, location_files, metadata_files = {}, {}, {}
+        elif raman_folder.is_file():
             raman_files, location_files, metadata_files = _scan_h5(raman_folder)
         else:
             raman_files, location_files, metadata_files = _scan_raman(

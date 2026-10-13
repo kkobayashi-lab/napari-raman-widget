@@ -206,7 +206,7 @@ def test_legacy_channel_offsets_import_to_native_channels(owner):
     assert widget.mda_rz_input.text() == "0"
 
 
-def test_hardware_autofocus_overrides_laser_requirements_and_review(owner):
+def test_unchecked_axes_disable_laser_and_ignore_imported_hardware_plan(owner):
     widget, panel, app = owner
     panel.setValue(MDASequence(channels=["BF"], autofocus_plan={"axes": ("p",)}))
     widget.collector = None
@@ -218,14 +218,16 @@ def test_hardware_autofocus_overrides_laser_requirements_and_review(owner):
     with patch.object(widget.core, "isSequenceRunning", return_value=False), \
          patch("napari_raman_widget.unified_mda.QMessageBox.question", return_value=QtWidgets.QMessageBox.Ok) as review:
         controller.run()
-    assert controller.pending[0].extensions.autofocus.mode == "hardware"
-    assert "Hardware autofocus: True; custom autofocus: off" in review.call_args.args[2]
+    assert controller.pending[0].extensions.autofocus.mode == "off"
+    assert "Autofocus: off" in review.call_args.args[2]
     assert widget.mda_af_mode_combo.currentText() == "laser"
     controller.stop()
     panel.setValue(MDASequence(channels=["BF"]))
     widget.mda_af_mode_combo.setCurrentText("laser")
+    widget.mda_af_axes["p"].setChecked(True)
     with pytest.raises(ValueError, match="autofocus targets"):
         controller.run()
+
 
 
 def test_delayed_cancel_does_not_create_writer_or_touch_engine(owner):
@@ -248,7 +250,7 @@ def test_delayed_cancel_does_not_create_writer_or_touch_engine(owner):
     assert widget.core.mda.engine is previous
 
 
-def test_native_autofocus_does_not_require_duplicate_mode_selection(owner):
+def test_imported_hardware_autofocus_never_dispatches_device_actions(owner):
     from useq import HardwareAutofocus
     widget, panel, app = owner
     widget.collector = None
@@ -257,7 +259,7 @@ def test_native_autofocus_does_not_require_duplicate_mode_selection(owner):
                               autofocus_plan={"axes": ("p",)}))
     widget.mda_delay_input.setValue(60)
     controller = widget._acquisition_controller
-    assert widget.mda_af_mode_combo.currentText() == "off"
+    assert widget.mda_af_mode_combo.currentText() == "laser"
     assert widget.mda_af_mode_combo.findText("hardware") == -1
     # This simulator config has no autofocus device, so its native editor disables
     # the axes. Supply the plan a configured microscope returns to the controller.
@@ -270,9 +272,10 @@ def test_native_autofocus_does_not_require_duplicate_mode_selection(owner):
         controller.run()
     assert controller.pending is not None
     sequence = controller.pending[0].sequence
-    assert any(isinstance(event.action, HardwareAutofocus) for event in sequence)
+    assert not any(isinstance(event.action, HardwareAutofocus) for event in sequence)
     controller.stop()
     assert controller.pending is None
+
 
 
 @pytest.mark.parametrize("camera", [False, True])
@@ -423,7 +426,7 @@ def test_save_format_is_hidden_and_imported_formats_use_run_folder(owner, tmp_pa
 def test_grid_handoff_preserves_mda_frames_per_point(owner, dense, camera_positions):
     widget, panel, _app = owner
     widget.mda_repeats_input.setValue(3)
-    widget.mda_af_mode_combo.setCurrentText("cell")
+    widget.mda_af_axes["p"].setChecked(True)
     widget.mda_afp_input.setText("none")
     widget.mda_imgp_input.setText(camera_positions)
     source = SimpleNamespace(name="cells", role="cell", _img_shape=(512, 512),
@@ -436,7 +439,328 @@ def test_grid_handoff_preserves_mda_frames_per_point(owner, dense, camera_positi
                                 "sources": [source], "autofocus_p": [], "autofocus_object": "None"}
     apply_prepared_positions(widget)
     assert widget.mda_repeats_input.value() == 3
-    assert widget.mda_af_mode_combo.currentText() == "cell"
+    assert widget.mda_af_mode_combo.currentText() == "laser"
+    assert widget.mda_af_axes["p"].isChecked()
     assert widget.mda_afp_input.text() == "none"
     assert widget.mda_imgp_input.text() == camera_positions
     assert panel.targets[0]["points"]["0"] == [[0.5, 0.5]]
+
+
+def test_autofocus_tab_axes_gate_settings_and_round_trip(owner):
+    widget, panel, app = owner
+    assert panel.af_axis.isHidden()
+    assert panel.stage_positions.af_per_position.isHidden()
+    assert panel.tab_wdg.tabText(panel.tab_wdg.indexOf(widget._mda_af_panel)) == "Autofocus"
+    assert widget.mda_af_mode_combo.count() == 1
+    assert widget.mda_af_mode_combo.currentText() == "laser"
+    assert not widget._mda_af_settings.isEnabled()
+    widget.mda_af_axes["g"].setChecked(True)
+    widget.mda_refocus_input.setValue(3)
+    assert widget._mda_af_settings.isEnabled()
+    saved = panel.value()
+    assert saved.autofocus_plan is None
+    panel.setValue(MDASequence.model_validate_json(saved.model_dump_json()))
+    assert widget.mda_af_axes["g"].isChecked()
+    assert widget.mda_refocus_input.value() == 3
+    widget.mda_af_axes["g"].setChecked(False)
+    assert not widget._mda_af_settings.isEnabled()
+
+
+def test_camera_only_autofocus_references_round_trip_without_cells(owner):
+    from napari_raman_widget.autofocus_references import apply_references
+    from napari_raman_widget.experiment import identify_positions, prepare_acquisition
+    from napari_raman_widget.unified_mda import read_extensions
+
+    widget, panel, app = owner
+    panel.setValue(identify_positions(MDASequence(stage_positions=[Position(x=1, y=2, z=0)], channels=["BF"])))
+    widget.mda_af_axes["p"].setChecked(True)
+    sequence = panel.value()
+    source = SimpleNamespace(name="autofocus references", role="autofocus", _img_shape=(512, 512),
+                             get_mda_points=lambda event, transform=True: np.array([[0.4, 0.6]]))
+    widget._autofocus_reference_selection = (sequence, [source])
+    apply_references(widget)
+    saved = panel.value()
+    panel.setValue(MDASequence.model_validate_json(saved.model_dump_json()))
+    prepared = prepare_acquisition(panel.value(), read_extensions(widget), panel.targets)
+    assert prepared.extensions.autofocus.mode == "laser"
+    assert tuple(prepared.autofocus_positions) == (0,)
+    assert not prepared.raman_enabled
+    assert [s.role for s in prepared.sources] == ["autofocus"]
+    np.testing.assert_allclose(prepared.sources[0].get_mda_points(next(prepared.sequence.iter_events())), [[0.4, 0.6]])
+    assert saved.channels == sequence.channels
+    assert saved.stage_positions == sequence.stage_positions
+
+
+def test_cell_selection_preserves_independent_references_and_focus_policy(owner):
+    from napari_raman_widget.autofocus_references import apply_references
+    from napari_raman_widget.experiment import identify_positions, prepare_acquisition
+    from napari_raman_widget.unified_mda import read_extensions
+
+    widget, panel, app = owner
+    panel.setValue(identify_positions(MDASequence(stage_positions=[Position(x=1, y=2)], channels=["BF"])))
+    widget.mda_af_axes["p"].setChecked(True)
+    widget.mda_refocus_input.setValue(3)
+    sequence = panel.value()
+    focus = SimpleNamespace(name="autofocus references", role="autofocus", _img_shape=(100, 100),
+                            get_mda_points=lambda event, transform=True: np.array([[0.3, 0.7]]))
+    widget._autofocus_reference_selection = (sequence, [focus])
+    apply_references(widget)
+    cell = SimpleNamespace(name="cells", role="cell", _img_shape=(100, 100),
+                           get_mda_points=lambda event, transform=True: np.array([[0.5, 0.5]]))
+    widget.selection_results = {"new_seq": sequence.replace(stage_positions=[sequence.stage_positions[0]] * 2),
+                                "sources": [cell], "autofocus_object": "None", "autofocus_p": []}
+    apply_prepared_positions(widget)
+    apply_prepared_positions(widget)
+    prepared = prepare_acquisition(panel.value(), read_extensions(widget), panel.targets)
+    assert prepared.extensions.autofocus.every == 3
+    assert prepared.extensions.autofocus.axes == ("p",)
+    assert tuple(prepared.autofocus_positions) == (0, 1)
+    assert [s.role for s in prepared.sources] == ["cell", "autofocus"]
+    for p in (0, 1):
+        from useq import MDAEvent
+        np.testing.assert_allclose(prepared.sources[1].get_mda_points(MDAEvent(index={"p": p})), [[0.3, 0.7]])
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_reference_preview_uses_camera_and_restores_engine_and_preset(owner, failure):
+    from napari_raman_widget.autofocus_references import choose_references
+    from napari_raman_widget.experiment import identify_positions
+
+    widget, panel, app = owner
+    widget.core.defineConfig("Channel", "RM", "Dichroic", "Label", "Q505LP")
+    panel.setValue(identify_positions(MDASequence(stage_positions=[Position(x=0, y=0, z=0)],
+                                                channels=["RM", "BF"], time_plan={"loops": 3, "interval": 2})))
+    original = panel.value()
+    previous = widget.core.mda.engine
+    widget.default_engine = previous
+    widget._prepare_for_selection = lambda: None
+    widget.viewer = SimpleNamespace(layers=SimpleNamespace(selection=SimpleNamespace(active=None)))
+    layer = SimpleNamespace(mode=None, add=lambda point: None)
+    source = SimpleNamespace(_points=layer)
+    widget.core.setConfig("Channel", "RM")
+    with patch.object(widget.core, "run_mda", side_effect=RuntimeError("preview failed") if failure else None) as run, \
+         patch("cns_control.utils.create_point_sources", return_value=[source]) as create:
+        if failure:
+            with pytest.raises(RuntimeError, match="preview failed"):
+                choose_references(widget)
+            create.assert_not_called()
+        else:
+            choose_references(widget)
+            assert create.call_args.kwargs["roles"] == ["autofocus"]
+            assert layer.mode == "add"
+    preview = run.call_args.args[0]
+    assert [c.config for c in preview.channels] == ["BF"]
+    assert preview.time_plan is None
+    assert widget.core.mda.engine is previous
+    assert widget.core.getCurrentConfig("Channel") == "RM"
+    assert panel.value().channels == original.channels
+    assert panel.value().time_plan == original.time_plan
+    assert panel.value().stage_positions == original.stage_positions
+
+
+def test_simulated_camera_only_run_autofocuses_without_cell_layers(owner, tmp_path):
+    from raman_mda_engine import RamanEngine, fakeAcquirer
+    from napari_raman_widget.autofocus_references import apply_references
+    from napari_raman_widget.experiment import identify_positions
+
+    widget, panel, app = owner
+    widget.collector = fakeAcquirer()
+    widget.transformer = SimpleNamespace(BF_to_volts=lambda pts, max_volts: np.asarray(pts) * max_volts)
+    widget.vandermonde = (np.zeros((1, 2)), 0)
+    widget._ensure_current_vandermonde = lambda: "1"
+    widget.mm_config = str(Path(__file__).parents[2] / "raman-mda-engine/tests/test-config.cfg")
+    widget.sel_cx_input = QtWidgets.QSpinBox()
+    widget.sel_cy_input = QtWidgets.QSpinBox()
+    widget.sel_r_input = QtWidgets.QSpinBox()
+    widget._connect_raman_visualization = lambda engine: None
+    widget._start_live_mda_timing = lambda count: None
+    panel.setValue(identify_positions(MDASequence(stage_positions=[Position(x=0, y=0, z=0)],
+                                                channels=[{"config": "BF", "exposure": 1}])))
+    focus = SimpleNamespace(name="autofocus references", role="autofocus", _img_shape=(512, 512),
+                            get_mda_points=lambda event, transform=True: np.array([[0.5, 0.5]]))
+    widget._autofocus_reference_selection = (panel.value(), [focus])
+    apply_references(widget)
+    widget.mda_af_axes["p"].setChecked(True)
+    panel.save_info.setValue({"save_dir": str(tmp_path), "save_name": "focus", "format": "tiff-sequence", "should_save": True})
+    previous = widget.core.mda.engine
+    with patch("napari_raman_widget.unified_mda.QMessageBox.question", return_value=QtWidgets.QMessageBox.Ok), \
+         patch.object(RamanEngine, "autofocus_w_raman", return_value=(0, 0, None)) as focus_run, \
+         patch.object(RamanEngine, "record_raman") as collect:
+        widget._acquisition_controller.run()
+        deadline = time.monotonic() + 10
+        while widget._acquisition_controller.busy and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+    focus_run.assert_called_once()
+    collect.assert_not_called()
+    assert not widget._acquisition_controller.busy
+    assert widget.core.mda.engine is previous
+    assert list((tmp_path / "focus").rglob("*.tiff"))
+    import h5py
+    with h5py.File(tmp_path / "focus/raman.h5") as store:
+        assert "spectra" not in store["raman"]
+
+
+def test_wellplate_uses_current_model_for_wizard_import_and_positions(owner):
+    from useq import WellPlatePlan
+
+    widget, panel, app = owner
+    widget.vandermonde = (np.array([[12, 13], [0, -0.3], [0.2, 0]]), 1)
+    widget._ensure_current_vandermonde = lambda: "6"
+    table = panel.stage_positions
+    wizard = table._hcs
+    imported = WellPlatePlan(
+        plate="96-well", a1_center_xy=(1000, 2000), rotation=5,
+        selected_wells=((0, 0), (0, 1)),
+        well_points_plan={"rows": 1, "columns": 2, "overlap": 10,
+                          "fov_width": 999, "fov_height": 999},
+    )
+    # Materialize useq's cache so the test catches stale generated positions.
+    list(imported)
+    table.setValue(imported)
+    width, height = widget.core.getImageWidth(), widget.core.getImageHeight()
+    plan = wizard.value()
+    assert plan.well_points_plan.fov_width == pytest.approx(width * 0.2)
+    assert plan.well_points_plan.fov_height == pytest.approx(height * 0.3)
+    positions = list(panel.value().stage_positions)
+    assert len(positions) == 4
+    assert positions[1].x - positions[0].x == pytest.approx(width * 0.2 * 0.9)
+    assert table.value().a1_center_xy == (1000, 2000)
+    assert table.value().rotation == 5
+    assert "Vandermonde" in panel.wellplate_calibration_status.text()
+    # Objective changes refresh both the wizard preview and the position table.
+    widget.vandermonde = (np.array([[0, 0], [0, 0.4], [0.5, 0]]), 1)
+    widget._ensure_current_vandermonde = lambda: "7"
+    widget.core.events.propertyChanged.emit("Objective", "State", "7")
+    assert wizard.points_plan_page.widget.value().fov_width == pytest.approx(width * 0.5)
+    positions = list(panel.value().stage_positions)
+    assert positions[1].x - positions[0].x == pytest.approx(width * 0.5 * 0.9)
+    assert "Vandermonde" in panel.wellplate_calibration_status.text()
+    # A missing calibration must not silently use the core's pixel size.
+    widget.vandermonde = None
+    assert wizard.value() is None
+    with pytest.raises(ValueError, match="current-objective Vandermonde"):
+        table.value()
+
+
+def test_cellvis_plate_default_and_test_well_radius(owner):
+    from useq import WellPlate, WellPlatePlan
+    from napari_raman_widget.grid_calibration import CELLVIS_96_PLATE
+
+    widget, panel, app = owner
+    wizard = panel.stage_positions._hcs
+    plate = wizard.plate_page.widget.value().plate
+    assert wizard.plate_page.widget.plate_name.currentText() == CELLVIS_96_PLATE
+    assert (plate.rows, plate.columns) == (8, 12)
+    assert plate.well_spacing == (9.0, 9.0)
+    assert plate.well_size == (6.0, 6.0)
+    assert WellPlate.from_str("96-well").well_size == (6.4, 6.4)
+    # Test the actual Test Well callback without moving hardware.
+    calibration = wizard.calibration_page.widget
+    center = (1200, 3400)
+    calibration._current_calibration_widget().setWellCenter(center)
+    destinations = []
+    with patch.object(calibration, "_move_to_xy_position", destinations.append):
+        calibration._move_to_test_position()
+    assert len(destinations) == 1
+    point = destinations[0]
+    assert np.hypot(point.x - center[0], point.y - center[1]) == pytest.approx(3000)
+    # The custom dimensions survive a saved plan round-trip.
+    plan = WellPlatePlan(plate=plate, a1_center_xy=center)
+    restored = WellPlatePlan.model_validate_json(plan.model_dump_json())
+    assert restored.plate.well_size == (6.0, 6.0)
+
+
+@pytest.mark.parametrize("column_step,row_step", [
+    ((-9000, 66), (-66, -9000)),  # reversed X as in the reported stage geometry
+    ((9000, 0), (0, -9000)),
+    ((0, 9000), (9000, 0)),  # rotated axes
+])
+def test_hcs_measured_mapping_preview_acquisition_and_save(owner, tmp_path, column_step, row_step):
+    from napari_raman_widget.wellplate_calibration import CalibratedWellPlatePlan
+    from pymmcore_widgets.useq_widgets._well_plate_widget import DATA_POSITION
+
+    widget, panel, app = owner
+    widget.vandermonde = (np.array([[0, 0], [0, 0.3], [0.2, 0]]), 1)
+    widget._ensure_current_vandermonde = lambda: "6"
+    wizard = panel.stage_positions._hcs
+    calibration = wizard.calibration_page.widget
+    origin = np.array([71630, 30830])
+
+    def center(row, col):
+        return origin + np.array(row_step) * row + np.array(column_step) * col
+
+    # Exercise the real callback invoked by recording well centers in the wizard.
+    for index in ((0, 0), (0, 11), (7, 0)):
+        calibration._plate_view.setSelectedIndices([index])
+        calibration._current_calibration_widget().setWellCenter(tuple(center(*index)))
+    assert wizard._calibrated
+    target = center(3, 5)  # D6
+    preview = calibration._plate_test._well_items[(3, 5)].data(DATA_POSITION)
+    assert (preview.x, preview.y) == pytest.approx(target)
+    assert "Column step" in calibration._info.text()
+    # The board stays in logical order while click data retains stage coordinates.
+    view = calibration._plate_test
+    a1 = view._well_items[(0, 0)].rect().center()
+    a2 = view._well_items[(0, 1)].rect().center()
+    b1 = view._well_items[(1, 0)].rect().center()
+    assert a2.x() > a1.x()
+    assert b1.y() > a1.y()
+    assert a2.y() == a1.y()
+    assert b1.x() == a1.x()
+    assert len(view._well_edge_spots) == 96 * 5
+    markers = [item for item in view._well_edge_spots if item.data(DATA_POSITION).name == "D6"]
+    assert len(markers) == 5
+    directions = np.column_stack((row_step, column_step)).astype(float)
+    directions /= np.linalg.norm(directions, axis=0)
+    offsets = [(0, 0), (0, -3000), (0, 3000), (-3000, 0), (3000, 0)]
+    for marker, offset in zip(markers, offsets):
+        position = marker.data(DATA_POSITION)
+        assert (position.x, position.y) == pytest.approx(target + directions @ offset)
+        assert "stage XY" in marker.toolTip()
+    # Exercise the center and all edge dots in the logical, unflipped layout.
+    from qtpy.QtCore import Qt
+    from qtpy.QtTest import QTest
+    wizard.show()
+    calibration._tab_wdg.setCurrentIndex(1)
+    app.processEvents()
+    with patch.object(calibration._mmc, "setXYPosition") as move:
+        for marker in markers:
+            move.reset_mock()
+            click_position = view.mapFromScene(marker.rect().center())
+            QTest.mouseDClick(view.viewport(), Qt.LeftButton, pos=click_position)
+            position = marker.data(DATA_POSITION)
+            move.assert_called_once_with(position.x, position.y)
+    wizard.plate_page.widget.setCurrentSelection((3, 5))
+    plan = wizard.value()
+    assert isinstance(plan, CalibratedWellPlatePlan)
+    assert (list(plan)[0].x, list(plan)[0].y) == pytest.approx(target)
+    # The actual MDA event must agree with the test view.
+    panel.stage_positions.setValue(plan)
+    sequence = panel.value()
+    event = next(sequence.iter_events())
+    assert (event.x_pos, event.y_pos) == pytest.approx(target)
+    saved = MDASequence.model_validate_json(sequence.model_dump_json())
+    panel.setValue(saved)
+    event = next(panel.value().iter_events())
+    assert (event.x_pos, event.y_pos) == pytest.approx(target)
+    assert isinstance(panel.stage_positions._plate_plan, CalibratedWellPlatePlan)
+    # HCS's own Save/Load must also retain the full mapping.
+    path = str(tmp_path / "plate.json")
+    wizard.save(path)
+    wizard.load(path)
+    restored = wizard.value()
+    assert isinstance(restored, CalibratedWellPlatePlan)
+    assert restored.stage_affine_um == plan.stage_affine_um
+    selection = wizard.plate_page.widget._view
+    a1 = selection._well_items[(0, 0)].rect().center()
+    a2 = selection._well_items[(0, 1)].rect().center()
+    b1 = selection._well_items[(1, 0)].rect().center()
+    assert a2.x() > a1.x() and a2.y() == a1.y()
+    assert b1.y() > a1.y() and b1.x() == a1.x()
+    assert wizard.plate_page.widget.currentSelection() == ((3, 5),)
+
+    # Changing plate type must discard measured centers from the previous plate.
+    wizard.plate_page.widget.plate_name.setCurrentText("24-well")
+    assert not calibration._calibrated_wells
+    assert not wizard._calibrated

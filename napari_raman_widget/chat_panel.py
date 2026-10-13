@@ -604,8 +604,6 @@ ACTIONS = [
             _p("center_y", "sel_cy_input", "int", "Mask center Y (px)."),
             _p("center_x", "sel_cx_input", "int", "Mask center X (px)."),
             _p("radius", "sel_r_input", "int", "Mask radius (px)."),
-            _p("autofocus_object", "sel_af_combo", "combo",
-               "Autofocus mode.", enum=_AF_OBJECTS),
             _p("n_per_fov", "sel_npf_input", "int", "Cells per FOV."),
             _p("batch", "sel_batch_combo", "combo",
                "Batch collection.", enum=_BATCH),
@@ -617,8 +615,6 @@ ACTIONS = [
         "label": "Set up manual selection",
         "method": "run_manual_selection",
         "params": [
-            _p("autofocus_object", "sel_af_combo", "combo",
-               "Autofocus mode.", enum=_AF_OBJECTS),
             _p("n_per_fov", "sel_npf_input", "int", "Cells per FOV."),
             _p("batch", "sel_batch_combo", "combo",
                "Batch collection.", enum=_BATCH),

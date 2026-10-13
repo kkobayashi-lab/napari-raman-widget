@@ -9,7 +9,7 @@ from types import MethodType
 from qtpy.QtCore import QObject, QTimer
 from qtpy.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox,
-    QLabel, QLayout, QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QLabel, QLayout, QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget, QHBoxLayout, QTabWidget,
 )
 
 from .experiment import (
@@ -18,7 +18,7 @@ from .experiment import (
 )
 from .mda_timing import estimate_mda_time, format_duration
 from .ui_helpers import make_collapsible
-from .grid_calibration import extend_grid_calibration
+from .grid_calibration import extend_grid_calibration, extend_wellplate_calibration
 from raman_mda_engine.grid_plan import GRID_KEY, grid_count
 
 
@@ -81,10 +81,35 @@ def build_extension_controls(owner):
     owner.mda_collection_summary.setWordWrap(True)
     raman.addRow(owner.mda_collection_summary)
 
-    af = section("Custom autofocus")
-    af.addRow(QLabel("Hardware autofocus on axis takes priority over these custom settings."))
+    owner._mda_af_panel = QWidget(owner)
+    owner._mda_af_panel.hide()
+    af_layout = QVBoxLayout(owner._mda_af_panel)
+    axis_row = QHBoxLayout()
+    axis_row.addWidget(QLabel("Use autofocus on axis:"))
+    owner.mda_af_axes = {}
+    for axis, description in (("p", "stage position"), ("t", "timepoint"), ("g", "grid tile")):
+        checkbox = QCheckBox(axis)
+        checkbox.setToolTip(f"Run laser autofocus when the {description} changes.")
+        owner.mda_af_axes[axis] = checkbox
+        axis_row.addWidget(checkbox)
+        checkbox.toggled.connect(lambda *_: update_autofocus_controls(owner))
+    axis_row.addStretch()
+    af_layout.addLayout(axis_row)
+    af_layout.addWidget(QLabel("Select an axis to enable autofocus. No axes selected = autofocus off."))
+    from .autofocus_references import choose_references, apply_references, reference_action
+    owner.choose_af_references_btn = QPushButton("Choose autofocus reference points")
+    owner.choose_af_references_btn.clicked.connect(lambda: reference_action(owner, choose_references))
+    af_layout.addWidget(owner.choose_af_references_btn)
+    owner.apply_af_references_btn = QPushButton("Apply autofocus references")
+    owner.apply_af_references_btn.clicked.connect(lambda: reference_action(owner, apply_references))
+    af_layout.addWidget(owner.apply_af_references_btn)
+    af_layout.addWidget(QLabel("Click one reference per FOV. Cell selection is not required."))
+    owner._mda_af_settings = QWidget()
+    af_layout.addWidget(owner._mda_af_settings)
+    af = QFormLayout(owner._mda_af_settings)
+    af.setContentsMargins(0, 0, 0, 0)
     owner.mda_af_mode_combo = QComboBox()
-    owner.mda_af_mode_combo.addItems(["off", "software", "laser", "cell", "glass", "quartz"])
+    owner.mda_af_mode_combo.addItem("laser")
     af.addRow("Custom mode", owner.mda_af_mode_combo)
     field(af, "mda_afp_input", "Positions (all / none / indices)", "all")
     field(af, "mda_refocus_input", "Refocus every N timepoints (0 = initial only)", 0)
@@ -92,6 +117,8 @@ def build_extension_controls(owner):
     owner._search_pts_label = field(af, "mda_search_pts_input", "Search points", 8, minimum=2, maximum=500)
     owner._fine_range_label = field(af, "mda_fine_range_input", "Laser fine range (± µm)", 1.5, minimum=0.1)
     owner._fine_pts_label = field(af, "mda_fine_pts_input", "Laser fine search points", 8, minimum=2, maximum=500)
+    af_layout.addStretch()
+    update_autofocus_controls(owner)
 
     tracking = section("Segmentation and tracking")
     field(tracking, "mda_seg_track_check", "Segment and track", False)
@@ -132,10 +159,14 @@ def build_extension_controls(owner):
     owner.mda_dir_input.hide()
     owner.mda_af_mode_combo.currentTextChanged.connect(owner._toggle_autofocus_fields)
     owner.mda_seg_track_check.toggled.connect(owner._toggle_seg_track_fields)
-    owner._toggle_autofocus_fields("off")
+    owner._toggle_autofocus_fields("laser")
     owner._toggle_seg_track_fields(False)
     layout.addStretch()
     return panel
+
+
+def update_autofocus_controls(owner):
+    owner._mda_af_settings.setEnabled(any(box.isChecked() for box in owner.mda_af_axes.values()))
 
 
 def read_extensions(owner):
@@ -146,7 +177,8 @@ def read_extensions(owner):
         autofocus=AutofocusSettings(owner.mda_af_mode_combo.currentText(), owner.mda_afp_input.text(),
                                     owner.mda_refocus_input.value(), owner.mda_af_range_input.value(),
                                     owner.mda_search_pts_input.value(), owner.mda_fine_range_input.value(),
-                                    owner.mda_fine_pts_input.value()),
+                                    owner.mda_fine_pts_input.value(),
+                                    tuple(axis for axis, box in owner.mda_af_axes.items() if box.isChecked())),
         tracking=TrackingSettings(owner.mda_seg_track_check.isChecked(), owner.mda_segment_every_input.value(),
                                   owner.mda_seg_ch_combo.currentText(), owner.mda_seg_scale_input.value(),
                                   str(owner.mda_seg_model_combo.currentData() or owner.mda_seg_model_combo.currentText()),
@@ -161,7 +193,7 @@ def write_extensions(owner, ext):
         "mda_rz_input": ext.raman.planes, "mda_imgp_input": ext.raman.camera_positions,
         "mda_batch_check": ext.raman.batch, "mda_pre_acq_check": ext.raman.pre_acq,
         "mda_repeats_input": ext.raman.repeats,
-        "mda_af_mode_combo": "off" if ext.autofocus.mode == "hardware" else ext.autofocus.mode,
+        "mda_af_mode_combo": "laser",
         "mda_afp_input": ext.autofocus.positions, "mda_refocus_input": ext.autofocus.every,
         "mda_af_range_input": ext.autofocus.search_range, "mda_search_pts_input": ext.autofocus.search_points,
         "mda_fine_range_input": ext.autofocus.fine_range, "mda_fine_pts_input": ext.autofocus.fine_points,
@@ -183,6 +215,10 @@ def write_extensions(owner, ext):
             widget.setText(value)
         else:
             widget.setValue(value)
+
+    for axis, checkbox in owner.mda_af_axes.items():
+        checkbox.setChecked(ext.autofocus.mode == "laser" and axis in ext.autofocus.axes)
+    update_autofocus_controls(owner)
 
 
 class AcquisitionController(QObject):
@@ -214,9 +250,6 @@ class AcquisitionController(QObject):
             raise ValueError("An acquisition is already scheduled or running")
         sequence = self.panel.value()
         ext = read_extensions(owner)
-        native_af = sequence.autofocus_plan or any(
-            p.sequence and p.sequence.autofocus_plan for p in sequence.stage_positions
-        )
         prepared = prepare_acquisition(sequence, ext, self.panel.targets)
         ext = prepared.extensions
         needs_raman_hardware = prepared.raman_enabled or ext.autofocus.mode in ("laser", "cell", "glass", "quartz")
@@ -249,7 +282,7 @@ class AcquisitionController(QObject):
                    f"Camera frames: {estimate.imaging_frames:,}\nRaman collections: {estimate.raman_points:,}\n"
                    f"Estimated duration: {format_duration(estimate.duration_seconds)}\n"
                    f"Start delay: {format_duration(ext.delay)}\n"
-                   f"Hardware autofocus: {bool(native_af)}; custom autofocus: {'off' if native_af else ext.autofocus.mode}\n"
+                   f"Autofocus: {ext.autofocus.mode}; axes: {', '.join(ext.autofocus.axes) or 'none'}\n"
                    f"Tracking: {ext.tracking.enabled}\n\n"
                    "Autofocus, tracking, and motion add time. Their internal images are not saved as camera channels.")
         if ext.overwrite and output is not None and output.exists():
@@ -317,6 +350,7 @@ class AcquisitionController(QObject):
                     fine_search_pts=ext.autofocus.fine_points, stage_centering_model=stage_model,
                     image_x=owner.core.getImageWidth(), image_y=owner.core.getImageHeight(),
                     config_file=owner.mm_config, point_repeats=ext.raman.repeats,
+                    autofocus_axes=ext.autofocus.axes,
                     circle_center=(owner.sel_cx_input.value(), owner.sel_cy_input.value()),
                     circle_radius=owner.sel_r_input.value(),
                 )
@@ -420,6 +454,12 @@ def install_unified_mda(owner):
             extend_z_editor(self.z_plan)
             extend_shutter_editor(self.keep_shutter_open)
             self.grid_use_vandermonde, self.grid_calibration_status = extend_grid_calibration(self.grid_plan, owner)
+            self.wellplate_calibration_status = extend_wellplate_calibration(self.stage_positions, owner)
+            self.af_axis.hide()
+            self.stage_positions.af_per_position.setChecked(False)
+            self.stage_positions.af_per_position.hide()
+            QTabWidget.addTab(self.tab_wdg, owner._mda_af_panel, "Autofocus")
+            owner._mda_af_panel.show()
             self.extensions_scroll = QScrollArea(self)
             self.extensions_scroll.setWidgetResizable(True)
             self.extensions_scroll.setMaximumHeight(360)
@@ -443,7 +483,7 @@ def install_unified_mda(owner):
             self.control_btns.cancel_btn.released.disconnect()
             self.control_btns.cancel_btn.released.connect(lambda: owner._acquisition_controller.stop())
             self.valueChanged.connect(self.update_summary)
-            for control in owner._mda_extension_panel.findChildren(QWidget):
+            for control in [*owner._mda_extension_panel.findChildren(QWidget), *owner._mda_af_panel.findChildren(QWidget)]:
                 for signal in ("valueChanged", "textChanged", "toggled", "currentTextChanged"):
                     if hasattr(control, signal):
                         getattr(control, signal).connect(lambda *_: self.valueChanged.emit())
@@ -468,6 +508,9 @@ def install_unified_mda(owner):
                     "grid_use_vandermonde": self.grid_use_vandermonde.isChecked(),
                 },
             }
+            plate_plan = self.stage_positions._plate_plan
+            if plate_plan is not None:
+                metadata[METADATA_KEY]["wellplate_plan"] = plate_plan.model_dump(mode="json")
             # CoreConnectedMDAWidget substitutes the current stage position when
             # the native table is empty. Dense grids must retain an empty table.
             if GRID_KEY in metadata:
@@ -492,8 +535,26 @@ def install_unified_mda(owner):
             if GRID_KEY in value.metadata:
                 value = value.replace(keep_shutter_open_across=tuple(
                     "g" if axis == "p" else axis for axis in value.keep_shutter_open_across))
+            value = value.replace(autofocus_plan=None, stage_positions=[
+                p.replace(sequence=p.sequence.replace(autofocus_plan=None)) if p.sequence else p
+                for p in value.stage_positions
+            ])
+            if self._ready:
+                had_plate = self.stage_positions._plate_plan is not None
+                self.stage_positions._plate_plan = None
+                if had_plate:
+                    self.stage_positions._set_position_table_editable(True)
             super().setValue(value)
             if self._ready:
+                if plate_data := meta.get("wellplate_plan"):
+                    from useq import WellPlatePlan
+                    from .wellplate_calibration import CalibratedWellPlatePlan
+                    model = CalibratedWellPlatePlan if "stage_affine_um" in plate_data else WellPlatePlan
+                    plate_plan = model.model_validate(plate_data)
+                    # A prepared-position handoff can carry old metadata. Restore
+                    # HCS editing only when the plan still describes these positions.
+                    if [(p.x, p.y) for p in plate_plan] == [(p.x, p.y) for p in value.stage_positions]:
+                        self.stage_positions.setValue(plate_plan)
                 self.targets = deepcopy(meta.get("targets", []))
                 self.calibration = deepcopy(meta.get("calibration", {}))
                 ext = ExperimentExtensions.from_dict(meta.get("extensions", {}))
@@ -515,6 +576,8 @@ def install_unified_mda(owner):
             self.control_btns.cancel_btn.setVisible(locked)
             self.control_btns.pause_btn.setVisible(locked and owner._acquisition_controller.pending is None)
             owner.apply_mda_positions_btn.setEnabled(not locked)
+            owner.choose_af_references_btn.setEnabled(not locked)
+            owner.apply_af_references_btn.setEnabled(not locked)
             self.detach_grid_btn.setEnabled(not locked)
             if hasattr(owner, "apply_grid_mda_btn"):
                 owner.apply_grid_mda_btn.setEnabled(not locked and bool(owner._grid_regions))
@@ -680,8 +743,24 @@ def apply_prepared_positions(owner):
         return
     panel = owner._unified_mda
     selection = owner.selection_results
+    old_sequence = panel.value()
     dense = GRID_KEY in selection["new_seq"].metadata
     positions = () if dense else identify_positions(selection["new_seq"]).stage_positions
+    reference_positions = positions
+    # A repeated batch FOV needs distinct saved identities; the reference can
+    # still be shared by its copies at the same physical coordinates.
+    if not dense:
+        import uuid
+        from .experiment import position_id
+        seen = set()
+        independent = []
+        for position in positions:
+            identity = position_id(position)
+            if identity in seen:
+                position = position.replace(name=position.name.split(" [id:")[0] + f" [id:{uuid.uuid4().hex}]")
+            seen.add(position_id(position))
+            independent.append(position)
+        positions = independent
     sequence = panel.value().replace(stage_positions=positions, grid_plan=None)
     if dense:
         from useq import MDASequence, Position
@@ -691,13 +770,10 @@ def apply_prepared_positions(owner):
             record["position_ids"] = []
     else:
         records = capture_targets(sequence, selection["sources"])
+        from .autofocus_references import preserve_references
+        records.extend(preserve_references(old_sequence, sequence, panel.targets, reference_positions))
     ext = read_extensions(owner)
-    # Grid preparation must not overwrite MDA's autofocus mode or position policy.
-    if selection.get("selection_type") != "grid":
-        ext.autofocus.mode = str(selection.get("autofocus_object", "off")).lower()
-        if ext.autofocus.mode == "none":
-            ext.autofocus.mode = "off"
-        ext.autofocus.positions = ",".join(map(str, selection.get("autofocus_p", []))) or "none"
+    # Autofocus policy is configured independently in MDA.
     ext.raman.batch = bool(selection.get("batch", False))
     ext.raman.pre_acq = bool(selection.get("pre_acq", True))
     # Grid preparation owns geometry; retain MDA's requested frame count.

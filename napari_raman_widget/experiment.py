@@ -30,6 +30,7 @@ class AutofocusSettings:
     search_points: int = 8
     fine_range: float = 1.5
     fine_points: int = 8
+    axes: tuple[str, ...] = ("p", "t")
 
 
 @dataclass
@@ -218,13 +219,16 @@ def prepare_acquisition(sequence, extensions, targets):
     exposure = float(channels[0].exposure or 0) if enabled else 0.0
     if enabled and (not math.isfinite(exposure) or exposure < 73.8):
         raise ValueError("RM exposure must be at least 73.8 ms per collection")
-    native_af = sequence.autofocus_plan or any(
-        p.sequence and p.sequence.autofocus_plan for p in sequence.stage_positions
-    )
-    # Native axis autofocus is authoritative. Only change the detached run;
-    # keep the editor's custom settings for when hardware autofocus is disabled.
-    if native_af:
-        ext.autofocus = AutofocusSettings(mode="hardware")
+    # Hardware autofocus is not configured on this rig. Never dispatch native
+    # autofocus actions, including plans inherited from imported settings.
+    sequence = sequence.replace(autofocus_plan=None, stage_positions=[
+        p.replace(sequence=p.sequence.replace(autofocus_plan=None)) if p.sequence else p
+        for p in sequence.stage_positions
+    ])
+    if not ext.autofocus.axes or ext.autofocus.mode == "hardware":
+        ext.autofocus.mode = "off"
+    if any(axis not in ("p", "t", "g") for axis in ext.autofocus.axes):
+        raise ValueError("Autofocus axes must be p, t, or g")
     if ext.raman.repeats < 1 or ext.autofocus.every < 0 or ext.tracking.every < 0:
         raise ValueError("Repeats must be positive and update cadences non-negative")
     custom_af = ext.autofocus.mode not in ("off", "hardware")
@@ -255,7 +259,7 @@ def prepare_acquisition(sequence, extensions, targets):
     if enabled and not planes:
         raise ValueError("RM is selected but no Raman planes are selected")
     image_p = indices(ext.raman.camera_positions, count)
-    af_p = indices(ext.autofocus.positions, count)
+    af_p = indices(ext.autofocus.positions, count) if custom_af else []
     if custom_af and not compact_grid:
         for p in af_p:
             event = MDAEvent(index={"p": p})
