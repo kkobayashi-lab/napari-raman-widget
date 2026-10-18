@@ -33,7 +33,7 @@ def restore_position_targets(sequence):
     return sequence.replace(stage_positions=positions, metadata=metadata)
 
 
-def selected_positions(image_sequence, rows, shape, model=None, *, batch=False, provenance=True, dataset=None, reference_sequence=None):
+def selected_positions(image_sequence, rows, shape, model=None, *, batch=False, provenance=True, dataset=None, reference_sequence=None, batch_center=None):
     """Convert viewer t,p,g,c,z,y,x points to explicit acquisition positions."""
     from .autofocus_references import reference, with_reference, source_stage_xy
     from .experiment import position_id
@@ -71,11 +71,15 @@ def selected_positions(image_sequence, rows, shape, model=None, *, batch=False, 
         if any(v is None or not np.isfinite(v) for v in xyz):
             raise ValueError("The source image needs recorded stage XYZ coordinates")
         pixels = np.asarray(group)[:, -2:]
-        if not batch:
+        center = np.asarray(batch_center, dtype=float) if batch_center is not None else pixels[0]
+        if batch_center is not None and (center.shape != (2,) or not np.isfinite(center).all()
+                                        or np.any(center < 0) or np.any(center >= shape)):
+            raise ValueError("Batch center must be inside the source image")
+        if not batch or batch_center is not None:
             if model is None:
                 raise ValueError("Load the pixel-to-stage calibration before applying Raman points")
             coefficients, degree = model
-            x, y = (pixels[0] - shape / 2)[::-1]
+            x, y = (center - shape / 2)[::-1]
             terms = [x**j * y**(n-j) for n in range(int(degree)+1) for j in range(n+1)]
             offset = np.asarray(terms) @ np.asarray(coefficients)
             if offset.shape != (2,) or not np.isfinite(offset).all():
@@ -83,6 +87,10 @@ def selected_positions(image_sequence, rows, shape, model=None, *, batch=False, 
             xyz[:2] = (np.asarray(xyz[:2]) - offset).tolist()
         # Runtime aiming convention is pixel (y,x) / (width,height).
         sampling = pixels if batch else np.asarray([shape / 2])
+        if batch and batch_center is not None:
+            sampling = pixels - center + shape / 2
+            if np.any(sampling < 0) or np.any(sampling >= shape):
+                raise ValueError("Batch extends outside the aiming field after centering; use a smaller region")
         value = dict(mode="integrated_batch" if batch else "centered",
                      points=(sampling / shape[::-1]).tolist(), image_shape=shape[::-1].tolist())
         if provenance:
@@ -147,12 +155,12 @@ def install_raman_tab(panel, owner):
     from .autofocus_references import choose_references
     tab = QWidget(panel)
     layout = QVBoxLayout(tab)
-    text = QLabel("Select Raman points on existing images or acquire configured imaging.\n"
+    text = QLabel("Select Raman points or draw batch regions on existing images or configured imaging.\n"
                   "Ordinary points become centered stage positions. Integrated batches use the galvo.\n"
                   "Add RM in Channels for spectra; add camera channels only for fresh images.")
     text.setWordWrap(True)
     layout.addWidget(text)
-    button = QPushButton("Select Raman points…")
+    button = QPushButton("Select Raman points / batches…")
     def choose():
         try:
             choose_references(owner, raman=True)
@@ -160,19 +168,22 @@ def install_raman_tab(panel, owner):
             owner.status.setText(f"Status: Raman selection — {error}")
     button.clicked.connect(choose)
     layout.addWidget(button)
+    layout.addWidget(owner._raman_settings_panel)
+    owner._raman_settings_panel.show()
     layout.addStretch()
-    QTabWidget.addTab(panel.tab_wdg, tab, "Raman")
+    QTabWidget.addTab(panel.tab_wdg, tab, "Raman selection")
 
 
 class RamanEditor:
     def __init__(self, owner, sequence, image_layer):
         import napari
-        from qtpy.QtCore import QObject, QEvent
-        from qtpy.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QCheckBox, QComboBox
+        from qtpy.QtCore import QObject, QEvent, QTimer
+        from qtpy.QtWidgets import (QWidget, QVBoxLayout, QLabel, QPushButton, QCheckBox, QComboBox,
+                                   QSpinBox, QTableWidget, QHeaderView)
         self.owner, self.sequence, self.image_layer = owner, sequence, image_layer
         self.image_sequence = image_layer.metadata["useq_sequence"]
         self.shape = tuple(image_layer.data.shape[-3:-1] if image_layer.rgb else image_layer.data.shape[-2:])
-        self.viewer = napari.Viewer(title="Select Raman points")
+        self.viewer = napari.Viewer(title="Raman selection — points and batches")
         self.viewer.add_image(image_layer.data, name=image_layer.name, rgb=image_layer.rgb,
                               scale=image_layer.scale, contrast_limits=image_layer.contrast_limits,
                               metadata=dict(image_layer.metadata))
@@ -181,27 +192,63 @@ class RamanEditor:
                                              face_color="orange", size=12, scale=image_layer.scale,
                                              out_of_slice_display=False)
         self.points.mode = "add"
+        from .batch_shapes import BatchShapes
+        self.shapes = self.viewer.add_layer(BatchShapes(
+            ndim=7, name="Raman batches", scale=image_layer.scale,
+            edge_color="cyan", face_color=[0, 1, 1, .15],
+            features={"batch_id": np.array([], dtype=object), "count": np.array([], dtype=int)},
+            feature_defaults={"batch_id": "", "count": 25}))
+        self.preview = self.viewer.add_points(
+            np.empty((0, 7)), ndim=7, name="Batch sampling preview", size=5,
+            face_color="cyan", scale=image_layer.scale, out_of_slice_display=False)
+        self.preview.editable = False
+        self.shapes.visible = self.preview.visible = False
+        self.viewer.layers.selection.active = self.points
+        self._batches = []
+        self._refreshing = False
         controls = QWidget()
         layout = QVBoxLayout(controls)
-        layout.addWidget(QLabel("Click targets on each image plane. Select and delete to remove points.\n"
-                               "Batch mode integrates all selected points on each plane into one spectrum."))
+        help_text = QLabel("Individual points: click targets on each image plane.\n"
+                          "Batches: draw rectangles, ellipses, or polygons using napari's Shapes tools.\n"
+                          "The stage moves to each shape's center; the galvo samples within that batch.\n"
+                          "Each shape produces one integrated spectrum per repeat. RM exposure is for the whole batch.")
+        help_text.setWordWrap(True)
+        layout.addWidget(help_text)
         self.batch = QCheckBox("Integrated batch (galvo)")
+        self.default_count = QSpinBox()
+        self.default_count.setRange(1, 10000)
+        self.default_count.setValue(25)
+        self.default_count.setPrefix("Points per new batch: ")
+        self.default_count.valueChanged.connect(self._set_default_count)
+        self.batch_table = QTableWidget(0, 3)
+        self.batch_table.setHorizontalHeaderLabels(["Batch", "Region", "Points"])
+        self.batch_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.batch_table.horizontalHeader().setStretchLastSection(True)
+        self.batch_table.cellClicked.connect(self._select_batch)
+        self.default_count.setVisible(False)
+        self.batch_table.setVisible(False)
         self.provenance = QCheckBox("Attach optional source-image metadata")
         self.provenance.setChecked(True)
         self.destination = QComboBox()
         self.destination.addItems(["Replace acquisition positions", "Append positions"])
         for widget in (self.batch, self.provenance, self.destination):
             layout.addWidget(widget)
+        layout.addWidget(self.default_count)
+        layout.addWidget(self.batch_table)
         self.summary = QLabel()
         layout.addWidget(self.summary)
         self.error = QLabel()
         self.error.setWordWrap(True)
         layout.addWidget(self.error)
-        def summary(*_):
-            channels = ", ".join(c.config for c in owner._unified_mda.value().channels) or "none"
-            self.summary.setText(f"{len(self.points.data)} selected points. Active channels: {channels}")
-        self.points.events.data.connect(summary)
-        summary()
+        self._preview_timer = QTimer(controls)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(100)
+        self._preview_timer.timeout.connect(self.refresh_batches)
+        self.shapes.events.data.connect(self._schedule_preview)
+        self.shapes.events.features.connect(self._schedule_preview)
+        self.points.events.data.connect(self._update_summary)
+        self.batch.toggled.connect(self._toggle_batch)
+        self._update_summary()
         apply = QPushButton("Apply Raman positions")
         cancel = QPushButton("Cancel")
         apply.clicked.connect(self.apply)
@@ -213,13 +260,115 @@ class RamanEditor:
         class CloseFilter(QObject):
             def eventFilter(self, obj, event):
                 if event.type() == QEvent.Close:
+                    editor._preview_timer.stop()
                     editor.owner._raman_editor = None
                 return False
         self.close_filter = CloseFilter(self.viewer.window._qt_window)
         self.viewer.window._qt_window.installEventFilter(self.close_filter)
+        self._restore_batches()
+
+    def _set_default_count(self, value):
+        self.shapes.feature_defaults["count"] = value
+
+    def _select_batch(self, row, _column):
+        self.viewer.layers.selection.active = self.shapes
+        self.shapes.mode = "select"
+        self.shapes.selected_data = {row}
+        vertices = self.shapes.data[row]
+        for axis in range(5):
+            self.viewer.dims.set_point(axis, self.shapes.data_to_world(vertices[0])[axis])
+
+    def _toggle_batch(self, enabled):
+        self.points.visible = not enabled
+        self.shapes.visible = self.preview.visible = enabled
+        self.default_count.setVisible(enabled)
+        self.batch_table.setVisible(enabled)
+        self.viewer.layers.selection.active = self.shapes if enabled else self.points
+        if enabled:
+            self.shapes.mode = "add_polygon"
+        self._update_summary()
+
+    def _schedule_preview(self, *_):
+        if not self._refreshing:
+            self._preview_timer.start()
+
+    def _update_summary(self, *_):
+        channels = ", ".join(c.config for c in self.owner._unified_mda.value().channels) or "none"
+        selection = (f"{len(self._batches)} batches, {len(self.preview.data)} sampling points"
+                     if self.batch.isChecked() else f"{len(self.points.data)} individual points")
+        self.summary.setText(f"{selection}. Active channels: {channels}")
+
+    def _change_count(self, row, count):
+        features = self.shapes.features.copy()
+        features.loc[row, "count"] = count
+        self.shapes.features = features
+        self.refresh_batches()
+
+    def refresh_batches(self):
+        from uuid import uuid4
+        from qtpy.QtCore import Qt
+        from qtpy.QtWidgets import QTableWidgetItem, QSpinBox
+        from .raman_batches import sample_region
+        self._preview_timer.stop()
+        self._refreshing = True
+        self._batches = []
+        errors = []
+        try:
+            features = self.shapes.features.copy()
+            seen = set()
+            self.batch_table.setRowCount(len(self.shapes.data))
+            for row, (vertices, kind) in enumerate(zip(self.shapes.data, self.shapes.shape_type)):
+                identity = str(features.loc[row, "batch_id"] or "")
+                if not identity or identity in seen:
+                    identity = str(uuid4())
+                    features.loc[row, "batch_id"] = identity
+                seen.add(identity)
+                count = int(features.loc[row, "count"])
+                for column, value in enumerate((f"Batch {row + 1}", kind)):
+                    item = QTableWidgetItem(value)
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                    self.batch_table.setItem(row, column, item)
+                spin = self.batch_table.cellWidget(row, 2)
+                if spin is None:
+                    spin = QSpinBox()
+                    spin.setRange(1, 10000)
+                    spin.setKeyboardTracking(False)
+                    spin.valueChanged.connect(lambda n, r=row: self._change_count(r, n))
+                    self.batch_table.setCellWidget(row, 2, spin)
+                spin.blockSignals(True)
+                spin.setValue(count)
+                spin.blockSignals(False)
+                try:
+                    points = sample_region(vertices, kind, count, self.shape)
+                    self._batches.append(dict(id=identity, name=f"Raman batch {row + 1}",
+                        shape_type=kind, vertices=np.asarray(vertices).tolist(), count=count,
+                        source_sequence_uid=str(self.image_sequence.uid), points=points.tolist()))
+                except ValueError as error:
+                    errors.append(f"Batch {row + 1}: {error}")
+            self.shapes.features = features
+            # New shapes always receive the default, rather than a selected shape's count/id.
+            self.shapes.feature_defaults["count"] = self.default_count.value()
+            self.shapes.feature_defaults["batch_id"] = ""
+            self.preview.data = (np.concatenate([b["points"] for b in self._batches])
+                                 if self._batches else np.empty((0, 7)))
+            self.error.setText("\n".join(errors))
+            self._update_summary()
+        finally:
+            self._refreshing = False
+        return not errors
+
+    def _restore_batches(self):
+        regions = [target(p).get("batch_region") for p in self.sequence.stage_positions if target(p)]
+        regions = [r for r in regions if r and r.get("source_sequence_uid") == str(self.image_sequence.uid)]
+        if not regions:
+            return
+        self.shapes.add([r["vertices"] for r in regions], shape_type=[r["shape_type"] for r in regions])
+        self.shapes.features = {"batch_id": [r["id"] for r in regions], "count": [r["count"] for r in regions]}
+        self.refresh_batches()
+        self.batch.setChecked(True)
 
     def apply(self):
-        from .autofocus_references import _require_idle, reference
+        from .autofocus_references import _require_idle
         from .experiment import METADATA_KEY
         try:
             _require_idle(self.owner)
@@ -227,15 +376,20 @@ class RamanEditor:
             current = panel.value()
             if current.stage_positions != self.sequence.stage_positions:
                 raise ValueError("Positions changed while selecting; reopen the selector")
-            model = None
-            if not self.batch.isChecked() or any(
-                    reference(p) and "stage_xy_um" not in reference(p) for p in current.stage_positions):
-                if self.owner._ensure_current_vandermonde() is None:
-                    raise ValueError("Load the current objective's pixel-to-stage calibration")
-                model = self.owner.vandermonde
-            positions = selected_positions(self.image_sequence, self.points.data, self.shape, model,
-                batch=self.batch.isChecked(), provenance=self.provenance.isChecked(),
-                dataset=self.image_layer.metadata.get("dataset_path"), reference_sequence=current)
+            if self.owner._ensure_current_vandermonde() is None:
+                raise ValueError("Load the current objective's pixel-to-stage calibration")
+            model = self.owner.vandermonde
+            options = dict(provenance=self.provenance.isChecked(),
+                           dataset=self.image_layer.metadata.get("dataset_path"), reference_sequence=current)
+            if self.batch.isChecked():
+                from .raman_batches import batch_positions
+                if not self.refresh_batches():
+                    return
+                positions = batch_positions(self.image_sequence, self._batches, self.shape, model, **options)
+                applied_points = self.preview.data
+            else:
+                positions = selected_positions(self.image_sequence, self.points.data, self.shape, model, **options)
+                applied_points = self.points.data
             if self.destination.currentIndex() == 1:
                 if current.grid_plan or "raman_grid" in current.metadata:
                     raise ValueError("Replace grid positions, or expand the grid before appending Raman positions")
@@ -248,7 +402,7 @@ class RamanEditor:
             meta.pop("wellplate_plan", None)
             panel.setValue(current.replace(stage_positions=positions, grid_plan=None, metadata=metadata))
             if hasattr(self.owner, "viewer"):
-                self.owner.viewer.add_points(self.points.data.copy(), ndim=7, name="Selected Raman targets",
+                self.owner.viewer.add_points(applied_points.copy(), ndim=7, name="Selected Raman targets",
                     face_color="orange", size=12, scale=self.image_layer.scale,
                     out_of_slice_display=False, metadata={"raman_selection": True})
             self.owner.status.setText(f"Status: applied {len(positions)} positions; configure acquisition channels in Channels")

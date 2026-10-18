@@ -25,13 +25,34 @@ directory.
 
 ## Raman selection in MDA
 
-Open **MDA → Raman → Select Raman points**. Use a completed acquisition already
+Open **MDA → Raman selection → Select Raman points / batches**. Use a completed acquisition already
 in the viewer, or acquire the configured camera channels. Click targets on each
 image plane, then choose **Replace acquisition positions** or **Append positions**.
 Ordinary points become separate stage positions using the current pixel-to-stage
 calibration; Raman and camera channels acquire at the center of each new FOV.
-For **Integrated batch (galvo)**, all clicks on one source plane become one batch
-at that plane's stage position. Centered positions and batches can share a run.
+For **Integrated batch (galvo)**, draw rectangles, ellipses, or polygons in the
+**Raman batches** layer using napari's native Shapes tools. Each shape is a
+separate batch, including multiple shapes on the same image plane. Set **Points
+per new batch**, then adjust individual counts in the batch table. Cyan points
+preview the exact sampling locations; editing a shape updates its preview.
+Click a table row to select that shape and return to its source plane. Lines,
+paths, empty regions, and regions outside the image cannot be applied.
+
+The stage moves to each batch's geometric center (area centroid for polygons),
+using the current objective's pixel-to-stage calibration. Sampling coordinates
+are shifted relative to the new FOV center, and the galvo scans within the batch
+during **one RM exposure**. The RM channel exposure in Channels is the
+total integration time per batch, not per sampling point. **Spectrum repeats** in
+Raman selection repeats the whole batch. Raman planes, camera-position filters,
+and galvo prepositioning also live in Raman selection; the old Raman acquisition
+section is removed. Centered positions and batches can share a run using Append.
+
+Batch boundaries, counts, identities, and exact sampled points are saved with
+positions and experiment settings. Reopening selection on the same source
+acquisition restores its saved shapes for editing. Acquisition uses saved points
+without regenerating them. Optional source-image metadata can still be omitted.
+Previously saved batches retain their saved stage positions; reopen selection
+and apply them again to use stage centering.
 
 Raman positions inherit a configured autofocus reference from their original FOV
 at its calibrated physical stage XY. Autofocus visits that location and returns

@@ -66,16 +66,20 @@ def build_extension_controls(owner):
         setattr(owner, name, widget)
         return label_widget
 
-    raman = section("Raman acquisition")
+    owner._raman_settings_panel = QWidget(owner)
+    owner._raman_settings_panel.hide()
+    raman = QFormLayout(owner._raman_settings_panel)
     owner._raman_settings_form = raman
     raman.addRow(QLabel("RM channel exposure is milliseconds per collection.\n"
                          "Individual: per aiming point. Batch: per integrated spectrum."))
     owner.mda_batch_check = QCheckBox("Integrated batch collection")
-    raman.addRow(owner.mda_batch_check)
+    # Retain the legacy value for imported experiments; new selections own mode.
+    owner.mda_batch_check.setParent(owner._raman_settings_panel)
+    owner.mda_batch_check.hide()
     owner.mda_pre_acq_check = QCheckBox("Preposition galvo before collection")
     owner.mda_pre_acq_check.setChecked(True)
     raman.addRow(owner.mda_pre_acq_check)
-    field(raman, "mda_repeats_input", "Frames per point", 1, minimum=1)
+    field(raman, "mda_repeats_input", "Spectrum repeats (per point or batch)", 1, minimum=1)
     field(raman, "mda_rz_input", "Raman planes (all / middle / indices)", "all")
     field(raman, "mda_imgp_input", "Camera positions (all / none / indices)", "all")
     owner.mda_collection_summary = QLabel("Add RM to the MDA channel table to collect spectra.")
@@ -514,7 +518,8 @@ def install_unified_mda(owner):
             self.control_btns.cancel_btn.released.disconnect()
             self.control_btns.cancel_btn.released.connect(lambda: owner._acquisition_controller.stop())
             self.valueChanged.connect(self.update_summary)
-            for control in [*owner._mda_extension_panel.findChildren(QWidget), *owner._mda_af_panel.findChildren(QWidget)]:
+            for control in [*owner._mda_extension_panel.findChildren(QWidget), *owner._mda_af_panel.findChildren(QWidget),
+                            *owner._raman_settings_panel.findChildren(QWidget)]:
                 for signal in ("valueChanged", "textChanged", "toggled", "currentTextChanged"):
                     if hasattr(control, signal):
                         getattr(control, signal).connect(lambda *_: self.valueChanged.emit())
