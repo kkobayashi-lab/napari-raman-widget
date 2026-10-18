@@ -119,6 +119,37 @@ def test_existing_source_does_not_acquire(owner):
         editor.assert_called_once()
 
 
+@pytest.mark.parametrize("user_cancels", [False, True])
+def test_reference_imaging_cleanup_does_not_cancel_next_run(owner, user_cancels):
+    widget, panel, app = owner
+    configured(panel)
+    widget.viewer = SimpleNamespace(layers=[])
+    widget.default_engine = widget.core.mda.engine
+    widget._prepare_for_selection = lambda: None
+
+    def acquire(preview):
+        if user_cancels:
+            from qtpy.QtCore import QTimer
+            from qtpy.QtWidgets import QProgressDialog
+            QTimer.singleShot(0, panel.findChild(QProgressDialog).close)
+        widget.viewer.layers.append(SimpleNamespace(metadata={
+            "useq_sequence": preview, "acquisition_complete": True,
+        }))
+        return SimpleNamespace(is_alive=lambda: False)
+
+    with patch("qtpy.QtWidgets.QInputDialog.getItem", return_value=("Acquire configured imaging", True)), \
+         patch("napari_raman_widget.autofocus_references.ReferenceEditor"), \
+         patch.object(widget.core, "run_mda", side_effect=acquire), \
+         patch.object(widget.core.mda, "cancel") as cancel:
+        if user_cancels:
+            with pytest.raises(ValueError, match="Reference imaging canceled"):
+                choose_references(widget)
+            cancel.assert_called_once()
+        else:
+            choose_references(widget)
+            cancel.assert_not_called()
+
+
 def test_editor_rejects_changed_positions(owner):
     widget, panel, app = owner
     seq = configured(panel)

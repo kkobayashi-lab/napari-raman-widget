@@ -204,6 +204,8 @@ class PreparedAcquisition:
 
 def prepare_acquisition(sequence, extensions, targets, image_shape=None):
     """Validate and detach a run without touching hardware or creating output."""
+    from .raman_selection import restore_position_targets
+    sequence = restore_position_targets(sequence)
     from .autofocus_references import reference_records, REFERENCE_KEY
     if any(p.sequence and REFERENCE_KEY in p.sequence.metadata for p in sequence.stage_positions):
         targets = [r for r in targets if r.get("role") != "autofocus"] + reference_records(sequence)
@@ -258,6 +260,8 @@ def prepare_acquisition(sequence, extensions, targets, image_shape=None):
         sources = tuple(SnapshotSource(record) for record in targets) if compact_grid else tuple(remap_targets(sequence, targets))
     if enabled and not any(s.role == "cell" and any(len(x) for x in s._points_by_position.values()) for s in sources):
         raise ValueError("RM acquisition needs prepared Raman targets")
+    if policies is not None and ext.tracking.enabled:
+        raise ValueError("Disable tracking for position-owned Raman targets; reselect positions from updated images instead")
     if custom_af and compact_grid and not any(
         s.role == "autofocus" and len(s._fixed_anchors) for s in sources
     ):
@@ -278,6 +282,17 @@ def prepare_acquisition(sequence, extensions, targets, image_shape=None):
         if not af_p:
             ext.autofocus.mode = "off"
     metadata = deepcopy(sequence.metadata)
+    from .autofocus_references import reference
+    metadata["autofocus_stage_xy"] = {
+        str(p): reference(pos)["stage_xy_um"] for p, pos in enumerate(sequence.stage_positions)
+        if reference(pos) and "stage_xy_um" in reference(pos)
+    }
+    metadata["autofocus_position_references"] = {
+        str(p): deepcopy(reference(pos)) for p, pos in enumerate(sequence.stage_positions) if reference(pos)
+    }
+    for xy in metadata["autofocus_stage_xy"].values():
+        if len(xy) != 2 or not all(math.isfinite(v) for v in xy):
+            raise ValueError("Autofocus reference needs finite stage XY coordinates")
     if policies is not None:
         metadata["raman_positions"] = policies
     else:

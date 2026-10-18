@@ -11,8 +11,33 @@ def target(position):
     return (position.sequence.metadata if position.sequence else {}).get(TARGET_KEY)
 
 
-def selected_positions(image_sequence, rows, shape, model=None, *, batch=False, provenance=True, dataset=None):
+def restore_position_targets(sequence):
+    """Restore position settings from a saved execution snapshot's p table."""
+    policies = sequence.metadata.get("raman_positions", {})
+    saved_references = sequence.metadata.get("autofocus_position_references", {})
+    if not policies and not saved_references:
+        return sequence
+    positions = []
+    for p, pos in enumerate(sequence.stage_positions):
+        if not target(pos) and str(p) in policies:
+            sub = pos.sequence or MDASequence()
+            pos = pos.replace(sequence=sub.replace(metadata={**sub.metadata, TARGET_KEY: deepcopy(policies[str(p)])}))
+        if str(p) in saved_references:
+            from .autofocus_references import with_reference, REFERENCE_KEY
+            if not pos.sequence or REFERENCE_KEY not in pos.sequence.metadata:
+                pos = with_reference(pos, saved_references[str(p)])
+        positions.append(pos)
+    metadata = dict(sequence.metadata)
+    metadata.pop("raman_positions", None)
+    metadata.pop("autofocus_position_references", None)
+    return sequence.replace(stage_positions=positions, metadata=metadata)
+
+
+def selected_positions(image_sequence, rows, shape, model=None, *, batch=False, provenance=True, dataset=None, reference_sequence=None):
     """Convert viewer t,p,g,c,z,y,x points to explicit acquisition positions."""
+    from .autofocus_references import reference, with_reference, source_stage_xy
+    from .experiment import position_id
+    parents = image_sequence.stage_positions if reference_sequence is None else reference_sequence.stage_positions
     rows = np.asarray(rows, dtype=float).reshape((-1, 7))
     shape = np.asarray(shape, dtype=float)
     if not len(rows):
@@ -23,7 +48,8 @@ def selected_positions(image_sequence, rows, shape, model=None, *, batch=False, 
         raise ValueError("Place Raman points inside an acquired image plane")
     keys = {tuple(row[:5].astype(int)) for row in rows}
     events = {}
-    for event in image_sequence:
+    from raman_mda_engine.grid_plan import iter_grid_events
+    for event in iter_grid_events(image_sequence):
         key = tuple(event.index.get(a, 0) for a in "tpgcz")
         if key in keys:
             events[key] = event
@@ -60,7 +86,7 @@ def selected_positions(image_sequence, rows, shape, model=None, *, batch=False, 
         value = dict(mode="integrated_batch" if batch else "centered",
                      points=(sampling / shape[::-1]).tolist(), image_shape=shape[::-1].tolist())
         if provenance:
-            value["source_image"] = dict(index=dict(zip("tpgcz", key)), pixels_yx=pixels.tolist(),
+            value["source_image"] = dict(index=dict(zip("tpgcz", map(int, key))), pixels_yx=pixels.tolist(),
                                          stage_xyz_um=[event.x_pos, event.y_pos, event.z_pos],
                                          image_shape_yx=shape.tolist())
             if dataset:
@@ -70,6 +96,24 @@ def selected_positions(image_sequence, rows, shape, model=None, *, batch=False, 
         positions.append(Position(x=xyz[0], y=xyz[1], z=xyz[2],
                                   name=f"Raman {'batch' if batch else 'point'} {len(positions)+1}",
                                   sequence=MDASequence(metadata={TARGET_KEY: value})))
+        source_p = key[1]
+        if source_p < len(image_sequence.stage_positions):
+            original = image_sequence.stage_positions[source_p]
+            matches = [p for p in parents if (p.x, p.y, p.z) == (original.x, original.y, original.z)
+                       and position_id(p) == position_id(original)]
+            parent = matches[0] if len(matches) == 1 else None
+            ref = reference(parent) if parent is not None else None
+            if ref:
+                inherited = deepcopy(ref)
+                if "stage_xy_um" not in inherited:
+                    if model is None:
+                        raise ValueError("Load the pixel-to-stage calibration to inherit autofocus references")
+                    inherited["stage_xy_um"] = source_stage_xy(dict(
+                        pixel_to_stage=dict(coefficients=np.asarray(model[0]).tolist(), degree=int(model[1])),
+                        stage_xyz_um=[parent.x, parent.y, parent.z], image_shape_yx=ref["image_shape"][::-1]),
+                        np.asarray(ref["point"]) * ref["image_shape"])
+                inherited["stage"] = xyz
+                positions[-1] = with_reference(positions[-1], inherited)
     return positions
 
 
@@ -93,6 +137,7 @@ def position_records(sequence, image_shape):
         if not len(values) or not np.isfinite(values).all() or np.any(pixels < 0) or np.any(pixels >= shape[::-1]):
             raise ValueError("Raman sampling points must be inside the image")
         record["points"][str(p)] = record["anchors"][str(p)] = points
+        value.update(points=points, image_shape=shape.tolist())
         policies[str(p)] = value
     return record, policies
 
@@ -174,7 +219,7 @@ class RamanEditor:
         self.viewer.window._qt_window.installEventFilter(self.close_filter)
 
     def apply(self):
-        from .autofocus_references import _require_idle
+        from .autofocus_references import _require_idle, reference
         from .experiment import METADATA_KEY
         try:
             _require_idle(self.owner)
@@ -183,20 +228,29 @@ class RamanEditor:
             if current.stage_positions != self.sequence.stage_positions:
                 raise ValueError("Positions changed while selecting; reopen the selector")
             model = None
-            if not self.batch.isChecked():
-                self.owner._ensure_current_vandermonde()
+            if not self.batch.isChecked() or any(
+                    reference(p) and "stage_xy_um" not in reference(p) for p in current.stage_positions):
+                if self.owner._ensure_current_vandermonde() is None:
+                    raise ValueError("Load the current objective's pixel-to-stage calibration")
                 model = self.owner.vandermonde
             positions = selected_positions(self.image_sequence, self.points.data, self.shape, model,
                 batch=self.batch.isChecked(), provenance=self.provenance.isChecked(),
-                dataset=self.image_layer.metadata.get("dataset_path"))
+                dataset=self.image_layer.metadata.get("dataset_path"), reference_sequence=current)
             if self.destination.currentIndex() == 1:
+                if current.grid_plan or "raman_grid" in current.metadata:
+                    raise ValueError("Replace grid positions, or expand the grid before appending Raman positions")
                 positions = [*current.stage_positions, *positions]
             metadata = deepcopy(current.metadata)
             metadata.pop("raman_grid", None)
             meta = metadata.setdefault(METADATA_KEY, {})
             meta["targets"] = []  # Position-owned targets are compiled at run time.
+            meta.setdefault("extensions", {}).setdefault("raman", {})["camera_positions"] = "all"
             meta.pop("wellplate_plan", None)
             panel.setValue(current.replace(stage_positions=positions, grid_plan=None, metadata=metadata))
+            if hasattr(self.owner, "viewer"):
+                self.owner.viewer.add_points(self.points.data.copy(), ndim=7, name="Selected Raman targets",
+                    face_color="orange", size=12, scale=self.image_layer.scale,
+                    out_of_slice_display=False, metadata={"raman_selection": True})
             self.owner.status.setText(f"Status: applied {len(positions)} positions; configure acquisition channels in Channels")
             self.viewer.close()
         except (ValueError, RuntimeError) as error:

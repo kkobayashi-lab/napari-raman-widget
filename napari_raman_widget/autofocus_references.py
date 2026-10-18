@@ -83,6 +83,8 @@ def attach_references(sequence, records):
             ids = record["position_ids"]
             if position_id(pos) in ids:
                 points = record.get("anchors", record["points"]).get(str(ids.index(position_id(pos))), [])
+                if value and "stage_xy_um" in value and points == [value["point"]]:
+                    continue  # Legacy point records cannot replace an absolute stage reference.
                 value = ({"point": points[0], "image_shape": record["image_shape"],
                           "stage": [pos.x, pos.y, pos.z]} if points else None)
         positions[i] = with_reference(pos, value)
@@ -101,6 +103,17 @@ def reference_records(sequence):
         record["points"][str(i)] = points
         record["anchors"][str(i)] = points
     return [record] if any(reference(p) for p in sequence.stage_positions) else []
+
+
+def source_stage_xy(source, pixel_yx):
+    """Map a survey pixel to absolute stage XY, without a shifted-FOV approximation."""
+    model = source["pixel_to_stage"]
+    x, y = (np.asarray(pixel_yx) - np.asarray(source["image_shape_yx"]) / 2)[::-1]
+    terms = [x**j * y**(n-j) for n in range(int(model["degree"])+1) for j in range(n+1)]
+    result = np.asarray(source["stage_xyz_um"][:2]) - np.asarray(terms) @ np.asarray(model["coefficients"])
+    if result.shape != (2,) or not np.isfinite(result).all():
+        raise ValueError("Invalid source-image pixel-to-stage calibration")
+    return result.tolist()
 
 
 def match_positions(sequence, image_sequence):
@@ -133,10 +146,10 @@ def choose_references(owner, *, image_layer=None, position_index=0, raman=False)
     from qtpy.QtWidgets import QInputDialog
     panel = owner._unified_mda
     sequence = panel.value()
-    if "raman_grid" in sequence.metadata or sequence.grid_plan:
+    if not raman and ("raman_grid" in sequence.metadata or sequence.grid_plan):
         raise ValueError("Grid autofocus uses its existing grid anchor; select explicit FOVs for custom references")
-    if not sequence.stage_positions:
-        raise ValueError("Add imaging positions before selecting autofocus references")
+    if not sequence.stage_positions and not (raman and (sequence.grid_plan or "raman_grid" in sequence.metadata)):
+        raise ValueError("Add imaging positions before selecting points")
     existing = getattr(owner, "_raman_editor" if raman else "_autofocus_editor", None)
     if existing is not None:
         existing.viewer.window._qt_window.raise_()
@@ -179,6 +192,9 @@ def choose_references(owner, *, image_layer=None, position_index=0, raman=False)
                     if progress.wasCanceled():
                         raise ValueError("Reference imaging canceled; no references were changed")
                 finally:
+                    # QProgressDialog.close() emits canceled even on success.
+                    # Disconnect before cleanup so it cannot cancel the next MDA.
+                    progress.canceled.disconnect(owner.core.mda.cancel)
                     progress.close()
             finally:
                 owner.core.register_mda_engine(previous_engine)
@@ -215,7 +231,7 @@ class ReferenceEditor:
                               scale=image_layer.scale, contrast_limits=image_layer.contrast_limits,
                               metadata=dict(image_layer.metadata))
         self.viewer.dims.axis_labels = ("t", "p", "g", "c", "z", "y", "x")
-        self.shape = tuple(image_layer.data.shape[-3:-1])
+        self.shape = tuple(image_layer.data.shape[-3:-1] if image_layer.rgb else image_layer.data.shape[-2:])
         # Engine sources normalize (y, x) by (width, height), including legacy records.
         self.source_shape = self.shape[::-1]
         data = []
@@ -223,6 +239,8 @@ class ReferenceEditor:
             ref = reference(pos)
             if ref:
                 y, x = np.asarray(ref["point"]) * ref["image_shape"]
+                if ref.get("stage_xy_um") is not None:
+                    continue  # A survey reference cannot be drawn as a local image pixel.
                 data.append([0, self.indices[i], 0, 0, 0, y, x])
         self.points = self.viewer.add_points(np.asarray(data).reshape((-1, 7)), ndim=7,
                                              name="Autofocus references", face_color="springgreen",
@@ -235,7 +253,8 @@ class ReferenceEditor:
         controls = QWidget()
         layout = QVBoxLayout(controls)
         layout.addWidget(QLabel("One reference per FOV. No reference means autofocus is skipped.\n"
-                               "Add a point to replace that FOV's reference; select and delete to remove it."))
+                               "Add a point to replace that FOV's reference; select and delete to remove it.\n"
+                               "Inherited stage references are retained unless replaced by a point on these images."))
         self.summary = QLabel()
         layout.addWidget(self.summary)
         self.error = QLabel()
@@ -279,7 +298,8 @@ class ReferenceEditor:
             self._updating = True
             self.points.data = data
             self._updating = False
-        count = len(set(rows).intersection(self.indices))
+        count = sum(index in rows or bool((reference(pos) or {}).get("stage_xy_um"))
+                    for index, pos in zip(self.indices, self.sequence.stage_positions))
         self.summary.setText(f"Autofocus: {count} set · {len(self.indices) - count} skipped")
 
     def apply(self):
@@ -298,6 +318,8 @@ class ReferenceEditor:
                     raise ValueError("Place references inside the image")
                 value = None if point is None else dict(point=(point / self.source_shape).tolist(),
                     image_shape=list(self.source_shape), stage=[pos.x, pos.y, pos.z])
+                if point is None and (reference(pos) or {}).get("stage_xy_um") is not None:
+                    value = reference(pos)
                 positions.append(with_reference(pos, value))
             self.owner._unified_mda.setValue(current.replace(stage_positions=positions))
             self.owner._unified_mda.update_summary()

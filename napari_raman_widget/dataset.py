@@ -158,6 +158,7 @@ def _load_raman_index(acquisition, img_x, img_y, batch):
     records, index = [], []
     location_records, location_index, designations = [], [], []
     time_by_event = {}
+    spectrum_locations = []
 
     for key in sorted(acquisition.raman_files):
         spectra = acquisition.load_spectra(key)
@@ -174,6 +175,14 @@ def _load_raman_index(acquisition, img_x, img_y, batch):
         for point, spectrum in enumerate(spectra):
             records.append(spectrum)
             index.append((key.t, key.p, key.z, point))
+            event_batch = metadata.get("batch", False) if batch is None else batch
+            if event_batch and len(locations):
+                location = locations.mean(axis=0)
+            elif len(locations) and len(spectra) % len(locations) == 0:
+                location = locations[point // (len(spectra) // len(locations))]
+            else:
+                location = np.array([np.nan, np.nan])
+            spectrum_locations.append((location * [img_y, img_x])[::-1])
         pixel_locations = locations * [img_y, img_x]
         # Stored points are y/x; the legacy DataFrame exposes X/Y.
         for point, (row, column) in enumerate(pixel_locations):
@@ -200,26 +209,7 @@ def _load_raman_index(acquisition, img_x, img_y, batch):
     )
     df_locs["designation"] = designations
 
-    if batch is None:
-        import h5py
-
-        with h5py.File(acquisition.raman_folder, "r") as handle:
-            batch = bool(handle.attrs.get("batch", False))
-
-    if batch:
-        if len(df_locs):
-            loc_summary = (
-                df_locs.groupby(level=["t", "p", "z"])[["X", "Y"]]
-                .mean()
-                .assign(pt=0)
-                .reset_index()
-                .set_index(["t", "p", "z", "pt"])
-            )
-            df = df.merge(loc_summary, left_index=True, right_index=True, how="left")
-    elif len(df_locs):
-        df = df.merge(
-            df_locs[["X", "Y"]], left_index=True, right_index=True, how="left"
-        )
+    df[["X", "Y"]] = np.asarray(spectrum_locations)
     df["time"] = df.index.droplevel("pt").map(time_by_event)
     df.attrs["spectral_axis"] = "wavenumber"
     df.attrs["spectral_axis_units"] = "cm^-1"

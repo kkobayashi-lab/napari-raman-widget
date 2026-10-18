@@ -538,7 +538,10 @@ class AcquisitionIndex:
             labels = self.load_designations(key)
             assignments: list[tuple[int, np.ndarray | None, str]] = []
 
-            if len(points) == spectrum_count:
+            if self.load_raman_metadata(key).get("batch") and len(points):
+                assignments = [(index, points.mean(axis=0), "integrated batch")
+                               for index in range(spectrum_count)]
+            elif len(points) == spectrum_count:
                 assignments = [
                     (
                         index,
@@ -872,6 +875,10 @@ class AcquisitionIndex:
                     "t": int(event["t"]),
                     "p": int(event["p"]),
                     "z": int(event["z"]),
+                    "c": int(event["c"]) if "c" in event.dtype.names else 0,
+                    "batch": bool(event["batch"]) if "batch" in event.dtype.names else bool(handle.attrs.get("batch", False)),
+                    "repeats": int(event["repeats"]) if "repeats" in event.dtype.names else 1,
+                    "selection": (self.sequence or {}).get("metadata", {}).get("raman_positions", {}).get(str(key.p), {}),
                     "timestamp_ns": int(event["timestamp_ns"]),
                     "exposure_ms": float(event["exposure_ms"]),
                     "stage_xyz_um": np.asarray(

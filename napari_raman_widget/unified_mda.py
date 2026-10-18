@@ -251,6 +251,15 @@ class AcquisitionController(QObject):
         prepared = prepare_acquisition(sequence, ext, self.panel.targets,
                                        image_shape=(owner.core.getImageWidth(), owner.core.getImageHeight()))
         ext = prepared.extensions
+        if prepared.raman_enabled and not ext.raman.batch and "raman_positions" not in prepared.sequence.metadata:
+            import numpy as np
+            width, height = owner.core.getImageWidth(), owner.core.getImageHeight()
+            for source in prepared.sources:
+                if source.role == "cell" and any(
+                    len(points) and not np.allclose(points * [width, height] / [height, width], .5)
+                    for points in source._points_by_position.values()
+                ):
+                    raise ValueError("Non-batch Raman requires centered stage positions. Use MDA → Raman to apply selections.")
         needs_raman_hardware = prepared.raman_enabled or ext.autofocus.mode in ("laser", "cell", "glass", "quartz")
         if needs_raman_hardware and (owner.collector is None or owner.transformer is None):
             raise ValueError("This experiment requires connected Raman hardware and calibration")
@@ -550,6 +559,8 @@ def install_unified_mda(owner):
             return seq.replace(metadata=metadata)
 
         def setValue(self, value):
+            from .raman_selection import restore_position_targets
+            value = restore_position_targets(value)
             from .autofocus_references import attach_references
             value = attach_references(identify_positions(value), value.metadata.get(METADATA_KEY, {}).get("targets", []))
             self._extra_metadata = deepcopy(value.metadata)
@@ -641,6 +652,11 @@ def install_unified_mda(owner):
             editable = not (controller and controller.busy)
             self.stage_positions.setEnabled(editable)
             self.grid_plan.setEnabled(editable and not dense)
+            from .raman_selection import target
+            position_owned = any(target(p) for p in sequence.stage_positions)
+            owner.mda_batch_check.setEnabled(editable and not position_owned)
+            owner.mda_batch_check.setToolTip("Selected Raman positions carry their own centered or integrated-batch mode."
+                                           if position_owned else "Integrate legacy aiming points into one spectrum.")
             self.update_dense_positions(sequence)
             if dense:
                 count = grid_count(sequence)

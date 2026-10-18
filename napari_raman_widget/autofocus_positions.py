@@ -48,7 +48,19 @@ def synchronize_reference_positions(panel, sequence):
             metadata = deepcopy(sub.metadata)
             metadata.setdefault("position_identity", position_id(pos) or uuid.uuid4().hex)
             if REFERENCE_KEY in metadata and reference(pos) is None:
-                metadata.pop(REFERENCE_KEY)
+                # Imported/calibrated coordinates are rounded by the native
+                # spinboxes. Bind the reference to that displayed position,
+                # without treating a real table edit as the same location.
+                stage = [pos.x, pos.y, pos.z]
+                original = metadata[REFERENCE_KEY]["stage"]
+                columns = (panel.stage_positions.X, panel.stage_positions.Y, panel.stage_positions.Z)
+                tolerances = [0.5 * 10 ** -table.cellWidget(row, table.indexOf(col)).decimals()
+                              for col in columns]
+                if all(a == b or (a is not None and b is not None and abs(a - b) <= tol)
+                       for a, b, tol in zip(original, stage, tolerances)):
+                    metadata[REFERENCE_KEY]["stage"] = stage
+                else:
+                    metadata.pop(REFERENCE_KEY)
             if metadata != sub.metadata:
                 widget = table.cellWidget(row, seq_col)
                 blocked = widget.blockSignals(True)
@@ -73,6 +85,9 @@ def refresh_reference_column(panel, owner):
             if ref:
                 y, x = [a * b for a, b in zip(ref["point"], ref["image_shape"])]
                 tip = f"Reference: x={x:.1f}, y={y:.1f} px\nMethod: {owner.mda_af_mode_combo.currentText()}\nClick to edit"
+                if "stage_xy_um" in ref:
+                    x, y = ref["stage_xy_um"]
+                    tip = f"Inherited reference: stage X={x:.3f}, Y={y:.3f} um\nClick to replace using current-position images"
                 if not any(box.isChecked() for box in owner.mda_af_axes.values()):
                     tip += "\nAutofocus is globally off; enable an axis in the Autofocus tab."
             else:

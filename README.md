@@ -23,6 +23,41 @@ base folder in **Data Output**. Changing it applies to the next save
 immediately and does not reconnect hardware or change the process working
 directory.
 
+## Raman selection in MDA
+
+Open **MDA → Raman → Select Raman points**. Use a completed acquisition already
+in the viewer, or acquire the configured camera channels. Click targets on each
+image plane, then choose **Replace acquisition positions** or **Append positions**.
+Ordinary points become separate stage positions using the current pixel-to-stage
+calibration; Raman and camera channels acquire at the center of each new FOV.
+For **Integrated batch (galvo)**, all clicks on one source plane become one batch
+at that plane's stage position. Centered positions and batches can share a run.
+
+Raman positions inherit a configured autofocus reference from their original FOV
+at its calibrated physical stage XY. Autofocus visits that location and returns
+to the Raman position for acquisition. This also applies to integrated batches
+and does not require optional source-image metadata. If the parent has no
+reference, autofocus stays unset. Acquire camera images at the new positions to
+select missing references or replace inherited ones. Inherited references remain
+set when other positions are edited, and survive position and run saves.
+
+Selection preserves Channels. Add **RM** to acquire spectra; retain or add camera
+channels only when fresh images are wanted. Directly entered stage positions also
+support centered Raman without any source image. Position-owned targets currently
+require tracking to be off; reselect from updated images when targets move.
+
+Source-image metadata is optional. When enabled it records the selected pixels,
+source `(t,p,g,c,z)` indices, calibration when used, and the dataset path when the
+source was saved. No source image is required to acquire or load Raman data.
+Saved run indices refer to the saved position table, independent of subsequent
+edits. Raman HDF5 schema 2 records `(t,p,z,c)`, actual stage coordinates, per-event
+batch mode, and a spectrum-aligned repeat index. Batch repeats remain measurements
+of the whole sampling set. Older HDF5 runs remain readable.
+
+Replacing positions does not overwrite files. The existing Save Acquisition
+behavior remains: choose a fresh destination by default; replace the entire run
+folder only when **Overwrite acquisition folder** is enabled and reviewed.
+
 ## Viewer stage controls
 
 In **Hardware Control**, enable **Drag image to move stage** to move XY by
