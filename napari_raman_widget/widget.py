@@ -434,10 +434,19 @@ class HardwareWidget(QWidget):
         self.laser_autofocus_btn.clicked.connect(
             self.laser_autofocus_center
         )
-        hardware_layout.addWidget(self.laser_autofocus_btn)
 
         hardware_box.setLayout(hardware_layout)
         outer.addWidget(hardware_box)
+
+        from .wellplate_navigation import WellPlateNavigationPanel
+        navigation_box = make_collapsible("Well plate navigation", expanded=False)
+        navigation_layout = QVBoxLayout(navigation_box)
+        self.wellplate_navigation = WellPlateNavigationPanel(self)
+        navigation_layout.addWidget(self.wellplate_navigation)
+        outer.addWidget(navigation_box)
+        autofocus_box = make_collapsible("Autofocus", expanded=True)
+        autofocus_layout = QVBoxLayout(autofocus_box)
+        outer.addWidget(autofocus_box)
 
         # ================= DATA OUTPUT SECTION =================
         output_box = make_collapsible("Data Output", expanded=True)
@@ -1280,6 +1289,9 @@ class HardwareWidget(QWidget):
         # Acquisition configuration belongs to the shared MDA dock.
         from .unified_mda import build_extension_controls, apply_prepared_positions
         build_extension_controls(self)
+        from .autofocus_panel import AutofocusPanel
+        self.autofocus_panel = AutofocusPanel(self)
+        autofocus_layout.addWidget(self.autofocus_panel)
         self.apply_mda_positions_btn = QPushButton("Apply prepared positions to MDA")
         self.apply_mda_positions_btn.clicked.connect(lambda: apply_prepared_positions(self))
         sel_layout.addWidget(self.apply_mda_positions_btn)
@@ -3897,6 +3909,9 @@ class HardwareWidget(QWidget):
                 config_file=self.mm_config,
                 stage_centering_model=stationary_stage_model,
             )
+            panel = getattr(self, "autofocus_panel", None)
+            if panel is not None:
+                engine.raman_events.autofocusFinished.connect(panel.show_result)
             starting_z = float(engine.try_get_ZPosition())
 
             try:

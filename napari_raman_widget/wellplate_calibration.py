@@ -51,14 +51,7 @@ def extend_plate_mapping(wizard):
     native_update_info = calibration._update_info
     saved_matrix = None
 
-    # Draw in logical plate coordinates. Stage coordinates are stored only in
-    # the items' click data, so reversed stage axes never flip the displayed board.
-    view = calibration._plate_test
-    native_draw = view.drawPlate
-    native_markers = view._add_preset_positions_items
-    displayed_plan = None
-    view.setDrawLabels(False)
-    view.setDrawWellEdgeSpots(True)
+    install_plate_navigation_view(calibration._plate_test, calibration._calibrated_wells)
 
     # Imported calibrated plans can also reach the selection view. Always draw
     # its logical layout, independently of the saved stage transform.
@@ -72,63 +65,6 @@ def extend_plate_mapping(wizard):
         native_selection_draw(plan)
 
     selection_view.drawPlate = MethodType(draw_selection, selection_view)
-
-    def draw_plate(_self, plan):
-        nonlocal displayed_plan
-        from pymmcore_widgets.useq_widgets._well_plate_widget import DATA_POSITION
-        from qtpy.QtCore import Qt
-
-        if not isinstance(plan, WellPlatePlan):
-            plan = WellPlatePlan(plate=plan, a1_center_xy=(0, 0))
-        displayed_plan = plan
-        nominal = WellPlatePlan(plate=plan.plate, a1_center_xy=(0, 0),
-                                selected_wells=plan.selected_wells)
-        native_draw(nominal)
-        for position in plan.all_well_positions:
-            item = view._well_items[(position.plate_row, position.plate_col)]
-            item.setData(DATA_POSITION, position)
-            item.setToolTip(f"{position.name} stage XY [µm]: ({position.x:.0f}, {position.y:.0f})")
-        for index in calibration._calibrated_wells:
-            view.setWellColor(*index, Qt.green)
-
-    view.drawPlate = MethodType(draw_plate, view)
-
-    def add_markers(_self, rect, position, nominal):
-        from pymmcore_widgets.useq_widgets._well_plate_widget import DATA_POSITION
-
-        start = len(view._well_edge_spots)
-        native_markers(rect, position, nominal)
-        center = displayed_plan.all_well_positions[
-            position.plate_row * nominal.plate.columns + position.plate_col]
-        # Convert logical edge offsets into measured stage directions. Normalize
-        # each direction so the manufacturer radius remains the physical radius.
-        directions = displayed_plan.affine_transform[:2, :2][::-1]
-        directions = directions / np.linalg.norm(directions, axis=0)
-        screen_center = rect.center()
-        for item in view._well_edge_spots[start:]:
-            point = item.rect().center()
-            delta = directions @ np.array([point.y() - screen_center.y(), point.x() - screen_center.x()])
-            stage_position = center.replace(x=center.x + delta[0], y=center.y + delta[1])
-            item.setData(DATA_POSITION, stage_position)
-            item.setToolTip(f"{stage_position.name} stage XY [µm]: "
-                            f"({stage_position.x:.0f}, {stage_position.y:.0f})")
-
-    view._add_preset_positions_items = MethodType(add_markers, view)
-
-    def double_click(_self, event):
-        from pymmcore_widgets.useq_widgets._well_plate_widget import DATA_POSITION
-        from qtpy.QtWidgets import QGraphicsView
-
-        if event is not None:
-            # Labels sit above the well outline; skip items with no click data.
-            for item in view.items(event.pos()):
-                position = item.data(DATA_POSITION)
-                if position is not None:
-                    view.positionDoubleClicked.emit(position)
-                    break
-        QGraphicsView.mouseDoubleClickEvent(view, event)
-
-    view.mouseDoubleClickEvent = MethodType(double_click, view)
 
     def value(_self):
         plan = native_value()
@@ -194,3 +130,71 @@ def extend_plate_mapping(wizard):
     button = wizard.button(wizard.WizardButton.CustomButton2)
     button.clicked.disconnect()
     button.clicked.connect(wizard.load)
+
+
+def install_plate_navigation_view(view, calibrated_wells=()):
+    """Display logical wells with calibrated stage coordinates for click targets."""
+    # Draw in logical plate coordinates. Stage coordinates are stored only in
+    # the items' click data, so reversed stage axes never flip the displayed board.
+    native_draw = view.drawPlate
+    native_markers = view._add_preset_positions_items
+    displayed_plan = None
+    view.setDrawLabels(False)
+    view.setDrawWellEdgeSpots(True)
+
+    def draw_plate(_self, plan):
+        nonlocal displayed_plan
+        from pymmcore_widgets.useq_widgets._well_plate_widget import DATA_POSITION
+        from qtpy.QtCore import Qt
+
+        if not isinstance(plan, WellPlatePlan):
+            plan = WellPlatePlan(plate=plan, a1_center_xy=(0, 0))
+        displayed_plan = plan
+        nominal = WellPlatePlan(plate=plan.plate, a1_center_xy=(0, 0),
+                                selected_wells=plan.selected_wells)
+        native_draw(nominal)
+        for position in plan.all_well_positions:
+            item = view._well_items[(position.plate_row, position.plate_col)]
+            item.setData(DATA_POSITION, position)
+            item.setToolTip(f"{position.name} stage XY [µm]: ({position.x:.0f}, {position.y:.0f})")
+        for index in calibrated_wells:
+            view.setWellColor(*index, Qt.green)
+
+    view.drawPlate = MethodType(draw_plate, view)
+
+    def add_markers(_self, rect, position, nominal):
+        from pymmcore_widgets.useq_widgets._well_plate_widget import DATA_POSITION
+
+        start = len(view._well_edge_spots)
+        native_markers(rect, position, nominal)
+        center = displayed_plan.all_well_positions[
+            position.plate_row * nominal.plate.columns + position.plate_col]
+        # Convert logical edge offsets into measured stage directions. Normalize
+        # each direction so the manufacturer radius remains the physical radius.
+        directions = displayed_plan.affine_transform[:2, :2][::-1]
+        directions = directions / np.linalg.norm(directions, axis=0)
+        screen_center = rect.center()
+        for item in view._well_edge_spots[start:]:
+            point = item.rect().center()
+            delta = directions @ np.array([point.y() - screen_center.y(), point.x() - screen_center.x()])
+            stage_position = center.replace(x=center.x + delta[0], y=center.y + delta[1])
+            item.setData(DATA_POSITION, stage_position)
+            item.setToolTip(f"{stage_position.name} stage XY [µm]: "
+                            f"({stage_position.x:.0f}, {stage_position.y:.0f})")
+
+    view._add_preset_positions_items = MethodType(add_markers, view)
+
+    def double_click(_self, event):
+        from pymmcore_widgets.useq_widgets._well_plate_widget import DATA_POSITION
+        from qtpy.QtWidgets import QGraphicsView
+
+        if event is not None:
+            # Labels sit above the well outline; skip items with no click data.
+            for item in view.items(event.pos()):
+                position = item.data(DATA_POSITION)
+                if position is not None:
+                    view.positionDoubleClicked.emit(position)
+                    break
+        QGraphicsView.mouseDoubleClickEvent(view, event)
+
+    view.mouseDoubleClickEvent = MethodType(double_click, view)

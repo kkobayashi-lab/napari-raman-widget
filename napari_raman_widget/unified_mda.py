@@ -1,6 +1,7 @@
 """Application-owned MDA dock and its shared acquisition controller."""
 from __future__ import annotations
 
+from math import ceil
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -115,10 +116,25 @@ def build_extension_controls(owner):
     af.addRow("Custom mode", owner.mda_af_mode_combo)
     field(af, "mda_afp_input", "Positions (all / none / indices)", "all")
     field(af, "mda_refocus_input", "Refocus every N timepoints (0 = initial only)", 0)
-    owner._af_range_label = field(af, "mda_af_range_input", "Search range (± µm)", 6.0, minimum=0.1)
-    owner._search_pts_label = field(af, "mda_search_pts_input", "Search points", 8, minimum=2, maximum=500)
+    owner._af_range_label = field(af, "mda_af_range_input", "Initial coarse range (± µm)", 6.0, minimum=0.1, maximum=100.0)
+    owner._search_pts_label = field(af, "mda_search_pts_input", "Search points", 8, minimum=3, maximum=500)
     owner._fine_range_label = field(af, "mda_fine_range_input", "Laser fine range (± µm)", 1.5, minimum=0.1)
-    owner._fine_pts_label = field(af, "mda_fine_pts_input", "Laser fine search points", 8, minimum=2, maximum=500)
+    owner._fine_pts_label = field(af, "mda_fine_pts_input", "Laser fine search points", 8, minimum=3, maximum=500)
+    owner.mda_fine_pts_input.setReadOnly(True)
+    owner._fine_pts_label.setText("Automatic fine samples (0.5 um step)")
+    owner.mda_fine_range_input.setDecimals(6)
+    owner.mda_fine_range_input.setMinimum(0.000001)
+    owner.mda_fine_range_input.setReadOnly(True)
+    owner.mda_fine_range_input.setToolTip("One coarse step on each side, rounded up to a multiple of 0.5 um.")
+    owner._fine_range_label.setText("Automatic fine range (± µm)")
+    def update_fine_range(*_args):
+        value = 2 * owner.mda_af_range_input.value() / (owner.mda_search_pts_input.value() - 1)
+        steps = max(1, ceil(value / 0.5))
+        owner.mda_fine_range_input.setValue(steps * 0.5)
+        owner.mda_fine_pts_input.setValue(2 * steps + 1)
+    owner.mda_af_range_input.valueChanged.connect(update_fine_range)
+    owner.mda_search_pts_input.valueChanged.connect(update_fine_range)
+    update_fine_range()
     af_layout.addStretch()
     update_autofocus_controls(owner)
 
@@ -198,7 +214,6 @@ def write_extensions(owner, ext):
         "mda_af_mode_combo": "laser",
         "mda_afp_input": ext.autofocus.positions, "mda_refocus_input": ext.autofocus.every,
         "mda_af_range_input": ext.autofocus.search_range, "mda_search_pts_input": ext.autofocus.search_points,
-        "mda_fine_range_input": ext.autofocus.fine_range, "mda_fine_pts_input": ext.autofocus.fine_points,
         "mda_seg_track_check": ext.tracking.enabled, "mda_segment_every_input": ext.tracking.every,
         "mda_seg_ch_combo": ext.tracking.channel, "mda_seg_scale_input": ext.tracking.scale,
         "mda_seg_model_combo": ext.tracking.model, "mda_seg_diameter_input": ext.tracking.diameter,
@@ -370,6 +385,9 @@ class AcquisitionController(QObject):
                     circle_center=(owner.sel_cx_input.value(), owner.sel_cy_input.value()),
                     circle_radius=owner.sel_r_input.value(),
                 )
+                panel = getattr(owner, "autofocus_panel", None)
+                if panel is not None:
+                    engine.raman_events.autofocusFinished.connect(panel.show_result)
                 owner._connect_raman_visualization(engine)
             else:
                 engine = MDAEngine(owner.core)

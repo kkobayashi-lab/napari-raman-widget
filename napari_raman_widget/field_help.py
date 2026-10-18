@@ -356,12 +356,12 @@ HELP = {
         "the selection's autofocus list; set explicitly when overriding "
         "autofocus differently."
     ),
-    "mda_af_range_input": "Coarse autofocus range. Hidden if autofocus is None.",
+    "mda_af_range_input": "Initial coarse autofocus half-range. Laser searches can extend up to +/-100 um from starting Z.",
     "mda_search_pts_input": "Coarse autofocus sample count.",
     "mda_fine_range_input": (
-        "Fine autofocus half-range (+/- um). Shown only for laser autofocus."
+        "Automatic fine half-range: one coarse sampling step, rounded up to a multiple of 0.5 um."
     ),
-    "mda_fine_pts_input": "Fine laser-autofocus sample count.",
+    "mda_fine_pts_input": "Automatic sample count for fixed 0.5 um fine spacing.",
     "mda_seg_track_check": (
         "Re-segment images and update aiming during the time series."
     ),
