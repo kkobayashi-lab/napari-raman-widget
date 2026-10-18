@@ -9,6 +9,8 @@ from napari_raman_widget.mda_timing import (
     estimate_live_mda_end,
     format_duration,
     mda_schedule_window,
+    remember_live_mda_estimate,
+    remembered_acquisition_seconds,
 )
 
 
@@ -151,3 +153,55 @@ def test_live_eta_uses_only_the_previous_ten_measurements():
 
 def test_live_eta_is_unavailable_before_first_measurement():
     assert estimate_live_mda_end([], 0, 20, datetime.now()) is None
+
+
+def test_remembered_window_is_reused_per_completion_not_per_raman_point():
+    live = estimate_live_mda_end(range(1, 13), 12, 20, datetime.now())
+    remember_live_mda_estimate(live)
+    # A fresh settings instance reads the saved value, as on a later launch.
+    assert remembered_acquisition_seconds() == 7.5
+    estimate = estimate_mda_time(
+        _sequence(_event("RM"), _event("BF", exposure=50)),
+        [_two_point_source()], 1000, [0], [0], point_repeats=3,
+    )
+    assert estimate.raman_points == 6
+    assert estimate.acquisition_count == 2
+    assert estimate.duration_seconds == 15
+    assert estimate.remembered_average_seconds == 7.5
+
+
+def test_short_run_does_not_replace_saved_full_window():
+    remember_live_mda_estimate(
+        estimate_live_mda_end([2] * 10, 10, 20, datetime.now())
+    )
+    remember_live_mda_estimate(
+        estimate_live_mda_end([100] * 9, 9, 20, datetime.now())
+    )
+    assert remembered_acquisition_seconds() == 2
+
+
+def test_remembered_timing_respects_schedule_and_skips_unacquired_events():
+    remember_live_mda_estimate(
+        estimate_live_mda_end([2] * 10, 10, 20, datetime.now())
+    )
+    estimate = estimate_mda_time(
+        _sequence(_event("RM", z=1), _event("BF", p=1),
+                  _event("RM"), _event("RM", min_start_time=10)),
+        [_two_point_source()], 1000, [0], [0],
+    )
+    assert estimate.acquisition_count == 2
+    assert estimate.active_seconds == 4
+    assert estimate.duration_seconds == 12
+    assert estimate.scheduled_wait_seconds == 8
+
+
+@pytest.mark.parametrize("value", ["broken", "nan", "inf", -1, 0])
+def test_invalid_saved_timing_falls_back_to_fixed_estimate(value):
+    from napari_raman_widget.mda_timing import _timing_settings
+
+    _timing_settings().setValue("mda/average_acquisition_seconds", value)
+    estimate = estimate_mda_time(
+        _sequence(_event("RM")), [_two_point_source()], 1000, [0], [0],
+    )
+    assert estimate.duration_seconds == 3.2
+    assert estimate.remembered_average_seconds is None

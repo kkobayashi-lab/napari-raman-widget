@@ -22,12 +22,16 @@ class LazyMDAViewer:
         self._run_layer = None
         self._frame_shape = None
         self._stores = []
+        self._received_indices = set()
+        self._mda_cancelled = False
         events = core.mda.events
         self._connections = [
             (events.sequenceStarted, self._on_mda_started),
             (events.frameReady, self._on_mda_frame),
             (events.sequenceFinished, self._on_mda_finished),
         ]
+        if hasattr(events, "sequenceCanceled"):
+            self._connections.append((events.sequenceCanceled, self._on_mda_cancelled))
         for signal, slot in self._connections:
             signal.connect(slot)
 
@@ -50,6 +54,8 @@ class LazyMDAViewer:
         self._run_layer = None
         self._frame_shape = None
         self._mda_running = True
+        self._received_indices.clear()
+        self._mda_cancelled = False
 
     def _storage_sizes(self, sequence):
         from raman_mda_engine.grid_plan import GRID_KEY, grid_count
@@ -112,7 +118,9 @@ class LazyMDAViewer:
             "useq_sequence": sequence,
             "channel_labels": channel_labels,
             "lazy_mda_visualization": True,
+            "acquisition_complete": False,
             "raman_channel": "RM",
+            "dataset_path": sequence.metadata.get("dataset_path"),
         }
         scale = [1.0] * (len(shape) - 1)
         pixel_size = float(self._mmc.getPixelSizeUm())
@@ -149,6 +157,7 @@ class LazyMDAViewer:
         axes, array, layer = self._run_layer
         index = self._event_index(event, axes)
         array[index] = self._camera_image_rgb(image, array.dtype)
+        self._received_indices.add(index)
         layer.refresh()
         self._show_event(event, axes)
 
@@ -352,12 +361,27 @@ class LazyMDAViewer:
             title=title,
         )
         array[self._event_index(event, axes)] = image
+        self._received_indices.add(self._event_index(event, axes))
         layer.refresh()
         self._show_event(event, axes)
 
     @ensure_main_thread
+    def _on_mda_cancelled(self, *_args):
+        self._mda_cancelled = True
+
+    @ensure_main_thread
     def _on_mda_finished(self, _sequence):
         self._mda_running = False
+        if self._run_layer is not None:
+            status = getattr(self._mmc.mda, "status", None)
+            if callable(status):
+                reason = getattr(status(), "finish_reason", None)
+                complete = str(getattr(reason, "value", reason)).lower() in ("completed", "complete", "finished")
+            else:
+                # Older pymmcore-plus exposes no finish reason. Only offer full stacks.
+                expected = int(np.prod(list(self._storage_sizes(_sequence).values())))
+                complete = len(self._received_indices) == expected
+            self._run_layer[2].metadata["acquisition_complete"] = complete and not self._mda_cancelled
 
 
 def install_lazy_mda_viewer(main_window, core, viewer):

@@ -19,6 +19,30 @@ from napari_raman_widget.widget import (
 )
 
 
+def test_live_completion_remembers_latest_ten_intervals(monkeypatch):
+    from napari_raman_widget.mda_timing import remembered_acquisition_seconds
+
+    owner = SimpleNamespace(
+        _raman_mda_pending=True,
+        _mda_live_last_completion=0.0,
+        _mda_live_completed=0,
+        _mda_live_total=20,
+        _mda_live_intervals=[],
+        mda_live_eta_label=SimpleNamespace(setText=lambda text: None),
+    )
+    now = 0
+    for interval in range(1, 13):
+        now += interval
+        monkeypatch.setattr("napari_raman_widget.widget.time.perf_counter", lambda: now)
+        HardwareWidget._record_live_mda_completion(owner)
+        if interval < 10:
+            assert remembered_acquisition_seconds() is None
+    assert remembered_acquisition_seconds() == 7.5
+    HardwareWidget._start_live_mda_timing(owner, 30)
+    assert owner._mda_live_intervals == []
+    assert remembered_acquisition_seconds() == 7.5
+
+
 class TestCellLayerMetadata(unittest.TestCase):
     def test_legacy_and_named_cell_sources_are_serialized(self):
         sources = [
@@ -194,6 +218,7 @@ class TestMdaTimePreview(unittest.TestCase):
     def _estimate():
         return SimpleNamespace(
             duration_seconds=3.2,
+            remembered_average_seconds=None,
             scheduled_wait_seconds=0,
             raman_points=2,
             imaging_frames=1,

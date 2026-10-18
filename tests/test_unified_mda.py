@@ -64,6 +64,43 @@ def owner(qt_app):
     app.processEvents()
 
 
+def test_dense_grid_is_listed_in_positions_without_expanding_points(owner):
+    from raman_mda_engine.grid_plan import GRID_KEY
+
+    widget, panel, app = owner
+    native_table = panel.stage_positions.table()
+    grid = {"version": 1, "regions": [
+        {"x": [0, 100, 10001], "y": [0, 200, 20001], "z": None},
+        {"x": [20, 30, 2], "y": [40, 50, 3], "z": 7},
+    ]}
+    panel.setValue(MDASequence(channels=["BF"], metadata={GRID_KEY: grid}))
+    assert panel.tab_wdg.currentWidget() is panel.stage_positions
+    assert panel.stage_positions.isAncestorOf(panel.dense_grid_table)
+    assert not panel.dense_positions.isHidden()
+    assert native_table.isHidden()
+    assert panel.dense_grid_table.rowCount() == 2
+    assert panel.dense_grid_table.item(0, 1).text() == "10,001 × 20,001 = 200,030,001"
+    assert panel.dense_grid_table.item(0, 4).text() == "At run start"
+    assert panel.dense_grid_table.item(1, 4).text() == "7"
+    saved = panel.value()
+    assert saved.stage_positions == ()
+    assert saved.metadata[GRID_KEY] == grid
+    panel.setValue(MDASequence.model_validate_json(saved.model_dump_json()))
+    assert panel.dense_grid_table.rowCount() == 2
+    assert panel.value().metadata[GRID_KEY] == grid
+    panel.lock(True)
+    assert not panel.detach_grid_btn.isEnabled()
+    panel.lock(False)
+    assert panel.detach_grid_btn.isEnabled()
+    panel.detach_grid_btn.click()
+    assert GRID_KEY not in panel.value().metadata
+    assert panel.dense_positions.isHidden()
+    assert not native_table.isHidden()
+    assert panel.stage_positions.af_per_position.isHidden()
+    panel.setValue(MDASequence(stage_positions=[Position(x=3, y=4)], channels=["BF"]))
+    assert panel.value().stage_positions[0].x == 3
+
+
 def test_install_is_idempotent_and_extension_settings_round_trip(owner):
     widget, panel, app = owner
     assert install_unified_mda(widget) is panel
@@ -225,8 +262,12 @@ def test_unchecked_axes_disable_laser_and_ignore_imported_hardware_plan(owner):
     panel.setValue(MDASequence(channels=["BF"]))
     widget.mda_af_mode_combo.setCurrentText("laser")
     widget.mda_af_axes["p"].setChecked(True)
-    with pytest.raises(ValueError, match="autofocus targets"):
+    widget.mda_delay_input.setValue(60)
+    with patch("napari_raman_widget.unified_mda.QMessageBox.question", return_value=QtWidgets.QMessageBox.Ok):
         controller.run()
+    assert controller.pending[0].autofocus_positions == ()
+    assert controller.pending[0].extensions.autofocus.mode == "off"
+    controller.stop()
 
 
 
@@ -488,7 +529,7 @@ def test_camera_only_autofocus_references_round_trip_without_cells(owner):
     assert [s.role for s in prepared.sources] == ["autofocus"]
     np.testing.assert_allclose(prepared.sources[0].get_mda_points(next(prepared.sequence.iter_events())), [[0.4, 0.6]])
     assert saved.channels == sequence.channels
-    assert saved.stage_positions == sequence.stage_positions
+    assert [(p.x, p.y, p.z) for p in saved.stage_positions] == [(p.x, p.y, p.z) for p in sequence.stage_positions]
 
 
 def test_cell_selection_preserves_independent_references_and_focus_policy(owner):
@@ -534,23 +575,26 @@ def test_reference_preview_uses_camera_and_restores_engine_and_preset(owner, fai
     previous = widget.core.mda.engine
     widget.default_engine = previous
     widget._prepare_for_selection = lambda: None
-    widget.viewer = SimpleNamespace(layers=SimpleNamespace(selection=SimpleNamespace(active=None)))
-    layer = SimpleNamespace(mode=None, add=lambda point: None)
-    source = SimpleNamespace(_points=layer)
+    widget.viewer = SimpleNamespace(layers=[])
     widget.core.setConfig("Channel", "RM")
-    with patch.object(widget.core, "run_mda", side_effect=RuntimeError("preview failed") if failure else None) as run, \
-         patch("cns_control.utils.create_point_sources", return_value=[source]) as create:
+    def acquire(preview):
+        if failure:
+            raise RuntimeError("preview failed")
+        widget.viewer.layers.append(SimpleNamespace(metadata={"useq_sequence": preview, "acquisition_complete": True}))
+        return SimpleNamespace(is_alive=lambda: False)
+    with patch.object(widget.core, "run_mda", side_effect=acquire) as run, \
+         patch("qtpy.QtWidgets.QInputDialog.getItem", return_value=("Acquire configured imaging", True)), \
+         patch("napari_raman_widget.autofocus_references.ReferenceEditor") as create:
         if failure:
             with pytest.raises(RuntimeError, match="preview failed"):
                 choose_references(widget)
             create.assert_not_called()
         else:
             choose_references(widget)
-            assert create.call_args.kwargs["roles"] == ["autofocus"]
-            assert layer.mode == "add"
+            create.assert_called_once()
     preview = run.call_args.args[0]
     assert [c.config for c in preview.channels] == ["BF"]
-    assert preview.time_plan is None
+    assert preview.time_plan == original.time_plan
     assert widget.core.mda.engine is previous
     assert widget.core.getCurrentConfig("Channel") == "RM"
     assert panel.value().channels == original.channels

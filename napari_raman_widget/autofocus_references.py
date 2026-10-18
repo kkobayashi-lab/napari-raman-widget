@@ -2,9 +2,9 @@
 from copy import deepcopy
 
 import numpy as np
-from useq import MDASequence, Position
+from useq import MDASequence
 
-from .experiment import METADATA_KEY, capture_targets, identify_positions, position_id
+from .experiment import capture_targets, position_id
 
 
 def preserve_references(old_sequence, new_sequence, records, source_positions=None):
@@ -25,11 +25,11 @@ def preserve_references(old_sequence, new_sequence, records, source_positions=No
         for p, destination_position in enumerate(new_sequence.stage_positions):
             position = source_positions[p] if source_positions is not None else destination_position
             matches = [i for i, old in enumerate(old_positions)
-                       if (old.x, old.y) == (position.x, position.y)
+                       if (old.x, old.y, old.z) == (position.x, position.y, position.z)
                        and position_id(old) == position_id(position)]
             if not matches:
                 matches = [i for i, old in enumerate(old_positions)
-                           if (old.x, old.y) == (position.x, position.y)
+                           if (old.x, old.y, old.z) == (position.x, position.y, position.z)
                            and (old.name or "").split(" [id:")[0] == (position.name or "").split(" [id:")[0]]
             if len(matches) != 1:
                 continue
@@ -53,80 +53,271 @@ def _require_idle(owner):
         raise ValueError("Stop the acquisition before editing autofocus references")
 
 
-def choose_references(owner):
-    """Acquire a camera preview at the existing positions and open an AF-only layer."""
-    _require_idle(owner)
-    from cns_control.utils import create_point_sources
-    from raman_mda_engine.aiming.transformers import Identity
-    from .experiment import SnapshotSource
+# Position sub-sequence metadata survives native table edits and position-file saves.
+REFERENCE_KEY = "autofocus_reference"
 
+
+def reference(position):
+    value = (position.sequence.metadata if position.sequence else {}).get(REFERENCE_KEY)
+    if value and value["stage"] == [position.x, position.y, position.z]:
+        return value
+    return None
+
+
+def with_reference(position, value):
+    sub = position.sequence or MDASequence()
+    metadata = dict(sub.metadata)
+    metadata.pop(REFERENCE_KEY, None)
+    if value is not None:
+        metadata[REFERENCE_KEY] = deepcopy(value)
+    return position.replace(sequence=sub.replace(metadata=metadata))
+
+
+def attach_references(sequence, records):
+    positions = list(sequence.stage_positions)
+    for i, pos in enumerate(positions):
+        value = reference(pos)
+        for record in records:
+            if record.get("role") != "autofocus" or record.get("fixed"):
+                continue
+            ids = record["position_ids"]
+            if position_id(pos) in ids:
+                points = record.get("anchors", record["points"]).get(str(ids.index(position_id(pos))), [])
+                value = ({"point": points[0], "image_shape": record["image_shape"],
+                          "stage": [pos.x, pos.y, pos.z]} if points else None)
+        positions[i] = with_reference(pos, value)
+    return sequence.replace(stage_positions=positions)
+
+
+def reference_records(sequence):
+    record = dict(id="position-autofocus", name="autofocus references", role="autofocus",
+                  image_shape=[1, 1], position_ids=[], points={}, anchors={})
+    for i, pos in enumerate(sequence.stage_positions):
+        ref = reference(pos)
+        if ref:
+            record["image_shape"] = ref["image_shape"]
+        points = [ref["point"]] if ref else []
+        record["position_ids"].append(position_id(pos))
+        record["points"][str(i)] = points
+        record["anchors"][str(i)] = points
+    return [record] if any(reference(p) for p in sequence.stage_positions) else []
+
+
+def match_positions(sequence, image_sequence):
+    """Return image indices, rejecting stale or ambiguous FOV associations."""
+    result = []
+    for pos in sequence.stage_positions:
+        matches = [i for i, old in enumerate(image_sequence.stage_positions)
+                   if position_id(pos) is not None and position_id(pos) == position_id(old)
+                   and (pos.x, pos.y, pos.z) == (old.x, old.y, old.z)]
+        if len(matches) != 1:
+            raise ValueError("This acquisition does not match the current FOVs. Acquire configured imaging again.")
+        result.append(matches[0])
+    return result
+
+
+def camera_sequence(sequence):
+    channels = [c for c in sequence.channels if c.config != "RM"]
+    if not channels:
+        raise ValueError("Configure at least one camera channel before acquiring reference images")
+    if any(p.sequence and p.sequence.model_dump(exclude={"uid", "metadata", "autofocus_plan"},
+                                               exclude_defaults=True) for p in sequence.stage_positions):
+        raise ValueError("Expand position sub-sequences before selecting autofocus references")
+    from .experiment import execution_positions
+    return execution_positions(sequence.replace(channels=channels, autofocus_plan=None, metadata={}))
+
+
+def choose_references(owner, *, image_layer=None, position_index=0, raman=False):
+    """Choose an image source, then edit references in a dedicated napari viewer."""
+    _require_idle(owner)
+    from qtpy.QtWidgets import QInputDialog
     panel = owner._unified_mda
     sequence = panel.value()
     if "raman_grid" in sequence.metadata or sequence.grid_plan:
         raise ValueError("Grid autofocus uses its existing grid anchor; select explicit FOVs for custom references")
-    sequence = identify_positions(sequence)
     if not sequence.stage_positions:
-        sequence = identify_positions(sequence.replace(stage_positions=[Position(
-            x=owner.core.getXPosition(), y=owner.core.getYPosition(), z=owner.core.getZPosition())]))
-    panel.setValue(sequence)
-    channels = [c for c in sequence.channels if c.config != "RM"]
-    channel = channels[0] if channels else {"config": "BF", "exposure": 100}
-    preview = MDASequence(stage_positions=[p.replace(sequence=None) for p in sequence.stage_positions],
-                          channels=[channel], axis_order="tpcz")
-    previous_engine = owner.core.mda.engine
-    group = (channel.group or "Channel") if channels else "Channel"
-    preset = owner.core.getCurrentConfig(group)
-    auto_shutter = owner.core.getAutoShutter()
-    shutter_open = owner.core.getShutterOpen()
-    try:
-        owner._prepare_for_selection()
-        owner.core.register_mda_engine(owner.default_engine)
-        owner.core.run_mda(preview)
-    finally:
-        owner.core.register_mda_engine(previous_engine)
-        if preset:
-            owner.core.setConfig(group, preset)
-            owner.core.waitForConfig(group, preset)
-        owner.core.setAutoShutter(auto_shutter)
-        owner.core.setShutterOpen(shutter_open)
-    sources = create_point_sources(owner.viewer, Identity(), names=["autofocus references"],
-                                   colors=["springgreen"], roles=["autofocus"])
-    source = sources[0]
-    source._img_shape = (owner.core.getImageWidth(), owner.core.getImageHeight())
-    references = preserve_references(sequence, sequence, panel.targets)
-    for record in references:
-        snapshot = SnapshotSource(record)
-        for i, identity in enumerate(record["position_ids"]):
-            p = next(j for j, pos in enumerate(sequence.stage_positions) if position_id(pos) == identity)
-            points = snapshot._anchors.get(i, np.empty((0, 2))) * source._img_shape
-            for y, x in points:
-                source._points.add([0, p, 0, 0, y, x])
-    owner._autofocus_reference_selection = (sequence, sources)
-    owner.viewer.layers.selection.active = source._points
-    source._points.mode = "add"
-    owner.status.setText("Status: click one autofocus reference per FOV, then Apply autofocus references")
+        raise ValueError("Add imaging positions before selecting autofocus references")
+    existing = getattr(owner, "_raman_editor" if raman else "_autofocus_editor", None)
+    if existing is not None:
+        existing.viewer.window._qt_window.raise_()
+        if not raman:
+            existing.viewer.dims.set_current_step(1, existing.indices[position_index])
+        return
+    if image_layer is None:
+        layers = [layer for layer in reversed(list(owner.viewer.layers))
+                  if layer.metadata.get("lazy_mda_visualization")
+                  and layer.metadata.get("acquisition_complete", False)]
+        options = ["Acquire configured imaging"] + [f"Use existing acquisition: {layer.name}" for layer in layers]
+        choice, ok = QInputDialog.getItem(panel, "Raman image source" if raman else "Autofocus image source", "Image source", options, 1 if layers else 0, False)
+        if not ok:
+            return
+        if choice != options[0]:
+            image_layer = layers[options.index(choice) - 1]
+        else:
+            preview = camera_sequence(sequence)
+            previous_engine = owner.core.mda.engine
+            presets = {c.group or "Channel": owner.core.getCurrentConfig(c.group or "Channel") for c in preview.channels}
+            auto_shutter, shutter_open = owner.core.getAutoShutter(), owner.core.getShutterOpen()
+            try:
+                owner._prepare_for_selection()
+                owner.core.register_mda_engine(owner.default_engine)
+                from qtpy.QtCore import QEventLoop, QTimer, Qt
+                from qtpy.QtWidgets import QProgressDialog
+                progress = QProgressDialog("Acquiring reference images…", "Cancel", 0, 0, panel)
+                progress.setWindowModality(Qt.WindowModal)
+                progress.setMinimumDuration(0)
+                progress.canceled.connect(owner.core.mda.cancel)
+                try:
+                    thread = owner.core.run_mda(preview)
+                    loop = QEventLoop()
+                    timer = QTimer(progress)
+                    timer.timeout.connect(lambda: loop.quit() if not thread.is_alive() else None)
+                    timer.start(50)
+                    progress.show()
+                    loop.exec()
+                    timer.stop()
+                    if progress.wasCanceled():
+                        raise ValueError("Reference imaging canceled; no references were changed")
+                finally:
+                    progress.close()
+            finally:
+                owner.core.register_mda_engine(previous_engine)
+                for group, preset in presets.items():
+                    if preset:
+                        owner.core.setConfig(group, preset)
+                        owner.core.waitForConfig(group, preset)
+                owner.core.setAutoShutter(auto_shutter)
+                owner.core.setShutterOpen(shutter_open)
+            from qtpy.QtWidgets import QApplication
+            QApplication.processEvents()
+            image_layer = next((layer for layer in reversed(list(owner.viewer.layers))
+                                if layer.metadata.get("useq_sequence") is preview), None)
+            if image_layer is None or not image_layer.metadata.get("acquisition_complete"):
+                raise ValueError("Reference imaging did not complete; no references were changed")
+    if raman:
+        from .raman_selection import RamanEditor
+        owner._raman_editor = RamanEditor(owner, sequence, image_layer)
+        return
+    match_positions(sequence, image_layer.metadata["useq_sequence"])
+    owner._autofocus_editor = ReferenceEditor(owner, sequence, image_layer, position_index)
+
+
+class ReferenceEditor:
+    def __init__(self, owner, sequence, image_layer, position_index=0):
+        import napari
+        from qtpy.QtCore import QObject, QEvent
+        from qtpy.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton
+        self.owner, self.sequence = owner, sequence
+        self.indices = match_positions(sequence, image_layer.metadata["useq_sequence"])
+        self.image_sequence = image_layer.metadata["useq_sequence"]
+        self.viewer = napari.Viewer(title="Set autofocus references")
+        self.viewer.add_image(image_layer.data, name=image_layer.name, rgb=image_layer.rgb,
+                              scale=image_layer.scale, contrast_limits=image_layer.contrast_limits,
+                              metadata=dict(image_layer.metadata))
+        self.viewer.dims.axis_labels = ("t", "p", "g", "c", "z", "y", "x")
+        self.shape = tuple(image_layer.data.shape[-3:-1])
+        # Engine sources normalize (y, x) by (width, height), including legacy records.
+        self.source_shape = self.shape[::-1]
+        data = []
+        for i, pos in enumerate(sequence.stage_positions):
+            ref = reference(pos)
+            if ref:
+                y, x = np.asarray(ref["point"]) * ref["image_shape"]
+                data.append([0, self.indices[i], 0, 0, 0, y, x])
+        self.points = self.viewer.add_points(np.asarray(data).reshape((-1, 7)), ndim=7,
+                                             name="Autofocus references", face_color="springgreen",
+                                             size=12, scale=image_layer.scale,
+                                             out_of_slice_display=False)
+        self.points.mode = "add"
+        self._updating = False
+        self.points.events.data.connect(self.changed)
+        self.viewer.dims.events.current_step.connect(self.slice_changed)
+        controls = QWidget()
+        layout = QVBoxLayout(controls)
+        layout.addWidget(QLabel("One reference per FOV. No reference means autofocus is skipped.\n"
+                               "Add a point to replace that FOV's reference; select and delete to remove it."))
+        self.summary = QLabel()
+        layout.addWidget(self.summary)
+        self.error = QLabel()
+        self.error.setWordWrap(True)
+        layout.addWidget(self.error)
+        apply = QPushButton("Apply")
+        cancel = QPushButton("Cancel")
+        layout.addWidget(apply)
+        layout.addWidget(cancel)
+        apply.clicked.connect(self.apply)
+        cancel.clicked.connect(self.viewer.close)
+        self.viewer.window.add_dock_widget(controls, area="right", name="Autofocus")
+        editor = self
+        class CloseFilter(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Close:
+                    editor.owner._autofocus_editor = None
+                return False
+        self.close_filter = CloseFilter(self.viewer.window._qt_window)
+        self.viewer.window._qt_window.installEventFilter(self.close_filter)
+        self.viewer.dims.set_current_step(1, self.indices[position_index])
+        self.changed()
+
+    def slice_changed(self, *_):
+        # References belong to FOVs, and remain visible across time/channel/Z.
+        data = self.points.data.copy()
+        if len(data):
+            for axis in (0, 2, 3, 4):
+                data[:, axis] = self.viewer.dims.current_step[axis]
+            self.points.data = data
+
+    def changed(self, *_):
+        if self._updating:
+            return
+        # New points replace old points in the same FOV, regardless of channel/time/Z.
+        rows = {}
+        for row in self.points.data:
+            rows[int(round(row[1]))] = row
+        data = np.asarray(list(rows.values())).reshape((-1, 7))
+        if len(data) != len(self.points.data):
+            self._updating = True
+            self.points.data = data
+            self._updating = False
+        count = len(set(rows).intersection(self.indices))
+        self.summary.setText(f"Autofocus: {count} set · {len(self.indices) - count} skipped")
+
+    def apply(self):
+        try:
+            _require_idle(self.owner)
+            current = self.owner._unified_mda.value()
+            if {(position_id(p), p.x, p.y, p.z) for p in current.stage_positions} != {
+                    (position_id(p), p.x, p.y, p.z) for p in self.sequence.stage_positions}:
+                raise ValueError("Positions changed while selecting. Close and reopen the selector.")
+            rows = {int(round(row[1])): row[-2:] for row in self.points.data}
+            positions = []
+            for pos in current.stage_positions:
+                index = match_positions(MDASequence(stage_positions=[pos]), self.image_sequence)[0]
+                point = rows.get(index)
+                if point is not None and (not np.isfinite(point).all() or np.any(point < 0) or np.any(point >= self.shape)):
+                    raise ValueError("Place references inside the image")
+                value = None if point is None else dict(point=(point / self.source_shape).tolist(),
+                    image_shape=list(self.source_shape), stage=[pos.x, pos.y, pos.z])
+                positions.append(with_reference(pos, value))
+            self.owner._unified_mda.setValue(current.replace(stage_positions=positions))
+            self.owner._unified_mda.update_summary()
+            self.owner.status.setText("Status: autofocus references applied")
+            self.viewer.close()
+        except ValueError as error:
+            self.error.setText(str(error))
 
 
 def apply_references(owner):
+    """Compatibility adapter for prepared point sources."""
     _require_idle(owner)
-    selection = getattr(owner, "_autofocus_reference_selection", None)
-    if selection is None:
-        raise ValueError("Choose autofocus reference points first")
-    sequence, sources = selection
-    panel = owner._unified_mda
-    current = panel.value()
+    sequence, sources = owner._autofocus_reference_selection
+    current = owner._unified_mda.value()
+    match_positions(current, sequence)
     records = capture_targets(sequence, sources)
-    for record in records:
-        if any(len(points) > 1 for points in record["anchors"].values()):
-            raise ValueError("Keep one autofocus reference per FOV; remove extra points before applying")
-    if {(position_id(p), p.x, p.y) for p in sequence.stage_positions} != {
-            (position_id(p), p.x, p.y) for p in current.stage_positions}:
-        raise ValueError("MDA positions changed; choose autofocus references again")
-    metadata = deepcopy(current.metadata)
-    metadata[METADATA_KEY]["targets"] = [r for r in panel.targets if r.get("role") != "autofocus"] + records
-    panel.setValue(current.replace(metadata=metadata))
-    panel.update_summary()
-    owner.status.setText("Status: autofocus references applied; camera and Raman settings preserved")
+    if any(len(points) > 1 for record in records for points in record["anchors"].values()):
+        raise ValueError("Keep one autofocus reference per FOV")
+    owner._unified_mda.setValue(attach_references(current, records))
+    owner._unified_mda.update_summary()
 
 
 def reference_action(owner, action):

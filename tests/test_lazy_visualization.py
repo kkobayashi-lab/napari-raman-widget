@@ -43,7 +43,7 @@ class _Core:
                 "sequenceFinished": _Signal(),
             },
         )()
-        self.mda = type("MDA", (), {"events": events})()
+        self.mda = type("MDA", (), {"events": events, "status": lambda self: type("Status", (), {"finish_reason": "completed"})()})()
 
     def getImageHeight(self):
         return 120

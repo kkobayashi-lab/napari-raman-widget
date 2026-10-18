@@ -84,18 +84,19 @@ def indices(spec, count, *, middle=False):
 
 
 def identify_positions(sequence):
-    """Attach stable identities to positions, including duplicate XY positions."""
+    """Keep stable identities in position metadata, including duplicate XY positions."""
+    from useq import MDASequence
     positions = []
     for position in sequence.stage_positions:
-        # Position names round-trip through the native table, unlike nested metadata.
-        name = position.name or "Position"
-        if " [id:" not in name:
-            name += f" [id:{uuid.uuid4().hex}]"
-        positions.append(position.replace(name=name))
+        sub = position.sequence or MDASequence()
+        metadata = {**sub.metadata, "position_identity": position_id(position) or uuid.uuid4().hex}
+        positions.append(position.replace(sequence=sub.replace(metadata=metadata)))
     return sequence.replace(stage_positions=positions)
 
 
 def position_id(position):
+    if position.sequence and position.sequence.metadata.get("position_identity"):
+        return position.sequence.metadata["position_identity"]
     if " [id:" not in (position.name or ""):
         return None
     return position.name.rsplit(" [id:", 1)[1].rstrip("]")
@@ -201,8 +202,11 @@ class PreparedAcquisition:
     autofocus_positions: tuple
 
 
-def prepare_acquisition(sequence, extensions, targets):
+def prepare_acquisition(sequence, extensions, targets, image_shape=None):
     """Validate and detach a run without touching hardware or creating output."""
+    from .autofocus_references import reference_records, REFERENCE_KEY
+    if any(p.sequence and REFERENCE_KEY in p.sequence.metadata for p in sequence.stage_positions):
+        targets = [r for r in targets if r.get("role") != "autofocus"] + reference_records(sequence)
     ext = deepcopy(extensions)
     from raman_mda_engine.grid_plan import GRID_KEY, grid_count
     compact_grid = GRID_KEY in sequence.metadata
@@ -242,11 +246,18 @@ def prepare_acquisition(sequence, extensions, targets):
     )
     if targets and (sequence.grid_plan or expanded_subsequences):
         raise ValueError("Prepared targets require explicit positions; expand the grid before applying targets")
-    sources = tuple(SnapshotSource(record) for record in targets) if compact_grid else tuple(remap_targets(sequence, targets))
+    from .raman_selection import target, position_records
+    policies = None
+    position_owned = any(target(p) for p in sequence.stage_positions)
+    if enabled and not compact_grid and (position_owned or not any(r.get("role") == "cell" for r in targets)):
+        shape = image_shape or next((target(p)["image_shape"] for p in sequence.stage_positions if target(p)), (1024, 1024))
+        record, policies = position_records(sequence, shape)
+        focus = [r for r in targets if r.get("role") == "autofocus"]
+        sources = (*remap_targets(sequence, focus), SnapshotSource(record))
+    else:
+        sources = tuple(SnapshotSource(record) for record in targets) if compact_grid else tuple(remap_targets(sequence, targets))
     if enabled and not any(s.role == "cell" and any(len(x) for x in s._points_by_position.values()) for s in sources):
         raise ValueError("RM acquisition needs prepared Raman targets")
-    if custom_af and not any(s.role == "autofocus" for s in sources):
-        raise ValueError("Custom autofocus needs prepared autofocus targets")
     if custom_af and compact_grid and not any(
         s.role == "autofocus" and len(s._fixed_anchors) for s in sources
     ):
@@ -261,11 +272,16 @@ def prepare_acquisition(sequence, extensions, targets):
     image_p = indices(ext.raman.camera_positions, count)
     af_p = indices(ext.autofocus.positions, count) if custom_af else []
     if custom_af and not compact_grid:
-        for p in af_p:
-            event = MDAEvent(index={"p": p})
-            if not any(s.role == "autofocus" and len(s.get_mda_points(event, transform=False)) for s in sources):
-                raise ValueError(f"No autofocus target at position {p}")
+        af_p = [p for p in af_p if any(
+            s.role == "autofocus" and len(s.get_mda_points(MDAEvent(index={"p": p}), transform=False))
+            for s in sources)]
+        if not af_p:
+            ext.autofocus.mode = "off"
     metadata = deepcopy(sequence.metadata)
+    if policies is not None:
+        metadata["raman_positions"] = policies
+    else:
+        metadata.pop("raman_positions", None)
     metadata[METADATA_KEY] = {
         **metadata.get(METADATA_KEY, {}),
         "schema_version": 1, "extensions": ext.to_dict(), "targets": deepcopy(targets),
@@ -282,8 +298,23 @@ def prepare_acquisition(sequence, extensions, targets):
         metadata.pop("raman", None)
     # Native useq channel offsets are authoritative; migrate legacy values only on import.
     metadata.pop("channel_z_offsets_um", None)
+    # A metadata-only sub-sequence changes useq channel traversal. Strip it only
+    # from the detached execution copy, retaining identity for acquired images.
+    sequence = execution_positions(sequence)
     return PreparedAcquisition(
         sequence.replace(metadata=metadata), ext, sources, enabled, exposure,
         tuple(planes), image_p if isinstance(image_p, range) else tuple(image_p),
         af_p if isinstance(af_p, range) else tuple(af_p),
     )
+
+
+def execution_positions(sequence):
+    positions = []
+    for pos in sequence.stage_positions:
+        if pos.sequence and not pos.sequence.model_dump(
+                exclude={"uid", "metadata", "autofocus_plan"}, exclude_defaults=True):
+            identity = position_id(pos)
+            name = (pos.name or "Position").split(" [id:")[0]
+            pos = pos.replace(sequence=None, name=f"{name} [id:{identity}]" if identity else name)
+        positions.append(pos)
+    return sequence.replace(stage_positions=positions)

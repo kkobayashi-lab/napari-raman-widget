@@ -10,6 +10,7 @@ from qtpy.QtCore import QObject, QTimer
 from qtpy.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox,
     QLabel, QLayout, QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget, QHBoxLayout, QTabWidget,
+    QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem, QTabBar,
 )
 
 from .experiment import (
@@ -96,14 +97,11 @@ def build_extension_controls(owner):
     axis_row.addStretch()
     af_layout.addLayout(axis_row)
     af_layout.addWidget(QLabel("Select an axis to enable autofocus. No axes selected = autofocus off."))
-    from .autofocus_references import choose_references, apply_references, reference_action
-    owner.choose_af_references_btn = QPushButton("Choose autofocus reference points")
+    from .autofocus_references import choose_references, reference_action
+    owner.choose_af_references_btn = QPushButton("Set autofocus references…")
     owner.choose_af_references_btn.clicked.connect(lambda: reference_action(owner, choose_references))
     af_layout.addWidget(owner.choose_af_references_btn)
-    owner.apply_af_references_btn = QPushButton("Apply autofocus references")
-    owner.apply_af_references_btn.clicked.connect(lambda: reference_action(owner, apply_references))
-    af_layout.addWidget(owner.apply_af_references_btn)
-    af_layout.addWidget(QLabel("Click one reference per FOV. Cell selection is not required."))
+    af_layout.addWidget(QLabel("No reference for a FOV means autofocus is skipped there."))
     owner._mda_af_settings = QWidget()
     af_layout.addWidget(owner._mda_af_settings)
     af = QFormLayout(owner._mda_af_settings)
@@ -250,7 +248,8 @@ class AcquisitionController(QObject):
             raise ValueError("An acquisition is already scheduled or running")
         sequence = self.panel.value()
         ext = read_extensions(owner)
-        prepared = prepare_acquisition(sequence, ext, self.panel.targets)
+        prepared = prepare_acquisition(sequence, ext, self.panel.targets,
+                                       image_shape=(owner.core.getImageWidth(), owner.core.getImageHeight()))
         ext = prepared.extensions
         needs_raman_hardware = prepared.raman_enabled or ext.autofocus.mode in ("laser", "cell", "glass", "quartz")
         if needs_raman_hardware and (owner.collector is None or owner.transformer is None):
@@ -284,7 +283,7 @@ class AcquisitionController(QObject):
                    f"Start delay: {format_duration(ext.delay)}\n"
                    f"Autofocus: {ext.autofocus.mode}; axes: {', '.join(ext.autofocus.axes) or 'none'}\n"
                    f"Tracking: {ext.tracking.enabled}\n\n"
-                   "Autofocus, tracking, and motion add time. Their internal images are not saved as camera channels.")
+                   + ("Timing uses the remembered average of the last 10 live acquisitions; live ETA adapts to this run." if estimate.remembered_average_seconds is not None else "Autofocus, tracking, and motion add time. Their internal images are not saved as camera channels."))
         if ext.overwrite and output is not None and output.exists():
             message += f"\n\nOverwrite permanently replaces all contents of {output}."
         if QMessageBox.question(self.panel, "Review acquisition", message,
@@ -328,6 +327,10 @@ class AcquisitionController(QObject):
                         region["z"] = start_z
                 prepared = replace(prepared, sequence=prepared.sequence.replace(metadata=metadata))
         self.active_sequence = prepared.sequence
+        if output is not None:
+            prepared = replace(prepared, sequence=prepared.sequence.replace(
+                metadata={**prepared.sequence.metadata, "dataset_path": str(output)}))
+            self.active_sequence = prepared.sequence
         self.previous_engine = owner.core.mda.engine
         try:
             from pymmcore_plus.mda import MDAEngine
@@ -458,6 +461,10 @@ def install_unified_mda(owner):
             self.af_axis.hide()
             self.stage_positions.af_per_position.setChecked(False)
             self.stage_positions.af_per_position.hide()
+            from .autofocus_positions import install_reference_column
+            install_reference_column(self, owner)
+            from .raman_selection import install_raman_tab
+            install_raman_tab(self, owner)
             QTabWidget.addTab(self.tab_wdg, owner._mda_af_panel, "Autofocus")
             owner._mda_af_panel.show()
             self.extensions_scroll = QScrollArea(self)
@@ -468,12 +475,27 @@ def install_unified_mda(owner):
             self.output_description = QLabel()
             self.output_description.setWordWrap(True)
             self.layout().insertWidget(1, self.output_description)
+            self.dense_positions = QWidget(self.stage_positions)
+            dense_layout = QVBoxLayout(self.dense_positions)
+            dense_layout.setContentsMargins(0, 0, 0, 0)
             self.grid_summary = QLabel()
             self.grid_summary.setWordWrap(True)
-            self.layout().insertWidget(2, self.grid_summary)
-            self.detach_grid_btn = QPushButton("Detach dense Raman grid")
+            dense_layout.addWidget(self.grid_summary)
+            self.dense_grid_table = QTableWidget(0, 5)
+            self.dense_grid_table.setHorizontalHeaderLabels(
+                ["Raman grid", "Points (X × Y)", "X range (µm)", "Y range (µm)", "Z (µm)"])
+            self.dense_grid_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            self.dense_grid_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            self.dense_grid_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+            self.dense_grid_table.horizontalHeader().setStretchLastSection(True)
+            dense_layout.addWidget(self.dense_grid_table)
+            self.detach_grid_btn = QPushButton("Remove dense Raman grid")
             self.detach_grid_btn.clicked.connect(self.detach_grid)
-            self.layout().insertWidget(3, self.detach_grid_btn)
+            dense_layout.addWidget(self.detach_grid_btn)
+            self.stage_positions.layout().addWidget(self.dense_positions)
+            self.dense_positions.hide()
+            self._hidden_position_widgets = None
+            self._displayed_grid = None
             # Keep upstream writers available, but expose one folder layout here.
             self.save_info._writer_combo.currentTextChanged.connect(self._use_run_folder)
             self._use_run_folder()
@@ -500,10 +522,16 @@ def install_unified_mda(owner):
             seq = super().value()
             if not self._ready:
                 return seq
+            from .autofocus_positions import synchronize_reference_positions
+            seq = synchronize_reference_positions(self, seq)
+            from .autofocus_references import reference_records
+            self.targets = [r for r in self.targets if r.get("role") != "autofocus" or r.get("fixed")]
+            if GRID_KEY not in seq.metadata:
+                self.targets += reference_records(seq)
             metadata = {**deepcopy(self._extra_metadata), **deepcopy(seq.metadata)}
             metadata[METADATA_KEY] = {
                 "schema_version": 1, "extensions": read_extensions(owner).to_dict(),
-                "targets": deepcopy(self.targets), "calibration": {
+                "targets": deepcopy([r for r in self.targets if r.get("role") != "autofocus" or r.get("fixed")]), "calibration": {
                     **deepcopy(self.calibration),
                     "grid_use_vandermonde": self.grid_use_vandermonde.isChecked(),
                 },
@@ -522,6 +550,8 @@ def install_unified_mda(owner):
             return seq.replace(metadata=metadata)
 
         def setValue(self, value):
+            from .autofocus_references import attach_references
+            value = attach_references(identify_positions(value), value.metadata.get(METADATA_KEY, {}).get("targets", []))
             self._extra_metadata = deepcopy(value.metadata)
             meta = value.metadata.get(METADATA_KEY, {})
             if meta.get("schema_version", 1) != 1:
@@ -544,7 +574,11 @@ def install_unified_mda(owner):
                 self.stage_positions._plate_plan = None
                 if had_plate:
                     self.stage_positions._set_position_table_editable(True)
-            super().setValue(value)
+            ready, self._ready = self._ready, False
+            try:
+                super().setValue(value)
+            finally:
+                self._ready = ready
             if self._ready:
                 if plate_data := meta.get("wellplate_plan"):
                     from useq import WellPlatePlan
@@ -562,6 +596,7 @@ def install_unified_mda(owner):
                     planes = value.metadata["raman"].get("z", [0])
                     ext.raman.planes = planes if isinstance(planes, str) else ",".join(map(str, planes))
                 write_extensions(owner, ext)
+                self.update_summary()
 
         def run_mda(self):
             try:
@@ -577,7 +612,6 @@ def install_unified_mda(owner):
             self.control_btns.pause_btn.setVisible(locked and owner._acquisition_controller.pending is None)
             owner.apply_mda_positions_btn.setEnabled(not locked)
             owner.choose_af_references_btn.setEnabled(not locked)
-            owner.apply_af_references_btn.setEnabled(not locked)
             self.detach_grid_btn.setEnabled(not locked)
             if hasattr(owner, "apply_grid_mda_btn"):
                 owner.apply_grid_mda_btn.setEnabled(not locked and bool(owner._grid_regions))
@@ -597,18 +631,21 @@ def install_unified_mda(owner):
             if not self._ready:
                 return
             sequence = self.value()
+            from .autofocus_positions import refresh_reference_column
+            refresh_reference_column(self, owner)
             dense = GRID_KEY in sequence.metadata
             self.grid_summary.setVisible(dense)
             self.detach_grid_btn.setVisible(dense)
             self._duration_label.setVisible(not dense)
             controller = getattr(owner, "_acquisition_controller", None)
             editable = not (controller and controller.busy)
-            self.stage_positions.setEnabled(editable and not dense)
+            self.stage_positions.setEnabled(editable)
             self.grid_plan.setEnabled(editable and not dense)
+            self.update_dense_positions(sequence)
             if dense:
                 count = grid_count(sequence)
                 self.grid_summary.setText(f"Dense Raman grid: {count:,} virtual positions. "
-                                          "Positions are generated during acquisition; the native position table stays empty.")
+                                          "Each row represents a region. Points are generated during acquisition.")
             try:
                 plan = prepare_acquisition(sequence, read_extensions(owner), self.targets)
                 self._use_run_folder()
@@ -623,14 +660,49 @@ def install_unified_mda(owner):
                     self.grid_summary.setText(
                         f"Dense Raman grid: {count:,} virtual positions. "
                         f"Estimated duration: {format_duration(estimate.duration_seconds)} "
-                        "plus autofocus/tracking/motion. Positions are generated during acquisition."
+                        + ("(remembered live timing). Positions are generated during acquisition." if estimate.remembered_average_seconds is not None else "plus autofocus/tracking/motion. Positions are generated during acquisition.")
                     )
                 owner.mda_collection_summary.setText(
                     f"{estimate.raman_points:,} spectral collections; {estimate.imaging_frames:,} camera frames; "
-                    f"estimated {format_duration(estimate.duration_seconds)} plus autofocus/tracking/motion."
+                    f"estimated {format_duration(estimate.duration_seconds)} " + ("(remembered live timing)." if estimate.remembered_average_seconds is not None else "plus autofocus/tracking/motion.")
                 )
             except (ValueError, TypeError) as error:
                 owner.mda_collection_summary.setText(str(error))
+
+        def update_dense_positions(self, sequence):
+            plan = sequence.metadata.get(GRID_KEY)
+            dense = plan is not None
+            index = self.tab_wdg.indexOf(self.stage_positions)
+            checkbox = self.tab_wdg.tabBar().tabButton(index, QTabBar.LeftSide)
+            checkbox.setVisible(not dense)
+            self.tab_wdg.setTabText(index, "Positions (dense grid)" if dense else "Positions")
+            if dense and self._hidden_position_widgets is None:
+                self._hidden_position_widgets = [
+                    child for child in self.stage_positions.findChildren(QWidget)
+                    if child.parent() is self.stage_positions
+                    and child is not self.dense_positions and not child.isHidden()
+                ]
+                for child in self._hidden_position_widgets:
+                    child.hide()
+                self.tab_wdg.setCurrentWidget(self.stage_positions)
+            elif not dense and self._hidden_position_widgets is not None:
+                for child in self._hidden_position_widgets:
+                    child.show()
+                self._hidden_position_widgets = None
+            self.dense_positions.setVisible(dense)
+            if plan == self._displayed_grid:
+                return
+            self._displayed_grid = deepcopy(plan)
+            regions = plan["regions"] if dense else []
+            self.dense_grid_table.setRowCount(len(regions))
+            for row, region in enumerate(regions):
+                nx, ny = region["x"][2], region["y"][2]
+                z = ("Tilt surface" if region.get("tilt") else
+                     "At run start" if region.get("z") is None else f"{region['z']:g}")
+                values = [f"Grid {row + 1}", f"{nx:,} × {ny:,} = {nx * ny:,}",
+                          *[f"{region[axis][0]:g} → {region[axis][1]:g}" for axis in ("x", "y")], z]
+                for column, text in enumerate(values):
+                    self.dense_grid_table.setItem(row, column, QTableWidgetItem(text))
 
     old = get_mda_widget_from_napari(owner.main_window)
     value = old.value()
@@ -757,7 +829,11 @@ def apply_prepared_positions(owner):
         for position in positions:
             identity = position_id(position)
             if identity in seen:
-                position = position.replace(name=position.name.split(" [id:")[0] + f" [id:{uuid.uuid4().hex}]")
+                new_id = uuid.uuid4().hex
+                sub = position.sequence
+                if sub:
+                    sub = sub.replace(metadata={**sub.metadata, "position_identity": new_id})
+                position = position.replace(name=(position.name or "Position").split(" [id:")[0], sequence=sub)
             seen.add(position_id(position))
             independent.append(position)
         positions = independent

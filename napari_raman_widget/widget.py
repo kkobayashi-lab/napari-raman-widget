@@ -25,6 +25,7 @@ from .mda_timing import (
     RAMAN_POINT_OVERHEAD_S,
     estimate_mda_time,
     estimate_live_mda_end,
+    remember_live_mda_estimate,
     format_duration,
     mda_schedule_window,
 )
@@ -2267,6 +2268,7 @@ class HardwareWidget(QWidget):
         )
         if live is None:
             return
+        remember_live_mda_estimate(live)
         end_text = live.expected_end.strftime("%Y-%m-%d %H:%M:%S %Z")
         self.mda_live_eta_label.setText(
             f"Live ETA: {end_text} "
@@ -4447,6 +4449,17 @@ class HardwareWidget(QWidget):
             "Autofocus, segmentation/tracking, and stage movement time "
             "are not included."
         )
+        if estimate.remembered_average_seconds is not None:
+            message = message[:message.index("Estimate details:")] + (
+                "Estimate details:\n"
+                f"- {estimate.acquisition_count:,} acquisitions\n"
+                f"- {format_duration(estimate.remembered_average_seconds)} "
+                "per acquisition, remembered from the last 10 live measurements\n"
+                f"- {scheduled_wait} additional scheduled interval time\n\n"
+                "Measured timing includes overhead from the previous run. "
+                "Changes to exposure, points, or acquisition settings may change "
+                "the actual duration; live ETA updates during the run."
+            )
         if overwrite:
             resolved_output = Path(output_dir).expanduser().resolve()
             message += (

@@ -1,10 +1,35 @@
 """Timing estimates for Raman multidimensional acquisitions."""
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from math import isfinite
 
 
 RAMAN_POINT_OVERHEAD_S = 0.6
 IMAGING_FRAME_OVERHEAD_S = 0.1
+
+
+def _timing_settings():
+    from qtpy.QtCore import QSettings
+
+    return QSettings("CNS", "napari-raman-widget")
+
+
+def remembered_acquisition_seconds():
+    """Read the last full live-ETA window, retained across app restarts."""
+    try:
+        value = float(_timing_settings().value("mda/average_acquisition_seconds"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if isfinite(value) and value > 0 else None
+
+
+def remember_live_mda_estimate(live):
+    """Only replace the saved timing once a complete ten-sample window exists."""
+    if (live.sample_count == 10 and isfinite(live.average_seconds)
+            and live.average_seconds > 0):
+        _timing_settings().setValue(
+            "mda/average_acquisition_seconds", live.average_seconds
+        )
 
 
 def _is_cell_source(source):
@@ -21,6 +46,7 @@ class MdaTimeEstimate:
     raman_points: int
     raman_events: int
     imaging_frames: int
+    remembered_average_seconds: float | None = None
 
     @property
     def scheduled_wait_seconds(self):
@@ -62,17 +88,19 @@ def estimate_mda_time(
     point_repeats=1,
     batch=False,
 ):
-    """Estimate exposure, fixed overhead, and scheduled interval time.
+    """Estimate from remembered live timing, falling back to fixed overhead.
 
     Raman events use the same cell-source filtering as ``RamanEngine``.
-    Each Raman point costs its exposure plus 600 ms, while each emitted
-    imaging frame costs its exposure plus 100 ms.
+    A remembered interval applies per completion (Raman event or camera frame),
+    not per Raman point. It already includes the previous run's overhead/waits.
+    Explicit scheduled starts remain lower bounds on event start times.
     """
     elapsed = 0.0
     active = 0.0
     raman_points = 0
     raman_events = 0
     imaging_frames = 0
+    remembered_average = remembered_acquisition_seconds()
     raman_z = set(int(index) for index in raman_z_indices)
     image_p = image_positions if isinstance(image_positions, range) else set(int(index) for index in image_positions)
     raman_exposure_s = float(raman_exposure_ms) / 1000.0
@@ -110,6 +138,7 @@ def estimate_mda_time(
             else None
         )
         event_seconds = 0.0
+        acquisition_count = 0
 
         if channel == raman_channel:
             if event.index.get("z", 0) in raman_z:
@@ -118,12 +147,15 @@ def estimate_mda_time(
                     for source in aiming_sources
                     if _is_cell_source(source)
                 ) * point_repeats
-                if batch and point_count:
-                    point_count = 1
+                policy = preview_sequence.metadata.get("raman_positions", {}).get(str(event.index.get("p", 0)), {})
+                event_batch = policy.get("mode") == "integrated_batch" if policy else batch
+                if event_batch and point_count:
+                    point_count = point_repeats
                 point_count *= virtual_count
                 raman_points += point_count
                 if point_count:
                     raman_events += virtual_count
+                    acquisition_count = virtual_count
                 event_seconds = point_count * (
                     raman_exposure_s + RAMAN_POINT_OVERHEAD_S
                 )
@@ -131,10 +163,13 @@ def estimate_mda_time(
             exposure_ms = getattr(event, "exposure", None) or 0.0
             frame_count = len(image_p) if dense else 1
             imaging_frames += frame_count
+            acquisition_count = frame_count
             event_seconds = (
                 float(exposure_ms) / 1000.0 + IMAGING_FRAME_OVERHEAD_S
             ) * frame_count
 
+        if remembered_average is not None:
+            event_seconds = acquisition_count * remembered_average
         active += event_seconds
         elapsed += event_seconds
 
@@ -144,6 +179,7 @@ def estimate_mda_time(
         raman_points=raman_points,
         raman_events=raman_events,
         imaging_frames=imaging_frames,
+        remembered_average_seconds=remembered_average,
     )
 
 
