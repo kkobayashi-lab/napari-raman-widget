@@ -669,8 +669,8 @@ def test_wellplate_uses_current_model_for_wizard_import_and_positions(owner):
     positions = list(panel.value().stage_positions)
     assert len(positions) == 4
     assert positions[1].x - positions[0].x == pytest.approx(width * 0.2 * 0.9)
-    assert table.value().a1_center_xy == (1000, 2000)
-    assert table.value().rotation == 5
+    assert table._plate_plan.a1_center_xy == (1000, 2000)
+    assert table._plate_plan.rotation == 5
     assert "Vandermonde" in panel.wellplate_calibration_status.text()
     # Objective changes refresh both the wizard preview and the position table.
     widget.vandermonde = (np.array([[0, 0], [0, 0.4], [0.5, 0]]), 1)
@@ -685,6 +685,43 @@ def test_wellplate_uses_current_model_for_wizard_import_and_positions(owner):
     assert wizard.value() is None
     with pytest.raises(ValueError, match="current-objective Vandermonde"):
         table.value()
+
+
+def test_wellplate_xy_locked_z_editable_and_persisted(owner):
+    from useq import WellPlatePlan
+
+    widget, panel, _app = owner
+    widget.vandermonde = (np.array([[0, 0], [0, 0.3], [0.2, 0]]), 1)
+    widget._ensure_current_vandermonde = lambda: "6"
+    table = panel.stage_positions
+    plan = WellPlatePlan(plate="96-well", a1_center_xy=(1000, 2000),
+                         selected_wells=((0, 0), (0, 1)))
+    table.setValue(plan)
+    panel.value()  # Refresh calibrated field size before editing.
+    grid = table.table()
+    assert not table.include_z.isHidden()
+    table.include_z.setChecked(True)
+    assert not grid.isColumnHidden(grid.indexOf(table.Z))
+    assert not grid.isColumnHidden(grid.indexOf(table._z_btn_col))
+    for row in range(grid.rowCount()):
+        assert not grid.cellWidget(row, grid.indexOf(table.X)).isEnabled()
+        assert not grid.cellWidget(row, grid.indexOf(table.Y)).isEnabled()
+        assert grid.cellWidget(row, grid.indexOf(table.Z)).isEnabled()
+    grid.cellWidget(0, grid.indexOf(table.Z)).setValue(123.5)
+    widget.core.setZPosition(234.5)
+    table._set_z_from_core(1)
+    saved = panel.value()
+    assert [p.z for p in saved.stage_positions] == [123.5, 234.5]
+    assert [e.z_pos for e in saved.iter_events()] == [123.5, 234.5]
+    panel.setValue(MDASequence.model_validate_json(saved.model_dump_json()))
+    assert table._plate_plan is not None
+    assert [p.z for p in panel.value().stage_positions] == [123.5, 234.5]
+    assert not grid.cellWidget(0, grid.indexOf(table.X)).isEnabled()
+    widget.vandermonde = (np.array([[0, 0], [0, 0.4], [0.5, 0]]), 1)
+    widget.core.events.propertyChanged.emit("Objective", "State", "7")
+    assert [p.z for p in panel.value().stage_positions] == [123.5, 234.5]
+    table.include_z.setChecked(False)
+    assert all(p.z is None for p in panel.value().stage_positions)
 
 
 def test_cellvis_plate_default_and_test_well_radius(owner):

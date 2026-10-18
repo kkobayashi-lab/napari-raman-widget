@@ -48,6 +48,8 @@ def extend_wellplate_calibration(table, owner):
     new_wizard = table._hcs_wizard is None
     wizard = table._hcs
     extend_plate_mapping(wizard)
+    from .well_boundary_widget import install_boundary_calibration
+    install_boundary_calibration(wizard, owner)
     if new_wizard and table._plate_plan is None:
         wizard.plate_page.widget.plate_name.setCurrentText(CELLVIS_96_PLATE)
     page = wizard.points_plan_page
@@ -55,7 +57,34 @@ def extend_wellplate_calibration(table, owner):
     status.setWordWrap(True)
     page.layout().addWidget(status)
     native_value = table.value
+    native_set_value = table.setValue
+    native_editable = table._set_position_table_editable
     refreshing = False
+
+    def editable(_self, state):
+        if state:
+            # Upstream disconnects this slot unconditionally when unlocking.
+            from qtpy.QtCore import Qt
+            with suppress(TypeError, RuntimeError):
+                table.table().cellDoubleClicked.connect(
+                    table._show_pos_editing_dialog, Qt.ConnectionType.UniqueConnection)
+        native_editable(state)
+        if not state:
+            table.include_z.show()
+            table._on_include_z_toggled(table.include_z.isChecked())
+            # Z can be edited without converting the calibrated XY positions.
+            with suppress(TypeError, RuntimeError):
+                table.table().cellDoubleClicked.disconnect(table._show_pos_editing_dialog)
+
+    def set_value(_self, positions):
+        with signals_blocked(table):
+            native_set_value(positions)
+            if table._plate_plan is not None:
+                editable(table, False)
+        table.valueChanged.emit()
+
+    table._set_position_table_editable = MethodType(editable, table)
+    table.setValue = MethodType(set_value, table)
 
     def field_size(_self=None):
         ensure = getattr(owner, "_ensure_current_vandermonde", None)
@@ -90,11 +119,19 @@ def extend_wellplate_calibration(table, owner):
             if plan is not None and None not in fov:
                 points = plan.well_points_plan
                 if (points.fov_width, points.fov_height) != fov:
+                    from pymmcore_widgets.useq_widgets import PositionTable
+                    old_z = {p.name: row.z for p, row in
+                             zip(plan, PositionTable.value(table, False, False))}
+                    include_z = table.include_z.isChecked()
                     # Reconstruct the plan: useq caches its generated image positions.
                     points = points.model_copy(update=dict(zip(("fov_width", "fov_height"), fov)))
                     table._plate_plan = plan.replace(well_points_plan=points)
                     with signals_blocked(table):
                         table._update_table_positions(table._plate_plan)
+                        for row, position in enumerate(table._plate_plan):
+                            if position.name in old_z:
+                                table.table().setRowData(row, {"z": old_z[position.name]})
+                        table.include_z.setChecked(include_z)
         finally:
             refreshing = False
 
@@ -103,6 +140,15 @@ def extend_wellplate_calibration(table, owner):
         if table._plate_plan is not None and None in field_size():
             raise ValueError(status.text())
         result = native_value(*args, **kwargs)
+        if table._plate_plan is not None:
+            # Keep the plan's calibrated XY, but read focus heights from the UI.
+            from pymmcore_widgets.useq_widgets import PositionTable
+            rows = PositionTable.value(table, False, False)
+            include_z = table.include_z.isChecked() or kwargs.get("exclude_hidden_cols") is False
+            if len(args) > 1 and args[1] is False:
+                include_z = True
+            return tuple(p.replace(z=row.z if include_z else None)
+                         for p, row in zip(result, rows))
         # Native MDASequence serializes WellPlatePlan as its base type. Emit real
         # positions; the application saves the full HCS plan in its metadata.
         return tuple(result) if isinstance(result, CalibratedWellPlatePlan) else result

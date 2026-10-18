@@ -605,6 +605,7 @@ def install_unified_mda(owner):
                     # HCS editing only when the plan still describes these positions.
                     if [(p.x, p.y) for p in plate_plan] == [(p.x, p.y) for p in value.stage_positions]:
                         self.stage_positions.setValue(plate_plan)
+                        self.stage_positions.setValue(value.stage_positions)
                 self.targets = deepcopy(meta.get("targets", []))
                 self.calibration = deepcopy(meta.get("calibration", {}))
                 ext = ExperimentExtensions.from_dict(meta.get("extensions", {}))
