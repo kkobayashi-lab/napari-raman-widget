@@ -146,6 +146,34 @@ Hardware-library imports (`pymmcore_plus`, `cns_control`, etc.) are done
 lazily inside methods, so the package imports cleanly on machines without
 the rig.
 
+## Automatic autofocus positions selection
+
+In **MDA > Autofocus**, select an autofocus axis and enable **Automatic autofocus
+positions selection**. The only selection parameter is **Minimum empty patch
+radius (camera px)**. Selection uses the camera channels already scheduled in the
+acquisition; it captures no additional preview images and has no separate channel
+or exposure configuration. Manual references are ignored while this is enabled.
+
+At each eligible position/timepoint/grid tile, the engine waits for the scheduled
+camera channels and their Z stacks to finish. It retains the image nearest baseline
+Z from each channel, combines BF texture (if BF is present) with fluorescence
+structure, and selects the largest low-structure patch after a fixed 10 px margin.
+The patch radius must exceed the configured minimum. If no suitable patch exists,
+or the images cannot support selection, autofocus is skipped at that position and
+acquisition continues using the existing focus. RM spectra are not selection images.
+
+A suitable point is moved under the laser for the existing laser autofocus scan.
+That scan still uses its normal laser measurements. Previously acquired camera
+images retain their original Z and are not retaken; the focus correction applies to
+subsequent events, including Raman if scheduled after the camera channels. Acquisition
+order is not changed. With no camera images at a position, automatic autofocus does
+not run there. Channel presets must preserve the calibrated camera field and
+registration. Faint or defocused processes can be missed by this heuristic detector.
+
+The option and minimum radius are saved with MDA settings and default to off for
+existing experiments. This option does not add a Z-surface fit or an image-based
+Z recovery sweep.
+
 ## License
 
 `napari-raman-widget` is distributed under the terms of the [BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html) license.
@@ -311,6 +339,34 @@ lazily inside methods, so the package imports cleanly on machines without
 the rig. The `anthropic` import used by the chat panel is likewise lazy, so
 the package still imports (and the assistant simply reports it is unavailable)
 when the SDK or API key is missing.
+
+## Automatic autofocus positions selection
+
+In **MDA > Autofocus**, select an autofocus axis and enable **Automatic autofocus
+positions selection**. The only selection parameter is **Minimum empty patch
+radius (camera px)**. Selection uses the camera channels already scheduled in the
+acquisition; it captures no additional preview images and has no separate channel
+or exposure configuration. Manual references are ignored while this is enabled.
+
+At each eligible position/timepoint/grid tile, the engine waits for the scheduled
+camera channels and their Z stacks to finish. It retains the image nearest baseline
+Z from each channel, combines BF texture (if BF is present) with fluorescence
+structure, and selects the largest low-structure patch after a fixed 10 px margin.
+The patch radius must exceed the configured minimum. If no suitable patch exists,
+or the images cannot support selection, autofocus is skipped at that position and
+acquisition continues using the existing focus. RM spectra are not selection images.
+
+A suitable point is moved under the laser for the existing laser autofocus scan.
+That scan still uses its normal laser measurements. Previously acquired camera
+images retain their original Z and are not retaken; the focus correction applies to
+subsequent events, including Raman if scheduled after the camera channels. Acquisition
+order is not changed. With no camera images at a position, automatic autofocus does
+not run there. Channel presets must preserve the calibrated camera field and
+registration. Faint or defocused processes can be missed by this heuristic detector.
+
+The option and minimum radius are saved with MDA settings and default to off for
+existing experiments. This option does not add a Z-surface fit or an image-based
+Z recovery sweep.
 
 ## License
 

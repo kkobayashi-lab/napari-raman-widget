@@ -15,6 +15,23 @@ from napari_raman_widget.unified_mda import (
 )
 
 
+def test_automatic_autofocus_controls_persist(owner):
+    from napari_raman_widget.unified_mda import read_extensions
+    widget, panel, _app = owner
+    widget.mda_af_axes["p"].setChecked(True)
+    widget.mda_auto_af_check.setChecked(True)
+    widget.mda_auto_af_radius.setValue(35)
+    assert not widget.choose_af_references_btn.isEnabled()
+    saved = panel.value()
+    widget.mda_auto_af_check.setChecked(False)
+    assert widget.choose_af_references_btn.isEnabled()
+    panel.setValue(MDASequence.model_validate_json(saved.model_dump_json()))
+    ext = read_extensions(widget)
+    assert ext.autofocus.automatic_positions
+    assert ext.autofocus.automatic_min_radius_px == 35
+    assert widget.mda_auto_af_radius.isEnabled()
+
+
 @pytest.fixture(scope="session")
 def qt_app():
     return QApplication.instance() or QApplication([])
@@ -685,6 +702,45 @@ def test_wellplate_uses_current_model_for_wizard_import_and_positions(owner):
     assert wizard.value() is None
     with pytest.raises(ValueError, match="current-objective Vandermonde"):
         table.value()
+
+
+def test_plate_focus_roundtrip_and_generated_z(owner, tmp_path):
+    from napari_raman_widget.plate_focus import PlateFocusCalibration
+    from napari_raman_widget.wellplate_calibration import FocusWellPlatePlan
+
+    widget, panel, _ = owner
+    widget.vandermonde = (np.array([[0, 0], [0, .3], [.2, 0]]), 1)
+    widget._ensure_current_vandermonde = lambda: "6"
+    calibration = PlateFocusCalibration(samples=[
+        (x, y, 100+x*.001+y*.002)
+        for x in (-20000, 0, 20000) for y in (-20000, 0, 20000)], enabled=True)
+    plan = FocusWellPlatePlan(plate="96-well", a1_center_xy=(1000, 2000),
+                             selected_wells=((0, 0), (0, 1)), focus_height=calibration)
+    table = panel.stage_positions
+    table.setValue(plan)
+    saved = panel.value()
+    assert saved.metadata["plate_focus_height_applied"]
+    for p in saved.stage_positions:
+        assert p.z == pytest.approx(100+p.x*.001+p.y*.002)
+    path = str(tmp_path / "plate.json")
+    table._hcs.save(path)
+    table._hcs.focus_height_widget.clear()
+    table._hcs.load(path)
+    assert table._hcs.value().focus_height == calibration
+    panel.setValue(MDASequence.model_validate_json(saved.model_dump_json()))
+    assert panel.value().metadata["plate_focus_height_applied"]
+    assert table._plate_plan.focus_height == calibration
+    assert table._hcs.focus_height_widget.value() == calibration
+    from useq import ZTopBottom
+    panel.z_plan.setValue(ZTopBottom(top=10, bottom=0, step=1))
+    panel.tab_wdg.setChecked(panel.z_plan, True)
+    from napari_raman_widget.experiment import prepare_acquisition
+    from napari_raman_widget.unified_mda import read_extensions
+    with pytest.raises(ValueError, match="relative Z stacks"):
+        prepare_acquisition(panel.value(), read_extensions(widget), [])
+    panel.tab_wdg.setChecked(panel.z_plan, False)
+    table.setValue(plan.replace(focus_height=calibration.model_copy(update={"enabled": False})))
+    assert "plate_focus_height_applied" not in panel.value().metadata
 
 
 def test_wellplate_xy_locked_z_editable_and_persisted(owner):

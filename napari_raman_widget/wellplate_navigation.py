@@ -7,7 +7,7 @@ from qtpy.QtWidgets import QFileDialog, QLabel, QPushButton, QVBoxLayout, QWidge
 from pymmcore_widgets.useq_widgets._well_plate_widget import WellPlateView
 from useq import WellPlatePlan
 
-from .wellplate_calibration import CalibratedWellPlatePlan, install_plate_navigation_view
+from .wellplate_calibration import plate_plan_model, install_plate_navigation_view
 
 
 class WellPlateNavigationPanel(QWidget):
@@ -44,7 +44,7 @@ class WellPlateNavigationPanel(QWidget):
             return
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
-            model = CalibratedWellPlatePlan if "stage_affine_um" in data else WellPlatePlan
+            model = plate_plan_model(data)
             plan = model.model_validate(data)
             if not np.isfinite(plan.affine_transform).all():
                 raise ValueError("Plate coordinates must be finite")

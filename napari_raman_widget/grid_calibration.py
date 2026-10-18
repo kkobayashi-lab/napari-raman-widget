@@ -50,6 +50,8 @@ def extend_wellplate_calibration(table, owner):
     extend_plate_mapping(wizard)
     from .well_boundary_widget import install_boundary_calibration
     install_boundary_calibration(wizard, owner)
+    from .plate_focus_widget import install_focus_calibration
+    install_focus_calibration(wizard, owner)
     if new_wizard and table._plate_plan is None:
         wizard.plate_page.widget.plate_name.setCurrentText(CELLVIS_96_PLATE)
     page = wizard.points_plan_page
@@ -141,6 +143,11 @@ def extend_wellplate_calibration(table, owner):
             raise ValueError(status.text())
         result = native_value(*args, **kwargs)
         if table._plate_plan is not None:
+            focus = getattr(table._plate_plan, "focus_height", None)
+            if focus is not None and focus.enabled:
+                positions = tuple(result)
+                heights = focus.heights([(p.x, p.y) for p in positions])
+                return tuple(p.replace(z=float(z)) for p, z in zip(positions, heights))
             # Keep the plan's calibrated XY, but read focus heights from the UI.
             from pymmcore_widgets.useq_widgets import PositionTable
             rows = PositionTable.value(table, False, False)

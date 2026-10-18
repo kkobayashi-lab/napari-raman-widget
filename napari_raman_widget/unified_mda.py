@@ -106,7 +106,16 @@ def build_extension_controls(owner):
     owner.choose_af_references_btn = QPushButton("Set autofocus references…")
     owner.choose_af_references_btn.clicked.connect(lambda: reference_action(owner, choose_references))
     af_layout.addWidget(owner.choose_af_references_btn)
-    af_layout.addWidget(QLabel("No reference for a FOV means autofocus is skipped there."))
+    owner.mda_auto_af_check = QCheckBox("Automatic autofocus positions selection")
+    owner.mda_auto_af_check.setToolTip("Select a low-structure patch from scheduled acquisition images, after their channels finish. No extra selection images. Overrides manual references for this run.")
+    af_layout.addWidget(owner.mda_auto_af_check)
+    radius_form = QFormLayout()
+    field(radius_form, "mda_auto_af_radius", "Minimum empty patch radius (camera px)", 20.0, minimum=1, maximum=10000)
+    af_layout.addLayout(radius_form)
+    owner.mda_af_reference_help = QLabel()
+    owner.mda_af_reference_help.setWordWrap(True)
+    af_layout.addWidget(owner.mda_af_reference_help)
+    owner.mda_auto_af_check.toggled.connect(lambda *_: update_autofocus_controls(owner))
     owner._mda_af_settings = QWidget()
     af_layout.addWidget(owner._mda_af_settings)
     af = QFormLayout(owner._mda_af_settings)
@@ -185,6 +194,12 @@ def build_extension_controls(owner):
 
 def update_autofocus_controls(owner):
     owner._mda_af_settings.setEnabled(any(box.isChecked() for box in owner.mda_af_axes.values()))
+    automatic = owner.mda_auto_af_check.isChecked()
+    owner.choose_af_references_btn.setEnabled(not automatic)
+    owner.mda_auto_af_radius.setEnabled(automatic)
+    owner.mda_af_reference_help.setText(
+        "Uses the imaging channels in this acquisition, after their images are collected. If no patch exceeds the minimum radius, autofocus is skipped at this position. Earlier images are not retaken."
+        if automatic else "No reference for a FOV means autofocus is skipped there.")
 
 
 def read_extensions(owner):
@@ -196,7 +211,9 @@ def read_extensions(owner):
                                     owner.mda_refocus_input.value(), owner.mda_af_range_input.value(),
                                     owner.mda_search_pts_input.value(), owner.mda_fine_range_input.value(),
                                     owner.mda_fine_pts_input.value(),
-                                    tuple(axis for axis, box in owner.mda_af_axes.items() if box.isChecked())),
+                                    tuple(axis for axis, box in owner.mda_af_axes.items() if box.isChecked()),
+                                    automatic_positions=owner.mda_auto_af_check.isChecked(),
+                                    automatic_min_radius_px=owner.mda_auto_af_radius.value()),
         tracking=TrackingSettings(owner.mda_seg_track_check.isChecked(), owner.mda_segment_every_input.value(),
                                   owner.mda_seg_ch_combo.currentText(), owner.mda_seg_scale_input.value(),
                                   str(owner.mda_seg_model_combo.currentData() or owner.mda_seg_model_combo.currentText()),
@@ -212,6 +229,8 @@ def write_extensions(owner, ext):
         "mda_batch_check": ext.raman.batch, "mda_pre_acq_check": ext.raman.pre_acq,
         "mda_repeats_input": ext.raman.repeats,
         "mda_af_mode_combo": "laser",
+        "mda_auto_af_check": ext.autofocus.automatic_positions,
+        "mda_auto_af_radius": ext.autofocus.automatic_min_radius_px,
         "mda_afp_input": ext.autofocus.positions, "mda_refocus_input": ext.autofocus.every,
         "mda_af_range_input": ext.autofocus.search_range, "mda_search_pts_input": ext.autofocus.search_points,
         "mda_seg_track_check": ext.tracking.enabled, "mda_segment_every_input": ext.tracking.every,
@@ -382,6 +401,8 @@ class AcquisitionController(QObject):
                     image_x=owner.core.getImageWidth(), image_y=owner.core.getImageHeight(),
                     config_file=owner.mm_config, point_repeats=ext.raman.repeats,
                     autofocus_axes=ext.autofocus.axes,
+                    automatic_af_positions=ext.autofocus.automatic_positions,
+                    automatic_af_min_radius=ext.autofocus.automatic_min_radius_px,
                     circle_center=(owner.sel_cx_input.value(), owner.sel_cy_input.value()),
                     circle_radius=owner.sel_r_input.value(),
                 )
@@ -569,8 +590,12 @@ def install_unified_mda(owner):
                 },
             }
             plate_plan = self.stage_positions._plate_plan
+            metadata.pop("plate_focus_height_applied", None)
             if plate_plan is not None:
                 metadata[METADATA_KEY]["wellplate_plan"] = plate_plan.model_dump(mode="json")
+                focus = getattr(plate_plan, "focus_height", None)
+                if focus is not None and focus.enabled:
+                    metadata["plate_focus_height_applied"] = True
             # CoreConnectedMDAWidget substitutes the current stage position when
             # the native table is empty. Dense grids must retain an empty table.
             if GRID_KEY in metadata:
@@ -616,8 +641,8 @@ def install_unified_mda(owner):
             if self._ready:
                 if plate_data := meta.get("wellplate_plan"):
                     from useq import WellPlatePlan
-                    from .wellplate_calibration import CalibratedWellPlatePlan
-                    model = CalibratedWellPlatePlan if "stage_affine_um" in plate_data else WellPlatePlan
+                    from .wellplate_calibration import plate_plan_model
+                    model = plate_plan_model(plate_data)
                     plate_plan = model.model_validate(plate_data)
                     # A prepared-position handoff can carry old metadata. Restore
                     # HCS editing only when the plan still describes these positions.
@@ -665,7 +690,11 @@ def install_unified_mda(owner):
         def update_summary(self, *_args):
             if not self._ready:
                 return
-            sequence = self.value()
+            try:
+                sequence = self.value()
+            except ValueError as error:
+                owner.mda_collection_summary.setText(str(error))
+                return
             from .autofocus_positions import refresh_reference_column
             refresh_reference_column(self, owner)
             dense = GRID_KEY in sequence.metadata

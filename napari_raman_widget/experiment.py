@@ -31,6 +31,8 @@ class AutofocusSettings:
     fine_range: float = 1.5
     fine_points: int = 8
     axes: tuple[str, ...] = ("p", "t")
+    automatic_positions: bool = False
+    automatic_min_radius_px: float = 20.0
 
 
 @dataclass
@@ -58,9 +60,11 @@ class ExperimentExtensions:
 
     @classmethod
     def from_dict(cls, value):
+        autofocus = dict(value.get("autofocus", {}))
+        autofocus.pop("automatic_fluorescence", None)  # legacy preview-selection setting
         return cls(
             raman=RamanSettings(**value.get("raman", {})),
-            autofocus=AutofocusSettings(**value.get("autofocus", {})),
+            autofocus=AutofocusSettings(**autofocus),
             tracking=TrackingSettings(**value.get("tracking", {})),
             delay=value.get("delay", 0.0), overwrite=value.get("overwrite", False),
         )
@@ -210,8 +214,17 @@ def prepare_acquisition(sequence, extensions, targets, image_shape=None):
     if any(p.sequence and REFERENCE_KEY in p.sequence.metadata for p in sequence.stage_positions):
         targets = [r for r in targets if r.get("role") != "autofocus"] + reference_records(sequence)
     ext = deepcopy(extensions)
+    if ext.autofocus.automatic_positions and ext.autofocus.mode == "laser" and ext.autofocus.axes:
+        # Ignore manual references before validating grid/target compatibility.
+        targets = [r for r in targets if r.get("role") != "autofocus"]
     from raman_mda_engine.grid_plan import GRID_KEY, grid_count
     compact_grid = GRID_KEY in sequence.metadata
+    if sequence.metadata.get("plate_focus_height_applied"):
+        subsequences = [sequence, *(p.sequence for p in sequence.stage_positions if p.sequence)]
+        if compact_grid or any(s.grid_plan is not None for s in subsequences):
+            raise ValueError("Use the well-plate FOV selection for grids with a Z height model")
+        if any(s.z_plan and not s.z_plan.is_relative for s in subsequences):
+            raise ValueError("Use relative Z stacks with the plate Z height model")
     if compact_grid and (sequence.stage_positions or sequence.grid_plan):
         raise ValueError("Detach the Raman grid before using native stage positions or grids")
     if compact_grid and any(not record.get("fixed") for record in targets):
@@ -238,6 +251,12 @@ def prepare_acquisition(sequence, extensions, targets, image_shape=None):
     if ext.raman.repeats < 1 or ext.autofocus.every < 0 or ext.tracking.every < 0:
         raise ValueError("Repeats must be positive and update cadences non-negative")
     custom_af = ext.autofocus.mode not in ("off", "hardware")
+    automatic_af = custom_af and ext.autofocus.automatic_positions
+    if automatic_af:
+        if ext.autofocus.mode != "laser":
+            raise ValueError("Automatic autofocus positions selection requires laser autofocus")
+        if not math.isfinite(ext.autofocus.automatic_min_radius_px) or ext.autofocus.automatic_min_radius_px <= 0:
+            raise ValueError("Automatic autofocus minimum radius must be positive and finite")
     if custom_af and sequence.z_plan and not sequence.z_plan.is_relative:
         raise ValueError("Custom autofocus requires a relative Z plan")
     # Target tables refer to stage positions, not nested grid/subsequence expansions.
@@ -262,7 +281,7 @@ def prepare_acquisition(sequence, extensions, targets, image_shape=None):
         raise ValueError("RM acquisition needs prepared Raman targets")
     if policies is not None and ext.tracking.enabled:
         raise ValueError("Disable tracking for position-owned Raman targets; reselect positions from updated images instead")
-    if custom_af and compact_grid and not any(
+    if custom_af and not automatic_af and compact_grid and not any(
         s.role == "autofocus" and len(s._fixed_anchors) for s in sources
     ):
         raise ValueError("Dense grid autofocus needs a fixed autofocus target")
@@ -275,7 +294,7 @@ def prepare_acquisition(sequence, extensions, targets, image_shape=None):
         raise ValueError("RM is selected but no Raman planes are selected")
     image_p = indices(ext.raman.camera_positions, count)
     af_p = indices(ext.autofocus.positions, count) if custom_af else []
-    if custom_af and not compact_grid:
+    if custom_af and not automatic_af and not compact_grid:
         af_p = [p for p in af_p if any(
             s.role == "autofocus" and len(s.get_mda_points(MDAEvent(index={"p": p}), transform=False))
             for s in sources)]
@@ -290,6 +309,9 @@ def prepare_acquisition(sequence, extensions, targets, image_shape=None):
     metadata["autofocus_position_references"] = {
         str(p): deepcopy(reference(pos)) for p, pos in enumerate(sequence.stage_positions) if reference(pos)
     }
+    if automatic_af:
+        metadata["autofocus_stage_xy"] = {}
+        metadata["autofocus_position_references"] = {}
     for xy in metadata["autofocus_stage_xy"].values():
         if len(xy) != 2 or not all(math.isfinite(v) for v in xy):
             raise ValueError("Autofocus reference needs finite stage XY coordinates")

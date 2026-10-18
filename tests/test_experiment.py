@@ -27,6 +27,36 @@ def test_camera_only_needs_no_raman_targets_or_z_plan():
     assert plan.sequence.z_plan is None
 
 
+def test_automatic_autofocus_needs_no_manual_references_and_round_trips():
+    ext = ExperimentExtensions()
+    ext.autofocus.mode = "laser"
+    ext.autofocus.automatic_positions = True
+    ext.autofocus.automatic_min_radius_px = 30
+    sequence = MDASequence(channels=["BF"], stage_positions=[Position(x=1), Position(x=2)])
+    plan = prepare_acquisition(sequence, ext, [])
+    assert tuple(plan.autofocus_positions) == (0, 1)
+    assert plan.extensions.autofocus.mode == "laser"
+    restored = ExperimentExtensions.from_dict(plan.sequence.metadata[METADATA_KEY]["extensions"])
+    assert restored.autofocus.automatic_positions
+    assert restored.autofocus.automatic_min_radius_px == 30
+    ext.autofocus.automatic_positions = False
+    manual = prepare_acquisition(sequence, ext, [])
+    assert manual.extensions.autofocus.mode == "off"
+    assert not ExperimentExtensions.from_dict({}).autofocus.automatic_positions
+
+
+def test_automatic_autofocus_on_dense_grid_without_fixed_reference():
+    from raman_mda_engine.grid_plan import GRID_KEY
+    ext = ExperimentExtensions()
+    ext.autofocus.mode = "laser"
+    ext.autofocus.automatic_positions = True
+    seq = MDASequence(channels=["BF"], metadata={GRID_KEY: {
+        "version": 1, "regions": [{"x": [0, 10, 2], "y": [0, 10, 2], "z": 100}]}})
+    plan = prepare_acquisition(seq, ext, [])
+    assert tuple(plan.autofocus_positions) == (0, 1, 2, 3)
+    assert plan.extensions.autofocus.mode == "laser"
+
+
 def test_target_reordering_preserves_identity_and_detaches_points():
     sequence = identify_positions(MDASequence(
         stage_positions=[Position(x=1, y=2), Position(x=3, y=4)],

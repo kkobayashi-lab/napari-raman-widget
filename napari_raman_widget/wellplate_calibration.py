@@ -4,9 +4,19 @@ from types import MethodType
 import numpy as np
 from pydantic import field_validator
 from useq import WellPlatePlan
+from .plate_focus import PlateFocusCalibration
 
 
-class CalibratedWellPlatePlan(WellPlatePlan):
+class FocusWellPlatePlan(WellPlatePlan):
+    focus_height: PlateFocusCalibration | None = None
+
+
+def plate_plan_model(data):
+    return (CalibratedWellPlatePlan if "stage_affine_um" in data else
+            FocusWellPlatePlan if "focus_height" in data else WellPlatePlan)
+
+
+class CalibratedWellPlatePlan(FocusWellPlatePlan):
     # Maps (row, column, 1) to stage (X, Y), in micrometers.
     stage_affine_um: tuple[tuple[float, float, float], tuple[float, float, float]]
 
@@ -122,7 +132,7 @@ def extend_plate_mapping(wizard):
             import json
             from pathlib import Path
             data = json.loads(Path(path).read_text())
-            model = CalibratedWellPlatePlan if "stage_affine_um" in data else WellPlatePlan
+            model = plate_plan_model(data)
             wizard.setValue(model.model_validate(data))
 
     # The load button already holds the old bound method; reconnect it as well.
