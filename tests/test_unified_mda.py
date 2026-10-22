@@ -73,10 +73,13 @@ def test_dense_grid_is_listed_in_positions_without_expanding_points(owner):
         {"x": [0, 100, 10001], "y": [0, 200, 20001], "z": None},
         {"x": [20, 30, 2], "y": [40, 50, 3], "z": 7},
     ]}
-    panel.setValue(MDASequence(channels=["BF"], metadata={GRID_KEY: grid}))
+    panel.setValue(MDASequence(channels=["BF"], metadata={GRID_KEY: grid},
+                               keep_shutter_open_across=("p",)))
     assert panel.tab_wdg.currentWidget() is panel.stage_positions
     assert panel.stage_positions.isAncestorOf(panel.dense_grid_table)
     assert not panel.dense_positions.isHidden()
+    assert panel.dense_positions.layout().indexOf(panel.detach_grid_btn) >= 0
+    assert not panel.detach_grid_btn.isHidden()
     assert native_table.isHidden()
     assert panel.dense_grid_table.rowCount() == 2
     assert panel.dense_grid_table.item(0, 1).text() == "10,001 × 20,001 = 200,030,001"
@@ -94,6 +97,11 @@ def test_dense_grid_is_listed_in_positions_without_expanding_points(owner):
     assert panel.detach_grid_btn.isEnabled()
     panel.detach_grid_btn.click()
     assert GRID_KEY not in panel.value().metadata
+    assert panel.value().keep_shutter_open_across == ("g",)
+    assert panel.targets == []
+    assert panel.grid_plan.isEnabled()
+    assert panel.detach_grid_btn.isHidden()
+    assert panel.tab_wdg.tabText(panel.tab_wdg.indexOf(panel.stage_positions)) == "Positions"
     assert panel.dense_positions.isHidden()
     assert not native_table.isHidden()
     assert panel.stage_positions.af_per_position.isHidden()

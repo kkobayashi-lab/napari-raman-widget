@@ -25,7 +25,8 @@ from .mda_timing import (
     RAMAN_POINT_OVERHEAD_S,
     estimate_mda_time,
     estimate_live_mda_end,
-    remember_live_mda_estimate,
+    AcquisitionOverheadLearner,
+    _event_min_start_seconds,
     format_duration,
     mda_schedule_window,
 )
@@ -754,22 +755,7 @@ class HardwareWidget(QWidget):
         definition_row.addWidget(self.grid_definition_combo)
         grid_layout.addLayout(definition_row)
 
-        # Fixed point in image (pixel) coordinates -- same point at every FOV.
-        fovx_row = QHBoxLayout()
-        fovx_row.addWidget(QLabel("FOV x (px):"))
-        self.grid_fovx_input = QSpinBox()
-        self.grid_fovx_input.setRange(0, 100000)
-        self.grid_fovx_input.setValue(510)
-        fovx_row.addWidget(self.grid_fovx_input)
-        grid_layout.addLayout(fovx_row)
-
-        fovy_row = QHBoxLayout()
-        fovy_row.addWidget(QLabel("FOV y (px):"))
-        self.grid_fovy_input = QSpinBox()
-        self.grid_fovy_input.setRange(0, 100000)
-        self.grid_fovy_input.setValue(510)
-        fovy_row.addWidget(self.grid_fovy_input)
-        grid_layout.addLayout(fovy_row)
+        grid_layout.addWidget(QLabel("Laser point: (512, 512) px (fixed)"))
 
         # Stage grid extent / spacing (real stage units).
         xr_row = QHBoxLayout()
@@ -2214,7 +2200,14 @@ class HardwareWidget(QWidget):
         self, event, spectra, points, which, _exposure
     ):
         """Add the spectrum image at RM's index in the shared MDA stack."""
-        self._record_live_mda_completion()
+        policy = (getattr(getattr(event, "sequence", None), "metadata", {}) or {}).get(
+            "raman_positions", {}).get(str(event.index.get("p", 0)), {})
+        batch = (policy.get("mode") == "integrated_batch" if policy else
+                 getattr(self._raman_visualization_engine, "_batch", False))
+        self._record_live_mda_completion(
+            "raman_batch" if batch else "raman", _exposure,
+            len(np.atleast_2d(spectra)), event,
+        )
         if self._lazy_mda_viewer is None:
             return
         try:
@@ -2233,18 +2226,22 @@ class HardwareWidget(QWidget):
 
     def _on_mda_frame_completed(self, _image, _event, *_metadata):
         """Update the live ETA after one camera acquisition completes."""
-        self._record_live_mda_completion()
+        self._record_live_mda_completion(
+            "imaging", getattr(_event, "exposure", None), 1, _event,
+        )
 
     def _start_live_mda_timing(self, total_acquisitions):
         self._mda_live_total = max(0, int(total_acquisitions))
         self._mda_live_completed = 0
         self._mda_live_intervals = []
         self._mda_live_last_completion = time.perf_counter()
+        self._mda_live_started = self._mda_live_last_completion
+        self._mda_overhead_learner = AcquisitionOverheadLearner()
         self.mda_live_eta_label.setText(
             "Live ETA: collecting the first measurement..."
         )
 
-    def _record_live_mda_completion(self):
+    def _record_live_mda_completion(self, kind=None, exposure_ms=None, count=1, event=None):
         """Update ETA from the rolling average of the latest 10 completions."""
         if (
             not self._raman_mda_pending
@@ -2255,6 +2252,11 @@ class HardwareWidget(QWidget):
 
         now_monotonic = time.perf_counter()
         interval = now_monotonic - self._mda_live_last_completion
+        previous_elapsed = self._mda_live_last_completion - self._mda_live_started
+        scheduled_wait = max(0.0, _event_min_start_seconds(event) - previous_elapsed)
+        self._mda_overhead_learner.record(
+            kind, interval, exposure_ms, count, min(interval, scheduled_wait),
+        )
         self._mda_live_last_completion = now_monotonic
         self._mda_live_intervals.append(interval)
         self._mda_live_intervals = self._mda_live_intervals[-10:]
@@ -2268,7 +2270,6 @@ class HardwareWidget(QWidget):
         )
         if live is None:
             return
-        remember_live_mda_estimate(live)
         end_text = live.expected_end.strftime("%Y-%m-%d %H:%M:%S %Z")
         self.mda_live_eta_label.setText(
             f"Live ETA: {end_text} "
@@ -4107,10 +4108,8 @@ class HardwareWidget(QWidget):
     def _current_grid_source_settings(self):
         """Return settings that must be shared by every combined grid."""
         return {
-            "fov_x": int(self.grid_fovx_input.value()),
-            "fov_y": int(self.grid_fovy_input.value()),
-            "pattern_size": float(self.sel_sqsize_input.value()),
-            "pattern_n": int(self.sel_sqn_input.value()),
+            "fov_x": int(DEFAULT_BEAM_CENTER_XY[0]),
+            "fov_y": int(DEFAULT_BEAM_CENTER_XY[1]),
             "dense": self.grid_dense_check.isChecked(),
         }
 
@@ -4160,11 +4159,7 @@ class HardwareWidget(QWidget):
             self.apply_grid_mda_btn.setEnabled(has_grids and not (controller and controller.busy))
 
         for name in (
-            "grid_fovx_input",
-            "grid_fovy_input",
             "grid_dense_check",
-            "sel_sqsize_input",
-            "sel_sqn_input",
         ):
             control = getattr(self, name, None)
             if control is not None:
@@ -4262,8 +4257,7 @@ class HardwareWidget(QWidget):
             self.status.setText("Status: no default engine -- reconnect")
             return
 
-        fov_x = int(self.grid_fovx_input.value())
-        fov_y = int(self.grid_fovy_input.value())
+        fov_x, fov_y = map(int, DEFAULT_BEAM_CENTER_XY)
         x_range = float(self.grid_xrange_input.value())
         y_range = float(self.grid_yrange_input.value())
         x_step = float(self.grid_xstep_input.value())
@@ -4272,8 +4266,6 @@ class HardwareWidget(QWidget):
         if self.grid_sampling_combo.currentData() == "count":
             x_count = int(self.grid_xcount_input.value())
             y_count = int(self.grid_ycount_input.value())
-        sq_size = float(self.sel_sqsize_input.value())
-        sq_n = int(self.sel_sqn_input.value())
         source_settings = self._current_grid_source_settings()
         if self._grid_regions:
             expected = self._grid_regions[0]["source_settings"]
@@ -4335,11 +4327,14 @@ class HardwareWidget(QWidget):
 
         try:
             from cns_control.utils import grid_point_selections
+            from raman_mda_engine.aiming.transformers import Identity
 
             with _StdoutRedirector(log):
                 self._prepare_for_selection()
                 self.core.register_mda_engine(self.default_engine)
-                point_transformer = self._make_point_transformer(sq_size, sq_n)
+                # Stage motion defines the grid; never expand its fixed laser
+                # point using the cell-selection Square/Circle pattern.
+                point_transformer = Identity()
                 sources, _autofocus_p, region_seq = grid_point_selections(
                     self.core, self.viewer, self.main_window,
                     point_transformer,
@@ -4449,16 +4444,22 @@ class HardwareWidget(QWidget):
             "Autofocus, segmentation/tracking, and stage movement time "
             "are not included."
         )
-        if estimate.remembered_average_seconds is not None:
+        if getattr(estimate, "learned_overheads", ()):
+            learned = ", ".join(
+                f"{kind.replace('_', ' ')}: {value:.3f} s"
+                for kind, value in estimate.learned_overheads
+            )
             message = message[:message.index("Estimate details:")] + (
                 "Estimate details:\n"
-                f"- {estimate.acquisition_count:,} acquisitions\n"
-                f"- {format_duration(estimate.remembered_average_seconds)} "
-                "per acquisition, remembered from the last 10 live measurements\n"
-                f"- {scheduled_wait} additional scheduled interval time\n\n"
-                "Measured timing includes overhead from the previous run. "
-                "Changes to exposure, points, or acquisition settings may change "
-                "the actual duration; live ETA updates during the run."
+                f"- {estimate.raman_points:,} Raman spectra and "
+                f"{estimate.imaging_frames:,} imaging frames\n"
+                f"- Remembered overhead per spectrum/frame: {learned}\n"
+                "- Current exposures and repeats are included; unlearned modes "
+                "use default overhead\n"
+                f"- {scheduled_wait} scheduled interval time\n\n"
+                "Overhead is learned from the last 10 measurements per mode "
+                "and retained across runs. Hardware and workflow changes may "
+                "affect the actual duration; live ETA updates during the run."
             )
         if overwrite:
             resolved_output = Path(output_dir).expanduser().resolve()

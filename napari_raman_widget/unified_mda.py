@@ -296,7 +296,7 @@ class AcquisitionController(QObject):
                    f"Start delay: {format_duration(ext.delay)}\n"
                    f"Autofocus: {ext.autofocus.mode}; axes: {', '.join(ext.autofocus.axes) or 'none'}\n"
                    f"Tracking: {ext.tracking.enabled}\n\n"
-                   + ("Timing uses the remembered average of the last 10 live acquisitions; live ETA adapts to this run." if estimate.remembered_average_seconds is not None else "Autofocus, tracking, and motion add time. Their internal images are not saved as camera channels."))
+                   + ("Timing uses remembered overhead plus current exposure; live ETA adapts to this run." if estimate.learned_overheads else "Autofocus, tracking, and motion add time. Their internal images are not saved as camera channels."))
         if ext.overwrite and output is not None and output.exists():
             message += f"\n\nOverwrite permanently replaces all contents of {output}."
         if QMessageBox.question(self.panel, "Review acquisition", message,
@@ -502,7 +502,7 @@ def install_unified_mda(owner):
             self.dense_grid_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
             self.dense_grid_table.horizontalHeader().setStretchLastSection(True)
             dense_layout.addWidget(self.dense_grid_table)
-            self.detach_grid_btn = QPushButton("Remove dense Raman grid")
+            self.detach_grid_btn = QPushButton("Remove dense grid — restore normal MDA")
             self.detach_grid_btn.clicked.connect(self.detach_grid)
             dense_layout.addWidget(self.detach_grid_btn)
             self.stage_positions.layout().addWidget(self.dense_positions)
@@ -641,7 +641,11 @@ def install_unified_mda(owner):
             metadata = deepcopy(sequence.metadata)
             metadata.pop(GRID_KEY, None)
             metadata[METADATA_KEY]["targets"] = []
-            self.setValue(sequence.replace(metadata=metadata))
+            # Dense mode maps the native grid shutter axis to virtual positions.
+            shutter_axes = tuple("g" if axis == "p" else axis
+                                 for axis in sequence.keep_shutter_open_across)
+            self.setValue(sequence.replace(metadata=metadata,
+                                           keep_shutter_open_across=shutter_axes))
             self.update_summary()
 
         def update_summary(self, *_args):
@@ -682,11 +686,11 @@ def install_unified_mda(owner):
                     self.grid_summary.setText(
                         f"Dense Raman grid: {count:,} virtual positions. "
                         f"Estimated duration: {format_duration(estimate.duration_seconds)} "
-                        + ("(remembered live timing). Positions are generated during acquisition." if estimate.remembered_average_seconds is not None else "plus autofocus/tracking/motion. Positions are generated during acquisition.")
+                        + ("(remembered overhead + current exposure). Positions are generated during acquisition." if estimate.learned_overheads else "plus autofocus/tracking/motion. Positions are generated during acquisition.")
                     )
                 owner.mda_collection_summary.setText(
                     f"{estimate.raman_points:,} spectral collections; {estimate.imaging_frames:,} camera frames; "
-                    f"estimated {format_duration(estimate.duration_seconds)} " + ("(remembered live timing)." if estimate.remembered_average_seconds is not None else "plus autofocus/tracking/motion.")
+                    f"estimated {format_duration(estimate.duration_seconds)} " + ("(remembered overhead + current exposure)." if estimate.learned_overheads else "plus autofocus/tracking/motion.")
                 )
             except (ValueError, TypeError) as error:
                 owner.mda_collection_summary.setText(str(error))

@@ -14,22 +14,40 @@ def _timing_settings():
     return QSettings("CNS", "napari-raman-widget")
 
 
-def remembered_acquisition_seconds():
-    """Read the last full live-ETA window, retained across app restarts."""
+def remembered_overhead_seconds(kind):
+    """Read exposure-independent overhead; legacy total-time values are ignored."""
     try:
-        value = float(_timing_settings().value("mda/average_acquisition_seconds"))
+        value = float(_timing_settings().value(f"mda/overhead_v2/{kind}"))
     except (TypeError, ValueError, OverflowError):
         return None
-    return value if isfinite(value) and value > 0 else None
+    return value if isfinite(value) and value >= 0 else None
 
 
-def remember_live_mda_estimate(live):
-    """Only replace the saved timing once a complete ten-sample window exists."""
-    if (live.sample_count == 10 and isfinite(live.average_seconds)
-            and live.average_seconds > 0):
-        _timing_settings().setValue(
-            "mda/average_acquisition_seconds", live.average_seconds
-        )
+class AcquisitionOverheadLearner:
+    """Retain ten completion samples per acquisition mode, normalized per spectrum."""
+
+    def __init__(self):
+        self.samples = {}
+
+    def record(self, kind, interval, exposure_ms, count=1, scheduled_wait=0):
+        if kind not in ("raman", "raman_batch", "imaging"):
+            return
+        if exposure_ms is None:
+            return
+        exposure = float(exposure_ms) / 1000.0
+        if (count < 1 or not all(isfinite(v) for v in
+                (interval, exposure, scheduled_wait))
+                or min(interval, exposure, scheduled_wait) < 0):
+            return
+        overhead = max(0.0, interval - scheduled_wait - exposure * count)
+        samples = self.samples.setdefault(kind, [])
+        samples.append((overhead, count))
+        del samples[:-10]
+        if len(samples) == 10:
+            _timing_settings().setValue(
+                f"mda/overhead_v2/{kind}",
+                sum(value for value, _ in samples) / sum(n for _, n in samples),
+            )
 
 
 def _is_cell_source(source):
@@ -46,7 +64,7 @@ class MdaTimeEstimate:
     raman_points: int
     raman_events: int
     imaging_frames: int
-    remembered_average_seconds: float | None = None
+    learned_overheads: tuple = ()
 
     @property
     def scheduled_wait_seconds(self):
@@ -91,8 +109,8 @@ def estimate_mda_time(
     """Estimate from remembered live timing, falling back to fixed overhead.
 
     Raman events use the same cell-source filtering as ``RamanEngine``.
-    A remembered interval applies per completion (Raman event or camera frame),
-    not per Raman point. It already includes the previous run's overhead/waits.
+    Learned overhead is stored per spectrum/frame and acquisition mode.
+    Current exposures and repeats are added independently of historical exposure.
     Explicit scheduled starts remain lower bounds on event start times.
     """
     elapsed = 0.0
@@ -100,7 +118,9 @@ def estimate_mda_time(
     raman_points = 0
     raman_events = 0
     imaging_frames = 0
-    remembered_average = remembered_acquisition_seconds()
+    overheads = {kind: remembered_overhead_seconds(kind)
+                 for kind in ("raman", "raman_batch", "imaging")}
+    used_overheads = {}
     raman_z = set(int(index) for index in raman_z_indices)
     image_p = image_positions if isinstance(image_positions, range) else set(int(index) for index in image_positions)
     raman_exposure_s = float(raman_exposure_ms) / 1000.0
@@ -138,7 +158,6 @@ def estimate_mda_time(
             else None
         )
         event_seconds = 0.0
-        acquisition_count = 0
 
         if channel == raman_channel:
             if event.index.get("z", 0) in raman_z:
@@ -155,21 +174,25 @@ def estimate_mda_time(
                 raman_points += point_count
                 if point_count:
                     raman_events += virtual_count
-                    acquisition_count = virtual_count
+                kind = "raman_batch" if event_batch else "raman"
+                overhead = overheads[kind]
+                if overhead is not None and point_count:
+                    used_overheads[kind] = overhead
                 event_seconds = point_count * (
-                    raman_exposure_s + RAMAN_POINT_OVERHEAD_S
+                    raman_exposure_s + (RAMAN_POINT_OVERHEAD_S
+                                        if overhead is None else overhead)
                 )
         elif (dense and bool(image_p)) or event.index.get("p", 0) in image_p:
             exposure_ms = getattr(event, "exposure", None) or 0.0
             frame_count = len(image_p) if dense else 1
             imaging_frames += frame_count
-            acquisition_count = frame_count
+            overhead = overheads["imaging"]
+            if overhead is not None and frame_count:
+                used_overheads["imaging"] = overhead
             event_seconds = (
-                float(exposure_ms) / 1000.0 + IMAGING_FRAME_OVERHEAD_S
+                float(exposure_ms) / 1000.0 + (IMAGING_FRAME_OVERHEAD_S
+                                             if overhead is None else overhead)
             ) * frame_count
-
-        if remembered_average is not None:
-            event_seconds = acquisition_count * remembered_average
         active += event_seconds
         elapsed += event_seconds
 
@@ -179,7 +202,7 @@ def estimate_mda_time(
         raman_points=raman_points,
         raman_events=raman_events,
         imaging_frames=imaging_frames,
-        remembered_average_seconds=remembered_average,
+        learned_overheads=tuple(used_overheads.items()),
     )
 
 
