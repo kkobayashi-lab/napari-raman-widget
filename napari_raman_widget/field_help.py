@@ -31,11 +31,6 @@ HELP = {
         "index selects the matching JSON calibration; the widget never "
         "commands the objective turret."
     ),
-    "out_path": (
-        "Base folder for relative result paths. Changes apply to the next "
-        "save immediately and never reload hardware or change the process "
-        "working directory."
-    ),
     "connect_btn": (
         "Unload old devices, load the CFG, open the napari-micromanager dock, "
         "create the collector/DAQ, load both models, and refresh channels."
@@ -57,7 +52,7 @@ HELP = {
     ),
     "collect_save_input": (
         "Optional filename; the .npy suffix is added if missing. Relative "
-        "names save under Data Output. Blank = display only."
+        "names save in the current working directory. Blank = display only."
     ),
     "collect_btn": (
         "Restart the galvo, transform the last layer's first point, collect "

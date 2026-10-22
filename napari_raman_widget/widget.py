@@ -366,6 +366,23 @@ class HardwareWidget(QWidget):
         self.center_laser_btn.clicked.connect(self.center_laser)
         hardware_layout.addWidget(self.center_laser_btn)
 
+        galvo_row = QHBoxLayout()
+        self.galvo_x_input = QDoubleSpinBox()
+        self.galvo_y_input = QDoubleSpinBox()
+        for axis, control in (("X", self.galvo_x_input), ("Y", self.galvo_y_input)):
+            control.setDecimals(4)
+            control.setRange(-1.6, 1.6)
+            control.setSingleStep(0.001)
+            control.setSuffix(" V")
+            control.setKeyboardTracking(False)
+            control.setToolTip("Manual galvo voltage; press Apply galvo voltage to move.")
+            galvo_row.addWidget(QLabel(f"Galvo {axis}:"))
+            galvo_row.addWidget(control)
+        hardware_layout.addLayout(galvo_row)
+        self.apply_galvo_btn = QPushButton("Apply galvo voltage")
+        self.apply_galvo_btn.clicked.connect(self.apply_galvo_voltage)
+        hardware_layout.addWidget(self.apply_galvo_btn)
+
         drag_row = QHBoxLayout()
         self.drag_stage_btn = QPushButton("Drag image to move stage")
         self.drag_stage_btn.setCheckable(True)
@@ -439,24 +456,6 @@ class HardwareWidget(QWidget):
 
         hardware_box.setLayout(hardware_layout)
         outer.addWidget(hardware_box)
-
-        # ================= DATA OUTPUT SECTION =================
-        output_box = make_collapsible("Data Output", expanded=True)
-        output_layout = QVBoxLayout()
-        output_layout.addWidget(QLabel(
-            "Base folder for new saves (changes apply immediately):"
-        ))
-        out_row = QHBoxLayout()
-        self.out_path = QLineEdit()
-        self.out_path.setPlaceholderText("(current directory)")
-        out_browse = QPushButton("...")
-        out_browse.setFixedWidth(30)
-        out_browse.clicked.connect(self.browse_out)
-        out_row.addWidget(self.out_path)
-        out_row.addWidget(out_browse)
-        output_layout.addLayout(out_row)
-        output_box.setLayout(output_layout)
-        outer.addWidget(output_box)
 
         # ================= COLLECT SPECTRUM SECTION =================
         raman_box = make_collapsible(
@@ -1223,7 +1222,7 @@ class HardwareWidget(QWidget):
         self.sel_seg_debug_check.setChecked(False)
         self.sel_seg_debug_check.setToolTip(
             "Save each exact Cellpose input and label mask as lossless .npy "
-            "files under Data Output/segmentation_debug. Napari can open "
+            "files under segmentation_debug in the current working directory. Napari can open "
             "these files directly."
         )
         sel_layout.addWidget(self.sel_seg_debug_check)
@@ -1416,16 +1415,6 @@ class HardwareWidget(QWidget):
         if path:
             self.tf_path.setText(path)
 
-    def browse_out(self):
-        path = QFileDialog.getExistingDirectory(
-            self, "Select output folder", str(self._output_path("."))
-        )
-        if path:
-            self.out_path.setText(path)
-            self.status.setText(
-                f"Status: new saves will use {self._output_path('.')}"
-            )
-
     def browse_vandermonde(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select Vandermonde model", "",
@@ -1483,13 +1472,11 @@ class HardwareWidget(QWidget):
 
     # -------- helpers --------
     def _output_path(self, path):
-        """Resolve a relative result path under the current output folder."""
+        """Resolve standalone result paths; MDA owns its save folder separately."""
         candidate = Path(path).expanduser()
         if candidate.is_absolute():
             return candidate
-        base_text = self.out_path.text().strip()
-        base = Path(base_text).expanduser() if base_text else Path.cwd()
-        return base / candidate
+        return Path.cwd() / candidate
 
     def _get_image_xy(self):
         """Return (X_size, Y_size) from the camera via the core if connected,
@@ -1654,6 +1641,43 @@ class HardwareWidget(QWidget):
             )
         return volts[0]
 
+    def _reset_galvo_voltage_inputs(self):
+        """Default manual inputs to the loaded calibration's beam center."""
+        center_x, center_y = DEFAULT_BEAM_CENTER_XY
+        volts = np.asarray(self._pt_to_volts(np.array([center_y, center_x])))
+        if volts.shape != (1, 2) or not np.all(np.isfinite(volts)):
+            raise ValueError("Transformer must return one finite X/Y voltage pair")
+        if np.any(np.abs(volts) > 1.6):
+            raise ValueError("Calibrated center exceeds the +/-1.6 V galvo limit")
+        self.galvo_x_input.setValue(float(volts[0, 0]))
+        self.galvo_y_input.setValue(float(volts[0, 1]))
+
+    def apply_galvo_voltage(self):
+        """Hold the galvos at the manually entered X/Y voltages."""
+        if self.core is None or self.daq is None:
+            self.status.setText("Status: not connected")
+            return
+        mda = getattr(self.core, "mda", None)
+        is_running = getattr(mda, "is_running", False)
+        if is_running() if callable(is_running) else bool(is_running):
+            self.status.setText("Status: stop the active MDA before adjusting galvo voltage")
+            return
+        try:
+            volts = np.array([self.galvo_x_input.value(), self.galvo_y_input.value()])
+            if not np.all(np.isfinite(volts)) or np.any(np.abs(volts) > 1.6):
+                raise ValueError("Galvo voltages must be finite and within +/-1.6 V")
+            set_position = getattr(self.daq, "set_galvo_position", None)
+            if callable(set_position):
+                set_position(volts)
+            else:
+                self.daq.galvo.stop()
+                self.daq.galvo.write(np.ascontiguousarray(volts), auto_start=True)
+            self.status.setText(
+                f"Status: galvo position set [X={volts[0]:.4f}, Y={volts[1]:.4f} V]"
+            )
+        except Exception as e:
+            self.status.setText(f"Status: galvo adjustment failed -- {e}")
+
     def center_laser(self):
         """Hold the laser at the same calibrated center used on connection."""
         if self.core is None or self.daq is None:
@@ -1672,6 +1696,7 @@ class HardwareWidget(QWidget):
         center_x, center_y = DEFAULT_BEAM_CENTER_XY
         try:
             volts = self._aim_beam_at_pixel(center_x, center_y)
+            self._reset_galvo_voltage_inputs()
             self.status.setText(
                 f"Status: laser centered at ({center_x:.0f}, {center_y:.0f}) "
                 f"[X={volts[0]:.3f}, Y={volts[1]:.3f} V]"
@@ -2547,6 +2572,7 @@ class HardwareWidget(QWidget):
             tf = self.tf_path.text().strip()
             if tf:
                 self.transformer = CoordTransformer.from_json(tf)
+                self._reset_galvo_voltage_inputs()
 
             objective = self._refresh_objective_combo()
             vdm_msg = self._load_vandermonde()
@@ -2587,6 +2613,7 @@ class HardwareWidget(QWidget):
         try:
             from cns_control.coordtransformer import CoordTransformer
             self.transformer = CoordTransformer.from_json(tf)
+            self._reset_galvo_voltage_inputs()
             vdm_msg = self._load_vandermonde()
             self.status.setText(f"Status: transformer reloaded OK{vdm_msg}")
         except Exception as e:
@@ -2912,6 +2939,7 @@ class HardwareWidget(QWidget):
             )
             model_path = Path(f"{model_base}.json")
             self.transformer = CoordTransformer.from_json(model_path)
+            self._reset_galvo_voltage_inputs()
             self.tf_path.setText(str(model_path))
             self.status.setText(f"Status: saved & loaded {model_path} OK")
         except Exception as e:

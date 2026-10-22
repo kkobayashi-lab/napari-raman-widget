@@ -232,25 +232,14 @@ class TestCellposeModelSelection(unittest.TestCase):
 
 
 class TestOutputPaths(unittest.TestCase):
-    def test_relative_paths_follow_latest_output_folder(self):
-        selected = {"path": "first"}
-        widget = SimpleNamespace(
-            out_path=SimpleNamespace(text=lambda: selected["path"])
-        )
-
-        first = HardwareWidget._output_path(widget, "reference/test.zarr")
-        selected["path"] = "second"
-        second = HardwareWidget._output_path(widget, "reference/test.zarr")
-
-        self.assertEqual(first, Path("first/reference/test.zarr"))
-        self.assertEqual(second, Path("second/reference/test.zarr"))
+    def test_relative_standalone_paths_use_current_directory(self):
+        result = HardwareWidget._output_path(SimpleNamespace(), "reference/test.zarr")
+        self.assertEqual(result, Path.cwd() / "reference/test.zarr")
 
     def test_absolute_output_paths_are_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
             absolute = Path(directory) / "run"
-            widget = SimpleNamespace(
-                out_path=SimpleNamespace(text=lambda: "ignored")
-            )
+            widget = SimpleNamespace()
 
             result = HardwareWidget._output_path(widget, absolute)
 
@@ -510,6 +499,7 @@ class TestHardwareControls(unittest.TestCase):
             daq=object(),
             transformer=object(),
             status=SimpleNamespace(setText=statuses.append),
+            _reset_galvo_voltage_inputs=lambda: None,
             _aim_beam_at_pixel=lambda x, y: (
                 aims.append((x, y)) or np.array([0.2, -0.3])
             ),
@@ -1071,7 +1061,6 @@ class TestSavedAcquisitionViewer(unittest.TestCase):
             objective_combo.addItem("3")
             widget = SimpleNamespace(
                 mda_dir_input=SimpleNamespace(text=lambda: str(run)),
-                out_path=SimpleNamespace(text=lambda: ""),
                 objective_combo=objective_combo,
                 vandermonde_objective=None,
                 sel_vdm_path=SimpleNamespace(text=lambda: "model.json"),
