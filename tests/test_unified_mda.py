@@ -21,7 +21,7 @@ def qt_app():
 
 
 @pytest.fixture
-def owner(qt_app):
+def owner(qt_app, request):
     app = qt_app
     for name in ("QAction", "QActionGroup", "QUndoCommand", "QUndoStack"):
         if not hasattr(QtGui, name):
@@ -29,7 +29,12 @@ def owner(qt_app):
     from napari_micromanager._gui_objects._mda_widget import MultiDWidget
     core = CMMCorePlus()
     core.loadSystemConfiguration(str(Path(__file__).parents[2] / "raman-mda-engine/tests/test-config.cfg"))
-    widget = QWidget()
+    real_controls = getattr(request, "param", False)
+    if real_controls:
+        from napari_raman_widget.widget import HardwareWidget
+        widget = HardwareWidget(SimpleNamespace(window=SimpleNamespace()))
+    else:
+        widget = QWidget()
     widget.core = core
     widget.browse_cellpose_model = lambda *_: None
     widget.browse_tracking_cfg = lambda: None
@@ -47,7 +52,8 @@ def owner(qt_app):
     widget.vandermonde_path = "stage.json"
     widget.sel_repeats_input = QtWidgets.QSpinBox()
     widget.sel_repeats_input.setValue(1)
-    build_extension_controls(widget)
+    if not real_controls:
+        build_extension_controls(widget)
     window = QWidget()
     old = MultiDWidget(parent=window, mmcore=core)
     dock = QDockWidget("MDA", window)
@@ -64,7 +70,7 @@ def owner(qt_app):
     app.processEvents()
 
 
-def test_dense_grid_is_listed_in_positions_without_expanding_points(owner):
+def test_dense_grid_is_listed_in_grid_tab_without_expanding_points(owner):
     from raman_mda_engine.grid_plan import GRID_KEY
 
     widget, panel, app = owner
@@ -75,12 +81,12 @@ def test_dense_grid_is_listed_in_positions_without_expanding_points(owner):
     ]}
     panel.setValue(MDASequence(channels=["BF"], metadata={GRID_KEY: grid},
                                keep_shutter_open_across=("p",)))
-    assert panel.tab_wdg.currentWidget() is panel.stage_positions
-    assert panel.stage_positions.isAncestorOf(panel.dense_grid_table)
+    assert panel.tab_wdg.tabText(panel.tab_wdg.indexOf(panel.stage_positions)) == "Positions"
+    assert panel.grid_plan.isAncestorOf(panel.dense_grid_table)
     assert not panel.dense_positions.isHidden()
     assert panel.dense_positions.layout().indexOf(panel.detach_grid_btn) >= 0
     assert not panel.detach_grid_btn.isHidden()
-    assert native_table.isHidden()
+    assert not native_table.isHidden()
     assert panel.dense_grid_table.rowCount() == 2
     assert panel.dense_grid_table.item(0, 1).text() == "10,001 × 20,001 = 200,030,001"
     assert panel.dense_grid_table.item(0, 4).text() == "At run start"
@@ -107,6 +113,108 @@ def test_dense_grid_is_listed_in_positions_without_expanding_points(owner):
     assert panel.stage_positions.af_per_position.isHidden()
     panel.setValue(MDASequence(stage_positions=[Position(x=3, y=4)], channels=["BF"]))
     assert panel.value().stage_positions[0].x == 3
+
+
+def test_grid_modes_preserve_geometry_and_shared_acquisition_settings(owner):
+    from raman_mda_engine.grid_plan import GRID_KEY
+    from napari_raman_widget.experiment import METADATA_KEY
+
+    widget, panel, app = owner
+    panel.setValue(MDASequence(channels=["BF"], grid_plan={"rows": 2, "columns": 3}))
+    imaging = panel.value().grid_plan
+    panel.grid_modes.selector.setCurrentIndex(1)
+    assert panel.value().grid_plan is None
+    assert not panel.grid_modes.imaging.isHidden()
+    assert not panel.grid_modes.raman.isHidden()
+    assert panel.grid_plan.isAncestorOf(panel.grid_modes.repeats)
+    grid = {"version": 1, "regions": [{"x": [0, 10, 3], "y": [0, 20, 4], "z": 5}]}
+    sequence = panel.value()
+    panel.setValue(sequence.replace(metadata={**sequence.metadata, GRID_KEY: grid}))
+    widget.mda_repeats_input.setValue(4)
+    panel.grid_modes.selector.setCurrentIndex(0)
+    assert GRID_KEY not in panel.value().metadata
+    assert panel.value().grid_plan == imaging
+    panel.grid_modes.selector.setCurrentIndex(1)
+    assert panel.value().metadata[GRID_KEY] == grid
+    assert panel.value().grid_plan is None
+    saved = panel.value()
+    assert saved.metadata[METADATA_KEY]["extensions"]["raman"]["repeats"] == 4
+    panel.setValue(MDASequence.model_validate_json(saved.model_dump_json()))
+    assert panel.grid_modes.mode == "raman"
+    assert widget.mda_repeats_input.value() == 4
+    panel.lock(True)
+    assert not panel.grid_modes.selector.isEnabled()
+    assert not widget.mda_repeats_input.isEnabled()
+    panel.lock(False)
+    assert panel.grid_modes.selector.isEnabled()
+
+
+def test_raman_selection_remains_separate_from_grid(owner):
+    widget, panel, app = owner
+    panel.setValue(MDASequence(channels=["BF"], grid_plan={"rows": 2, "columns": 3}))
+    grid = panel.value().grid_plan
+    assert panel.tab_wdg.tabText(panel.tab_wdg.indexOf(panel.raman_selection_tab)) == "Raman selection"
+    assert panel.raman_selection_tab.isAncestorOf(widget._raman_settings_panel)
+    assert not panel.grid_plan.isAncestorOf(widget._raman_settings_panel)
+    assert not any("Select Raman" in button.text() for button in panel.grid_plan.findChildren(QPushButton))
+    panel.grid_modes.repeats.setValue(7)
+    assert widget.mda_repeats_input.value() == 7
+    widget.mda_repeats_input.setValue(3)
+    assert panel.grid_modes.repeats.value() == 3
+    assert panel.value().grid_plan == grid
+
+
+@pytest.mark.parametrize("owner", [True], indirect=True)
+def test_real_raman_grid_controls_and_loaded_regions(owner, tmp_path):
+    from raman_mda_engine.grid_plan import GRID_KEY
+    from napari_raman_widget.experiment import METADATA_KEY
+
+    widget, panel, app = owner
+    assert panel.grid_plan.isAncestorOf(widget.grid_tilt_table)
+    panel.grid_modes.selector.setCurrentIndex(1)
+    widget.mda_repeats_input.setValue(3)
+    assert "3 frames per point" in widget.grid_size_label.text()
+    model = {"degree": 1, "origin": [0, 0], "scale": [10, 20], "coefficients": [5, 1, 2]}
+    grid = {"version": 1, "regions": [
+        {"x": [0, 10, 3], "y": [0, 20, 4], "z": None, "tilt": model}]}
+    source = dict(id="cells", name="cells", role="cell", image_shape=[512, 512],
+                  points={"0": [[0.5, 0.5]]}, anchors={"0": [[0.5, 0.5]]},
+                  fixed=True, position_ids=[])
+    sequence = panel.value()
+    metadata = sequence.metadata.copy()
+    metadata[GRID_KEY] = grid
+    metadata[METADATA_KEY]["targets"] = [source]
+    panel.setValue(sequence.replace(metadata=metadata))
+    assert widget.grid_region_list.count() == 1
+    assert widget._grid_regions[0]["sequence"].metadata[GRID_KEY] == grid
+    panel.stage_positions.setValue([Position(x=123, y=456)])
+    positions_before = panel.stage_positions.value()
+    widget._grid_regions.append(widget._grid_regions[0].copy())
+    widget._refresh_grid_region_list()
+    assert len(panel.value().metadata[GRID_KEY]["regions"]) == 2
+    assert panel.stage_positions.value() == positions_before
+    widget.grid_region_list.setCurrentRow(1)
+    widget.remove_selected_grid()
+    assert panel.value().metadata[GRID_KEY] == grid
+    assert panel.targets[0]["points"]["0"] == [[0.5, 0.5]]
+    saved = panel.value()
+    panel.setValue(MDASequence.model_validate_json(saved.model_dump_json()))
+    assert panel.stage_positions.value() == positions_before
+    from raman_mda_engine.grid_plan import iter_grid_events
+    assert len(list(iter_grid_events(panel.value()))) == 12
+    panel.resize(850, 1000)
+    panel.show()
+    panel.tab_wdg.setCurrentWidget(panel.grid_plan)
+    app.processEvents()
+    panel.grab().save(str(tmp_path / "raman-grid.png"))
+    panel.lock(True)
+    assert not widget.grid_tilt_table.isEnabled()
+    assert not widget.apply_grid_mda_btn.isEnabled()
+    panel.lock(False)
+    widget.clear_grids()
+    assert not widget._grid_regions
+    assert GRID_KEY not in panel.value().metadata
+    assert panel.stage_positions.value() == positions_before
 
 
 def test_install_is_idempotent_and_extension_settings_round_trip(owner):

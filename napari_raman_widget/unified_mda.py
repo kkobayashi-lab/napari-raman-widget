@@ -79,7 +79,10 @@ def build_extension_controls(owner):
     owner.mda_pre_acq_check = QCheckBox("Preposition galvo before collection")
     owner.mda_pre_acq_check.setChecked(True)
     raman.addRow(owner.mda_pre_acq_check)
-    field(raman, "mda_repeats_input", "Spectrum repeats (per point or batch)", 1, minimum=1)
+    field(raman, "mda_repeats_input", "Frames per Raman point / batch", 1, minimum=1)
+    owner.mda_repeats_input.setToolTip("Consecutive spectra at each point before moving; independent of MDA time points.")
+    if hasattr(owner, "_update_grid_size_preview"):
+        owner.mda_repeats_input.valueChanged.connect(owner._update_grid_size_preview)
     field(raman, "mda_rz_input", "Raman planes (all / middle / indices)", "all")
     field(raman, "mda_imgp_input", "Camera positions (all / none / indices)", "all")
     owner.mda_collection_summary = QLabel("Add RM to the MDA channel table to collect spectra.")
@@ -466,6 +469,7 @@ def install_unified_mda(owner):
             self._extra_metadata = {}
             self._owner = owner
             self._ready = False
+            self._locked = False
             super().__init__(**kwargs)
             extend_z_editor(self.z_plan)
             extend_shutter_editor(self.keep_shutter_open)
@@ -476,6 +480,8 @@ def install_unified_mda(owner):
             self.stage_positions.af_per_position.hide()
             from .autofocus_positions import install_reference_column
             install_reference_column(self, owner)
+            from .grid_modes import GridModes
+            self.grid_modes = GridModes(self, owner)
             from .raman_selection import install_raman_tab
             install_raman_tab(self, owner)
             QTabWidget.addTab(self.tab_wdg, owner._mda_af_panel, "Autofocus")
@@ -495,6 +501,7 @@ def install_unified_mda(owner):
             self.grid_summary.setWordWrap(True)
             dense_layout.addWidget(self.grid_summary)
             self.dense_grid_table = QTableWidget(0, 5)
+            self.dense_grid_table.setMaximumHeight(160)
             self.dense_grid_table.setHorizontalHeaderLabels(
                 ["Raman grid", "Points (X × Y)", "X range (µm)", "Y range (µm)", "Z (µm)"])
             self.dense_grid_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -502,12 +509,11 @@ def install_unified_mda(owner):
             self.dense_grid_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
             self.dense_grid_table.horizontalHeader().setStretchLastSection(True)
             dense_layout.addWidget(self.dense_grid_table)
-            self.detach_grid_btn = QPushButton("Remove dense grid — restore normal MDA")
+            self.detach_grid_btn = QPushButton("Remove active Raman grid")
             self.detach_grid_btn.clicked.connect(self.detach_grid)
             dense_layout.addWidget(self.detach_grid_btn)
-            self.stage_positions.layout().addWidget(self.dense_positions)
+            self.grid_modes.raman_layout.insertWidget(0, self.dense_positions)
             self.dense_positions.hide()
-            self._hidden_position_widgets = None
             self._displayed_grid = None
             # Keep upstream writers available, but expose one folder layout here.
             self.save_info._writer_combo.currentTextChanged.connect(self._use_run_folder)
@@ -544,6 +550,7 @@ def install_unified_mda(owner):
                 self.targets += reference_records(seq)
             metadata = {**deepcopy(self._extra_metadata), **deepcopy(seq.metadata)}
             metadata[METADATA_KEY] = {
+                "grid_mode": self.grid_modes.mode,
                 "schema_version": 1, "extensions": read_extensions(owner).to_dict(),
                 "targets": deepcopy([r for r in self.targets if r.get("role") != "autofocus" or r.get("fixed")]), "calibration": {
                     **deepcopy(self.calibration),
@@ -553,15 +560,22 @@ def install_unified_mda(owner):
             plate_plan = self.stage_positions._plate_plan
             if plate_plan is not None:
                 metadata[METADATA_KEY]["wellplate_plan"] = plate_plan.model_dump(mode="json")
+            self.grid_modes.compile_regions(metadata)
+            if self.grid_modes.mode == "raman":
+                metadata[METADATA_KEY]["raman_grid_editor"] = self.grid_modes.editor.settings()
             # CoreConnectedMDAWidget substitutes the current stage position when
             # the native table is empty. Dense grids must retain an empty table.
             if GRID_KEY in metadata:
+                metadata[METADATA_KEY]["grid_position_list"] = [
+                    position.model_dump(mode="json") for position in self.stage_positions.value()
+                ]
+                metadata[METADATA_KEY]["grid_positions_enabled"] = bool(self.tab_wdg.isChecked(self.stage_positions))
                 # Dense grids traverse virtual stage positions rather than g.
                 shutter_axes = tuple("p" if axis == "g" else axis
                                      for axis in seq.keep_shutter_open_across)
                 return seq.replace(metadata=metadata, stage_positions=(), grid_plan=None,
                                    keep_shutter_open_across=shutter_axes)
-            return seq.replace(metadata=metadata)
+            return seq.replace(metadata=metadata, grid_plan=None if self.grid_modes.mode == "raman" else seq.grid_plan)
 
         def setValue(self, value):
             from .raman_selection import restore_position_targets
@@ -573,12 +587,15 @@ def install_unified_mda(owner):
             if meta.get("schema_version", 1) != 1:
                 raise ValueError("Unsupported experiment settings version")
             if self._ready:
+                self.grid_modes.restore(value)
                 self.grid_use_vandermonde.setChecked(meta.get("calibration", {}).get("grid_use_vandermonde", True))
             # Import legacy offsets into native channel definitions exactly once.
             offsets = value.metadata.get("channel_z_offsets_um", {})
             if offsets:
                 value = value.replace(channels=[c.replace(z_offset=offsets.get(c.config, c.z_offset)) for c in value.channels])
             if GRID_KEY in value.metadata:
+                if "grid_position_list" in meta:
+                    value = value.replace(stage_positions=meta["grid_position_list"])
                 value = value.replace(keep_shutter_open_across=tuple(
                     "g" if axis == "p" else axis for axis in value.keep_shutter_open_across))
             value = value.replace(autofocus_plan=None, stage_positions=[
@@ -593,6 +610,10 @@ def install_unified_mda(owner):
             ready, self._ready = self._ready, False
             try:
                 super().setValue(value)
+                if hasattr(self, "grid_modes") and self.grid_modes.mode == "raman":
+                    self.grid_modes.editor.restore(meta.get("raman_grid_editor"))
+                if GRID_KEY in value.metadata and "grid_positions_enabled" in meta:
+                    self.tab_wdg.setChecked(self.stage_positions, meta["grid_positions_enabled"])
             finally:
                 self._ready = ready
             if self._ready:
@@ -612,6 +633,7 @@ def install_unified_mda(owner):
                 if not meta and value.metadata.get("raman"):
                     planes = value.metadata["raman"].get("z", [0])
                     ext.raman.planes = planes if isinstance(planes, str) else ",".join(map(str, planes))
+                self.grid_modes.restore_regions(value)
                 write_extensions(owner, ext)
                 self.update_summary()
 
@@ -623,6 +645,7 @@ def install_unified_mda(owner):
                 QMessageBox.warning(self, "Cannot start acquisition", str(error))
 
         def lock(self, locked):
+            self._locked = locked
             self._enable_widgets(not locked)
             self.control_btns.run_btn.setVisible(not locked)
             self.control_btns.cancel_btn.setVisible(locked)
@@ -641,6 +664,8 @@ def install_unified_mda(owner):
             metadata = deepcopy(sequence.metadata)
             metadata.pop(GRID_KEY, None)
             metadata[METADATA_KEY]["targets"] = []
+            if hasattr(owner, "_reset_grid_regions"):
+                owner._reset_grid_regions()
             # Dense mode maps the native grid shutter axis to virtual positions.
             shutter_axes = tuple("g" if axis == "p" else axis
                                  for axis in sequence.keep_shutter_open_across)
@@ -659,9 +684,11 @@ def install_unified_mda(owner):
             self.detach_grid_btn.setVisible(dense)
             self._duration_label.setVisible(not dense)
             controller = getattr(owner, "_acquisition_controller", None)
-            editable = not (controller and controller.busy)
+            editable = not self._locked and not (controller and controller.busy)
             self.stage_positions.setEnabled(editable)
-            self.grid_plan.setEnabled(editable and not dense)
+            self.grid_plan.setEnabled(editable)
+            self.raman_selection_tab.setEnabled(editable)
+            self.grid_modes.refresh()
             from .raman_selection import target
             position_owned = any(target(p) for p in sequence.stage_positions)
             owner.mda_batch_check.setEnabled(editable and not position_owned)
@@ -698,24 +725,10 @@ def install_unified_mda(owner):
         def update_dense_positions(self, sequence):
             plan = sequence.metadata.get(GRID_KEY)
             dense = plan is not None
-            index = self.tab_wdg.indexOf(self.stage_positions)
-            checkbox = self.tab_wdg.tabBar().tabButton(index, QTabBar.LeftSide)
-            checkbox.setVisible(not dense)
-            self.tab_wdg.setTabText(index, "Positions (dense grid)" if dense else "Positions")
-            if dense and self._hidden_position_widgets is None:
-                self._hidden_position_widgets = [
-                    child for child in self.stage_positions.findChildren(QWidget)
-                    if child.parent() is self.stage_positions
-                    and child is not self.dense_positions and not child.isHidden()
-                ]
-                for child in self._hidden_position_widgets:
-                    child.hide()
-                self.tab_wdg.setCurrentWidget(self.stage_positions)
-            elif not dense and self._hidden_position_widgets is not None:
-                for child in self._hidden_position_widgets:
-                    child.show()
-                self._hidden_position_widgets = None
             self.dense_positions.setVisible(dense)
+            if hasattr(owner, "grid_region_list"):
+                self.dense_grid_table.hide()
+                self.detach_grid_btn.hide()
             if plan == self._displayed_grid:
                 return
             self._displayed_grid = deepcopy(plan)
@@ -888,6 +901,7 @@ def apply_prepared_positions(owner):
     if dense:
         metadata[GRID_KEY] = deepcopy(selection["new_seq"].metadata[GRID_KEY])
     metadata[METADATA_KEY] = {
+        "grid_mode": "raman" if selection.get("selection_type") == "grid" else panel.grid_modes.mode,
         "schema_version": 1, "extensions": ext.to_dict(), "targets": records,
         "calibration": {"aiming": owner.tf_path.text(), "pixel_to_stage": str(owner.vandermonde_path or "")},
     }

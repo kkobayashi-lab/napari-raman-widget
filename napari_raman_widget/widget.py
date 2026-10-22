@@ -12,13 +12,14 @@ from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QPushButton,
-    QScrollArea, QSlider, QSpinBox,
+    QScrollArea, QSlider, QSpinBox, QGroupBox,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QMessageBox
 )
 from .acquisition_viewer import LargeAcquisitionViewerWindow
 from .field_help import apply_tooltips
 from .log_window import LogWindow, _StdoutRedirector
 from .lazy_visualization import install_lazy_mda_viewer
+from .live_preview import install_live_preview_channel_lock
 from .loading_paths import LOADING_PATHS
 from .mda_timing import (
     IMAGING_FRAME_OVERHEAD_S,
@@ -733,7 +734,8 @@ class HardwareWidget(QWidget):
         scan_box.hide()
 
         # ================= GENERATE STAGE GRID SECTION =================
-        grid_box = make_collapsible("Generate stage grid", expanded=False)
+        grid_box = QGroupBox("Raman point grids")
+        self._raman_grid_panel = grid_box
         grid_layout = QVBoxLayout()
 
         grid_layout.addWidget(QLabel(
@@ -743,6 +745,7 @@ class HardwareWidget(QWidget):
         self.grid_dense_check = QCheckBox("Dense grid (procedural; keep positions out of MDA)")
         self.grid_dense_check.setChecked(True)
         grid_layout.addWidget(self.grid_dense_check)
+        self.grid_dense_check.hide()
 
         definition_row = QHBoxLayout()
         definition_row.addWidget(QLabel("Grid definition:"))
@@ -754,7 +757,7 @@ class HardwareWidget(QWidget):
         definition_row.addWidget(self.grid_definition_combo)
         grid_layout.addLayout(definition_row)
 
-        grid_layout.addWidget(QLabel("Laser point: (512, 512) px (fixed)"))
+        grid_layout.addWidget(QLabel("One Raman point at the center of each field; spacing is in µm."))
 
         # Stage grid extent / spacing (real stage units).
         xr_row = QHBoxLayout()
@@ -850,7 +853,7 @@ class HardwareWidget(QWidget):
         sampling_row = QHBoxLayout()
         sampling_row.addWidget(QLabel("Grid sampling:"))
         self.grid_sampling_combo = QComboBox()
-        self.grid_sampling_combo.addItem("Maximum spacing", "spacing")
+        self.grid_sampling_combo.addItem("Spacing", "spacing")
         self.grid_sampling_combo.addItem(
             "Point count (including endpoints)", "count"
         )
@@ -858,7 +861,7 @@ class HardwareWidget(QWidget):
         grid_layout.addLayout(sampling_row)
 
         xs_row = QHBoxLayout()
-        self._grid_xstep_label = QLabel("X max spacing (um):")
+        self._grid_xstep_label = QLabel("X spacing (um):")
         xs_row.addWidget(self._grid_xstep_label)
         self.grid_xstep_input = QDoubleSpinBox()
         self.grid_xstep_input.setRange(0.01, 1_000_000)
@@ -869,7 +872,7 @@ class HardwareWidget(QWidget):
         grid_layout.addLayout(xs_row)
 
         ys_row = QHBoxLayout()
-        self._grid_ystep_label = QLabel("Y max spacing (um):")
+        self._grid_ystep_label = QLabel("Y spacing (um):")
         ys_row.addWidget(self._grid_ystep_label)
         self.grid_ystep_input = QDoubleSpinBox()
         self.grid_ystep_input.setRange(0.01, 1_000_000)
@@ -1022,7 +1025,7 @@ class HardwareWidget(QWidget):
             control.textChanged.connect(self._update_grid_size_preview)
         self._update_grid_size_preview()
 
-        grid_layout.addWidget(QLabel("Grids in this acquisition:"))
+        grid_layout.addWidget(QLabel("Raman grids to acquire with Run MDA:"))
         self.grid_region_list = QListWidget()
         self.grid_region_list.setMaximumHeight(120)
         grid_layout.addWidget(self.grid_region_list)
@@ -1042,13 +1045,15 @@ class HardwareWidget(QWidget):
         self.grid_clear_btn.clicked.connect(self.clear_grids)
         grid_region_buttons.addWidget(self.grid_clear_btn)
         grid_layout.addLayout(grid_region_buttons)
-        self.apply_grid_mda_btn = QPushButton("Use grids in MDA")
+        self.apply_grid_mda_btn = QPushButton("Apply Raman grids")
         self.apply_grid_mda_btn.clicked.connect(self.apply_grids_to_mda)
         grid_layout.addWidget(self.apply_grid_mda_btn)
+        self.apply_grid_mda_btn.hide()
         self._refresh_grid_region_list()
 
         grid_box.setLayout(grid_layout)
-        outer.addWidget(grid_box)
+        grid_box.setParent(self)
+        grid_box.hide()
 
         # ================= AUTOMATED CELL SELECTION SECTION =================
         self.sel_box = make_collapsible("Automated cell selection", expanded=False)
@@ -1838,9 +1843,10 @@ class HardwareWidget(QWidget):
         try:
             nx, ny, positions, *_rest = self._grid_size_preview()
             order = self.grid_scan_order_combo.currentText()
+            repeats = self.mda_repeats_input.value() if hasattr(self, "mda_repeats_input") else 1
             self.grid_size_label.setText(
                 f"Grid: {nx} x {ny} = {positions:,} positions; "
-                f"{order}; frames per point configured in MDA"
+                f"{order}; {repeats} frames per point = {positions * repeats:,} spectra per plane/time point"
             )
         except ValueError:
             self.grid_size_label.setText(
@@ -1864,7 +1870,7 @@ class HardwareWidget(QWidget):
             f"Grid shape: {nx} x {ny}\n"
             f"Scan order: {self.grid_scan_order_combo.currentText()}\n"
             f"Stage positions: {positions:,}\n"
-            "Frames per point: configured in MDA\n\n"
+            f"Frames per point: {self.mda_repeats_input.value()}\n\n"
             f"X span: {x_span:.3f} um; spacing: {x_spacing:.3f} um\n"
             f"Y span: {y_span:.3f} um; spacing: {y_spacing:.3f} um",
         )
@@ -2548,6 +2554,7 @@ class HardwareWidget(QWidget):
                 )
                 if isinstance(result, tuple) and len(result) >= 2:
                     self.main_window = result[1]
+                    install_live_preview_channel_lock(self.main_window, self.core)
                     self._lazy_mda_viewer = install_lazy_mda_viewer(
                         self.main_window, self.core, self.viewer
                     )
@@ -4136,8 +4143,8 @@ class HardwareWidget(QWidget):
     def _current_grid_source_settings(self):
         """Return settings that must be shared by every combined grid."""
         return {
-            "fov_x": int(DEFAULT_BEAM_CENTER_XY[0]),
-            "fov_y": int(DEFAULT_BEAM_CENTER_XY[1]),
+            "fov_x": self.core.getImageWidth() / 2,
+            "fov_y": self.core.getImageHeight() / 2,
             "dense": self.grid_dense_check.isChecked(),
         }
 
@@ -4177,8 +4184,7 @@ class HardwareWidget(QWidget):
             )
         else:
             self.grid_region_summary.setText(
-                "No grids added. FOV and point-pattern "
-                "settings are shared across all grids."
+                "No grids added. Each grid samples the field center at every stage position."
             )
         self.grid_remove_btn.setEnabled(has_grids)
         self.grid_clear_btn.setEnabled(has_grids)
@@ -4192,6 +4198,9 @@ class HardwareWidget(QWidget):
             control = getattr(self, name, None)
             if control is not None:
                 control.setEnabled(not has_grids)
+        panel = getattr(self, "_unified_mda", None)
+        if panel is not None and panel._ready and panel.grid_modes.mode == "raman":
+            panel.valueChanged.emit()
 
     def _reset_grid_regions(self, *, clear_grid_selection=True):
         """Discard the accumulated grid regions and unlock shared controls."""
@@ -4285,7 +4294,8 @@ class HardwareWidget(QWidget):
             self.status.setText("Status: no default engine -- reconnect")
             return
 
-        fov_x, fov_y = map(int, DEFAULT_BEAM_CENTER_XY)
+        fov_x = self.core.getImageWidth() / 2
+        fov_y = self.core.getImageHeight() / 2
         x_range = float(self.grid_xrange_input.value())
         y_range = float(self.grid_yrange_input.value())
         x_step = float(self.grid_xstep_input.value())
@@ -4344,6 +4354,21 @@ class HardwareWidget(QWidget):
                 self.status.setText(
                     "Status: enter or capture both grid-corner X/Y positions"
                 )
+                return
+
+        if base_z is None and tilt_reference_points is None:
+            response = QMessageBox.warning(
+                self,
+                "Grid Z not specified",
+                "No Z position is specified for this grid and tilt correction is off.\n\n"
+                "Enter or capture a focused Z position, or enable tilt correction, "
+                "to define the grid's focus.\n\n"
+                "Add this grid without an explicit Z position?",
+                QMessageBox.Ok | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if response != QMessageBox.Ok:
+                self.status.setText("Status: grid not added — specify Z or enable tilt correction")
                 return
 
         log = LogWindow(title="Stage grid log")
@@ -4431,7 +4456,7 @@ class HardwareWidget(QWidget):
                 f"Status: added grid {len(self._grid_regions)} "
                 f"({n_region_positions} positions; {n_total_positions} total, "
                 f"aiming point at ({fov_x},{fov_y}), {z_detail}) -- "
-                "attach the Raman grid plan to MDA to acquire"
+                "ready for Run MDA"
             )
         except Exception as e:
             log.append(f"\n--- stage grid failed: {e} ---\n")

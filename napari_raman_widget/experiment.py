@@ -212,6 +212,9 @@ def prepare_acquisition(sequence, extensions, targets, image_shape=None):
     ext = deepcopy(extensions)
     from raman_mda_engine.grid_plan import GRID_KEY, grid_count
     compact_grid = GRID_KEY in sequence.metadata
+    if compact_grid and sequence.metadata.get(METADATA_KEY, {}).get("grid_mode") == "raman":
+        ext.raman.batch = False
+        ext.raman.pre_acq = False
     if compact_grid and (sequence.stage_positions or sequence.grid_plan):
         raise ValueError("Detach the Raman grid before using native stage positions or grids")
     if compact_grid and any(not record.get("fixed") for record in targets):
