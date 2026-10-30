@@ -7,7 +7,7 @@ from pathlib import Path
 import xarray as xr
 import napari
 import numpy as np
-from qtpy.QtCore import QEvent, QTimer, Qt, QUrl, Slot
+from qtpy.QtCore import QEvent, QSettings, QTimer, Qt, QUrl, Slot
 from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
@@ -19,7 +19,7 @@ from .acquisition_viewer import LargeAcquisitionViewerWindow
 from .field_help import apply_tooltips
 from .log_window import LogWindow, _StdoutRedirector
 from .lazy_visualization import install_lazy_mda_viewer
-from .live_preview import install_live_preview_channel_lock
+from .live_preview import ensure_preview_layer, install_live_preview_channel_lock, install_preview_scale_bar
 from .loading_paths import LOADING_PATHS
 from .mda_timing import (
     IMAGING_FRAME_OVERHEAD_S,
@@ -40,6 +40,23 @@ from .ui_helpers import make_collapsible
 
 DEFAULT_LIGHTFIELD_CONFIG = LOADING_PATHS["LIGHTFIELD_EXPERIMENT_PATH"]
 DEFAULT_BEAM_CENTER_XY = (512.0, 512.0)
+
+
+def _galvo_settings():
+    return QSettings("CNS", "napari-raman-widget")
+
+
+def _load_galvo_center():
+    value = _galvo_settings().value("galvo/center_volts")
+    try:
+        volts = np.asarray(value, dtype=float)
+        if volts.shape == (2,) and np.all(np.isfinite(volts)) and np.all(np.abs(volts) <= 1.6):
+            return volts
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
 ND_FILTER_DEVICE = "DigitalIO"
 ND_FILTER_MASK = 1 << 1  # Dev1/port0/line1
 STAGE_DRAG_INTERVAL_MS = 100
@@ -220,10 +237,12 @@ class HardwareWidget(QWidget):
     def __init__(self, viewer: napari.Viewer):
         super().__init__()
         self.viewer = viewer
+        self._raman_focus = None
         self.core = None
         self.collector = None
         self.daq = None
         self.transformer = None
+        self._saved_galvo_center = _load_galvo_center()
         self.vandermonde = None
         self.vandermonde_objective = None
         self.vandermonde_path = None
@@ -367,6 +386,21 @@ class HardwareWidget(QWidget):
         self.center_laser_btn.clicked.connect(self.center_laser)
         hardware_layout.addWidget(self.center_laser_btn)
 
+        focus_row = QHBoxLayout()
+        self.center_raman_focus_btn = QPushButton("Center Raman focus marker")
+        self.center_raman_focus_btn.clicked.connect(self.center_raman_focus)
+        self.save_raman_focus_btn = QPushButton("Save Raman focus")
+        self.save_raman_focus_btn.setToolTip(
+            "Save the Raman focus point position for future sessions. "
+            "Drag the point to adjust it; this marker does not move hardware."
+        )
+        self.save_raman_focus_btn.clicked.connect(self.save_raman_focus)
+        self.center_raman_focus_btn.setEnabled(False)
+        self.save_raman_focus_btn.setEnabled(False)
+        focus_row.addWidget(self.center_raman_focus_btn)
+        focus_row.addWidget(self.save_raman_focus_btn)
+        hardware_layout.addLayout(focus_row)
+
         galvo_row = QHBoxLayout()
         self.galvo_x_input = QDoubleSpinBox()
         self.galvo_y_input = QDoubleSpinBox()
@@ -383,6 +417,15 @@ class HardwareWidget(QWidget):
         self.apply_galvo_btn = QPushButton("Apply galvo voltage")
         self.apply_galvo_btn.clicked.connect(self.apply_galvo_voltage)
         hardware_layout.addWidget(self.apply_galvo_btn)
+        self.save_galvo_center_btn = QPushButton("Save galvo center")
+        self.save_galvo_center_btn.setToolTip(
+            "Remember the entered X/Y voltages for Center laser and future connections. "
+            "Saving does not move the mirrors."
+        )
+        self.save_galvo_center_btn.clicked.connect(self.save_galvo_center)
+        hardware_layout.addWidget(self.save_galvo_center_btn)
+        if self._saved_galvo_center is not None:
+            self._reset_galvo_voltage_inputs()
 
         drag_row = QHBoxLayout()
         self.drag_stage_btn = QPushButton("Drag image to move stage")
@@ -1369,8 +1412,12 @@ class HardwareWidget(QWidget):
         # attach hover help text to every field
         apply_tooltips(self)
         self._napari_window = getattr(self.viewer.window, "_qt_window", None)
+        from .stage_status import StageStatusLabel
+
+        self._stage_status_label = StageStatusLabel(self)
         if self._napari_window is not None:
             self._napari_window.installEventFilter(self)
+            self._napari_window.statusBar().insertWidget(0, self._stage_status_label)
         # Intercept wheel input before Vispy zooms or napari changes slices.
         qt_viewer = getattr(self.viewer.window, "_qt_viewer", None)
         canvas = getattr(qt_viewer, "canvas", None)
@@ -1647,7 +1694,12 @@ class HardwareWidget(QWidget):
         return volts[0]
 
     def _reset_galvo_voltage_inputs(self):
-        """Default manual inputs to the loaded calibration's beam center."""
+        """Restore the saved center, falling back to the calibration center."""
+        saved = getattr(self, "_saved_galvo_center", None)
+        if saved is not None:
+            self.galvo_x_input.setValue(float(saved[0]))
+            self.galvo_y_input.setValue(float(saved[1]))
+            return
         center_x, center_y = DEFAULT_BEAM_CENTER_XY
         volts = np.asarray(self._pt_to_volts(np.array([center_y, center_x])))
         if volts.shape != (1, 2) or not np.all(np.isfinite(volts)):
@@ -1656,6 +1708,49 @@ class HardwareWidget(QWidget):
             raise ValueError("Calibrated center exceeds the +/-1.6 V galvo limit")
         self.galvo_x_input.setValue(float(volts[0, 0]))
         self.galvo_y_input.setValue(float(volts[0, 1]))
+
+    def center_raman_focus(self):
+        if self._raman_focus is None:
+            return
+        self._raman_focus.center()
+        self.status.setText("Status: Raman focus marker centered")
+
+    def save_raman_focus(self):
+        if self._raman_focus is None:
+            return
+        try:
+            y, x = self._raman_focus.save()
+            self.status.setText(f"Status: Raman focus saved [X={x:.2f}, Y={y:.2f}]")
+        except Exception as e:
+            self.status.setText(f"Status: saving Raman focus failed -- {e}")
+
+    def save_galvo_center(self):
+        """Persist the entered center without commanding hardware motion."""
+        try:
+            volts = np.array([self.galvo_x_input.value(), self.galvo_y_input.value()])
+            if not np.all(np.isfinite(volts)) or np.any(np.abs(volts) > 1.6):
+                raise ValueError("Galvo voltages must be finite and within +/-1.6 V")
+            settings = _galvo_settings()
+            settings.setValue("galvo/center_volts", volts.tolist())
+            settings.sync()
+            if settings.status() != QSettings.NoError:
+                raise OSError("Could not write galvo center settings")
+            self._saved_galvo_center = volts
+            self.status.setText(
+                f"Status: galvo center saved [X={volts[0]:.4f}, Y={volts[1]:.4f} V]"
+            )
+        except Exception as e:
+            self.status.setText(f"Status: saving galvo center failed -- {e}")
+
+    def _aim_at_saved_galvo_center(self):
+        volts = np.asarray(self._saved_galvo_center, dtype=float)
+        set_position = getattr(self.daq, "set_galvo_position", None)
+        if callable(set_position):
+            set_position(volts)
+        else:
+            self.daq.galvo.stop()
+            self.daq.galvo.write(np.ascontiguousarray(volts), auto_start=True)
+        return volts
 
     def apply_galvo_voltage(self):
         """Hold the galvos at the manually entered X/Y voltages."""
@@ -1684,11 +1779,11 @@ class HardwareWidget(QWidget):
             self.status.setText(f"Status: galvo adjustment failed -- {e}")
 
     def center_laser(self):
-        """Hold the laser at the same calibrated center used on connection."""
+        """Hold the laser at the saved or calibrated center used on connection."""
         if self.core is None or self.daq is None:
             self.status.setText("Status: not connected")
             return
-        if self.transformer is None:
+        if self.transformer is None and getattr(self, "_saved_galvo_center", None) is None:
             self.status.setText("Status: no transformer loaded")
             return
 
@@ -1700,6 +1795,13 @@ class HardwareWidget(QWidget):
 
         center_x, center_y = DEFAULT_BEAM_CENTER_XY
         try:
+            if getattr(self, "_saved_galvo_center", None) is not None:
+                volts = self._aim_at_saved_galvo_center()
+                self._reset_galvo_voltage_inputs()
+                self.status.setText(
+                    f"Status: laser at saved center [X={volts[0]:.4f}, Y={volts[1]:.4f} V]"
+                )
+                return
             volts = self._aim_beam_at_pixel(center_x, center_y)
             self._reset_galvo_voltage_inputs()
             self.status.setText(
@@ -1712,13 +1814,14 @@ class HardwareWidget(QWidget):
     def _find_points_layer(self):
         """Return the active Points layer, or the most recent one."""
         active = self.viewer.layers.selection.active
-        if isinstance(active, napari.layers.Points):
+        if isinstance(active, napari.layers.Points) and not active.metadata.get("raman_focus_marker"):
             return active
         return next(
             (
                 layer
                 for layer in reversed(self.viewer.layers)
                 if isinstance(layer, napari.layers.Points)
+                and not layer.metadata.get("raman_focus_marker")
             ),
             None,
         )
@@ -2239,6 +2342,10 @@ class HardwareWidget(QWidget):
             "raman_batch" if batch else "raman", _exposure,
             len(np.atleast_2d(spectra)), event,
         )
+        controller = getattr(self, "_acquisition_controller", None)
+        grid_image = getattr(controller, "grid_image", None)
+        if grid_image is not None:
+            grid_image.add(event, spectra)
         if self._lazy_mda_viewer is None:
             return
         try:
@@ -2513,6 +2620,7 @@ class HardwareWidget(QWidget):
             from cns_control.coordtransformer import CoordTransformer
 
             self.core = CMMCorePlus.instance()
+            self._stage_status_label.unbind()
 
             from cns_control.utils import stop_live_acquisitions
             stop_live_acquisitions(self.core)
@@ -2561,6 +2669,7 @@ class HardwareWidget(QWidget):
             except Exception as e:
                 print(f"[napari-micromanager load] {e}")
 
+            self._stage_status_label.bind(self.core)
             lightfield_config = self.lightfield_config.text().strip()
             if not lightfield_config:
                 lightfield_config = DEFAULT_LIGHTFIELD_CONFIG
@@ -2589,7 +2698,13 @@ class HardwareWidget(QWidget):
             msg += " (Princeton/LightField ready)" if self.collector is not None else " (Raman unavailable; camera MDA ready)"
             if not cfg:
                 msg += " (no cfg loaded)"
-            if not tf:
+            if self._saved_galvo_center is not None:
+                try:
+                    self._aim_at_saved_galvo_center()
+                    msg += " (beam at saved galvo center)"
+                except Exception as e:
+                    msg += f" (beam centering failed: {e})"
+            elif not tf:
                 msg += " (no transformer)"
             else:
                 center_x, center_y = DEFAULT_BEAM_CENTER_XY
@@ -2605,6 +2720,14 @@ class HardwareWidget(QWidget):
             if not objective:
                 msg += " (objective index unavailable)"
             msg += vdm_msg
+            ensure_preview_layer(self.viewer, self.core)
+            install_preview_scale_bar(self.main_window or self, self.viewer, self.core)
+            from .raman_focus import RamanFocusMarker
+            if self._raman_focus is None:
+                self._raman_focus = RamanFocusMarker(self.viewer, _galvo_settings())
+            self._raman_focus.show()
+            self.center_raman_focus_btn.setEnabled(True)
+            self.save_raman_focus_btn.setEnabled(True)
             self.status.setText(msg)
             self.connect_btn.setEnabled(False)
             self.disconnect_btn.setEnabled(True)
@@ -2650,6 +2773,7 @@ class HardwareWidget(QWidget):
             self._unified_mda.deleteLater()
             self._unified_mda = None
         self._cancel_scheduled_raman_mda()
+        self._stage_status_label.unbind()
         self._disconnect_mda_completion_events()
         for button in (
             self.click_center_btn,

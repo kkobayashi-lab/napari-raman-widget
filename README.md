@@ -34,6 +34,9 @@ limits, without a half-FOV offset. Area/boundary modes include the endpoints and
 reduce spacing to fit when needed. Rows/columns use the specified spacing exactly.
 The native current-position origin and all scan orders, including spiral, are supported.
 Raman mode retains our polynomial tilt correction and constant-Z capture.
+For **Keep Shutter Open Across**, select **g** to keep the Raman shutter open
+between grid points (including stage movement); **p** applies only to normal
+Positions entries. Other changing axes must also be selected to keep it open.
 Add the desired regions to the list, then click **Run MDA**. Adding, removing,
 or clearing regions updates the acquisition directly; there is no Apply step.
 Grids stay compact in the Grid tab. The Positions tab stays unchanged, and its
@@ -42,6 +45,26 @@ stage coordinates independently of that list; imaging grids can tile around stag
 
 **Frames per Raman grid point** collects consecutive spectra before moving.
 It is independent of Time-tab repetitions; each spectrum is retained separately.
+Enter a **Raman shift** in cm⁻¹ to choose the live intensity map. The map is always
+created at MDA start and updates as spectra arrive, with continuous automatic
+contrast enabled by default. The spectrum/MDA stack is hidden by default for
+Raman grid scans; enable its layer visibility to inspect individual spectra.
+The nearest calibrated spectral
+bin is used, averaging repeats at each point. Each grid/time/Z/channel combination
+gets its own image; the currently acquired map is shown and missing points remain blank. Each
+map is also saved in the acquisition run folder as a floating-point TIFF and a
+color PNG (`*_preview.png`). Filenames identify the shift, grid, time, Z, and channel.
+The TIFF retains intensity values and map metadata; the PNG uses the displayed
+colormap and contrast, with missing points transparent. Both match the displayed
+size and orientation. The selected shift is saved with the experiment.
+`scan_preview.png` additionally saves the viewer canvas immediately before acquisition,
+including the visible brightfield image and scan overlays. Set the desired preview
+layers and view before starting the run. This is a view snapshot, not a new camera exposure.
+Maps use the MDA frame's XY pixel dimensions, scale, and origin, with nearest-neighbor
+resizing to retain the sampled grid's pixelated appearance. Stage coordinates are
+retained in metadata; the displayed map fills the frame rather than overlaying stage locations.
+The displayed Raman map is flipped in both X and Y (180° rotation) relative to
+the stage-oriented map for brightfield comparison.
 Channels, Z stacks, saving, and autofocus remain configured in their MDA tabs.
 Switching grid types retains each mode's geometry during the session. Saved
 experiments retain the active mode, grid geometry, correction, and frame count.
@@ -104,6 +127,16 @@ folder only when **Overwrite acquisition folder** is enabled and reviewed.
 
 ## Viewer stage controls
 
+After hardware loading, the **Raman focus** points layer shows a single yellow
+marker at the image center, above the preview layer. A blank preview is created
+using the camera dimensions before live preview starts; starting live preview
+fills that same layer with camera frames. Select the focus layer and drag
+the marker to match the observed focus, then
+use **Hardware Control > Save Raman focus** to remember its position across
+sessions. **Center Raman focus marker** resets it to the image center (and
+recreates the layer if removed). This is a visual reference only; it does not
+move hardware or serve as a spectrum collection target.
+
 In **Hardware Control**, enable **Drag image to move stage** to move XY by
 holding and dragging the image. While this mode is armed, scrolling over the
 image moves the Z focus stage: up increases Z and down decreases Z. The
@@ -155,6 +188,32 @@ You can also pin the launcher to the taskbar or Start menu:
    Target field so it becomes `cmd /c "<full path>\launch_napari.bat"`.
 3. Optionally click Change Icon to give it a recognizable icon.
 4. Right-click the shortcut -> Pin to taskbar (or drag it to the desktop).
+
+## Raman galvo grid
+
+In Hardware Control, enter the X/Y center voltages and click **Save galvo center**.
+In MDA → Grid, select **Raman galvo grid — voltage range**. Set the X and Y
+half-ranges (± V), point counts, traversal, spectra per point, and map Raman shift.
+For example, a center of X = 0.2 V and X range ±0.1 V scans 0.1–0.3 V.
+Both endpoints are included; an axis with one point samples the center.
+Absolute endpoints must remain within ±1.6 V.
+
+Add an RM channel (at least 73.8 ms exposure), enable Save Acquisition, and Run MDA.
+Stage XY stays at its current position; the saved Positions list is not scanned.
+Z and time plans remain available. No stage-grid Z setting is required; the current
+Z is used unless a Z stack is enabled. Stage-based autofocus and tracking are
+automatically ignored for this mode, preserving their settings for other modes.
+Camera-to-galvo calibration and camera ROIs are not
+required. The saved hardware center is captured when the run is prepared; reloading
+settings uses the currently saved hardware center for the next run.
+
+The live intensity map fills the camera-sized preview canvas using nearest-neighbor
+display scaling; it is not a calibrated overlay on the camera image. Saved maps
+retain one pixel per grid point with voltage coordinates.
+Repeated spectra are averaged for display and retained individually in HDF5.
+`raman/galvo_volts_xy` and `raman/galvo_grid_row_col` provide per-spectrum
+voltage and grid coordinates; camera `points_yx` are NaN for these scans.
+The saved sequence also contains the center, absolute voltage bounds, and traversal.
 
 ## Structure
 

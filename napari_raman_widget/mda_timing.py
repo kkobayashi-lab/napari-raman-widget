@@ -166,6 +166,9 @@ def estimate_mda_time(
                     for source in aiming_sources
                     if _is_cell_source(source)
                 ) * point_repeats
+                from raman_mda_engine.galvo_grid import is_galvo_grid
+                if is_galvo_grid(preview_sequence):
+                    point_count = point_repeats
                 policy = getattr(preview_sequence, "metadata", {}).get("raman_positions", {}).get(str(event.index.get("p", 0)), {})
                 event_batch = policy.get("mode") == "integrated_batch" if policy else batch
                 if event_batch and point_count:

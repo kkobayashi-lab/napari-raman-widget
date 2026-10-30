@@ -51,6 +51,16 @@ class RamanGridEditor:
         self.summary = QLabel()
         self.summary.setWordWrap(True)
         modes.raman_layout.addWidget(self.summary)
+        self.shift = QDoubleSpinBox()
+        self.shift.setRange(-10000, 10000)
+        self.shift.setDecimals(1)
+        self.shift.setValue(1003)
+        self.shift.setSuffix(" cm⁻¹")
+        self.shift.setToolTip("Use the nearest calibrated spectral bin; average repeated spectra at each grid point.")
+        display_form = QFormLayout()
+        display_form.addRow("Raman shift", self.shift)
+        modes.raman_layout.addLayout(display_form)
+        self.shift.valueChanged.connect(lambda *_: modes.panel.valueChanged.emit())
         if hasattr(owner, "_raman_grid_panel"):
             focus = QFormLayout()
             focus.addRow("Grid Z (µm)", owner.grid_z_input)
@@ -93,7 +103,8 @@ class RamanGridEditor:
 
     def settings(self):
         settings = dict(plan=self.native.value().model_dump(mode="json"),
-                        spacing=[self.x_spacing.value(), self.y_spacing.value()])
+                        spacing=[self.x_spacing.value(), self.y_spacing.value()],
+                        shift_cm=self.shift.value())
         owner = self.owner
         if hasattr(owner, "grid_tilt_table"):
             table = owner.grid_tilt_table
@@ -104,6 +115,7 @@ class RamanGridEditor:
         return settings
 
     def restore(self, settings):
+        self.shift.setValue((settings or {}).get("shift_cm", 1003))
         if not settings:
             return
         self.native.setValue(MDASequence(grid_plan=settings["plan"]).grid_plan)

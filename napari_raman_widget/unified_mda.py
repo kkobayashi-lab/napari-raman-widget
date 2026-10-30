@@ -236,6 +236,8 @@ class AcquisitionController(QObject):
         self.previous_engine = None
         self.writer = None
         self.active_sequence = None
+        self._measurement_settings = None
+        self.grid_image = None
         self._hardware_snapshot = None
         self.timer = QTimer(panel)
         self.timer.setSingleShot(True)
@@ -257,7 +259,14 @@ class AcquisitionController(QObject):
         ext = read_extensions(owner)
         prepared = prepare_acquisition(sequence, ext, self.panel.targets,
                                        image_shape=(owner.core.getImageWidth(), owner.core.getImageHeight()))
+        center = getattr(owner, "_saved_galvo_center", None)
+        if center is not None:
+            # Freeze the hardware center with the run, including delayed starts.
+            prepared = replace(prepared, sequence=prepared.sequence.replace(metadata={
+                **prepared.sequence.metadata, "galvo_center_volts": list(map(float, center))}))
         ext = prepared.extensions
+        from raman_mda_engine.galvo_grid import is_galvo_grid
+        galvo = is_galvo_grid(prepared.sequence)
         if prepared.raman_enabled and not ext.raman.batch and "raman_positions" not in prepared.sequence.metadata:
             import numpy as np
             width, height = owner.core.getImageWidth(), owner.core.getImageHeight()
@@ -268,7 +277,7 @@ class AcquisitionController(QObject):
                 ):
                     raise ValueError("Non-batch Raman requires centered stage positions. Use MDA → Raman to apply selections.")
         needs_raman_hardware = prepared.raman_enabled or ext.autofocus.mode in ("laser", "cell", "glass", "quartz")
-        if needs_raman_hardware and (owner.collector is None or owner.transformer is None):
+        if needs_raman_hardware and (owner.collector is None or (owner.transformer is None and not galvo)):
             raise ValueError("This experiment requires connected Raman hardware and calibration")
         if owner.core.isSequenceRunning() or getattr(owner, "_live_raman_worker", None) is not None:
             raise ValueError("Stop live acquisition before starting MDA")
@@ -300,6 +309,11 @@ class AcquisitionController(QObject):
                    f"Autofocus: {ext.autofocus.mode}; axes: {', '.join(ext.autofocus.axes) or 'none'}\n"
                    f"Tracking: {ext.tracking.enabled}\n\n"
                    + ("Timing uses remembered overhead plus current exposure; live ETA adapts to this run." if estimate.learned_overheads else "Autofocus, tracking, and motion add time. Their internal images are not saved as camera channels."))
+        if galvo:
+            plan = prepared.sequence.metadata[GRID_KEY]
+            region = plan["regions"][0]
+            message += (f"\nGalvo center X/Y: {plan['center_volts']} V; stage XY fixed.\n" +
+                        "; ".join(f"{axis.upper()}: {region[axis][0]:g} to {region[axis][1]:g} V, {region[axis][2]} points" for axis in ("x", "y")))
         if ext.overwrite and output is not None and output.exists():
             message += f"\n\nOverwrite permanently replaces all contents of {output}."
         if QMessageBox.question(self.panel, "Review acquisition", message,
@@ -309,6 +323,7 @@ class AcquisitionController(QObject):
         if owner.core.mda.is_running() or owner.core is not self.panel._mmc:
             raise ValueError("Microscope state changed during review")
         self._hardware_snapshot = (owner.collector, deepcopy(owner.transformer))
+        self._measurement_settings = sequence.model_copy(deep=True)
         self.pending = (prepared, output, estimate, stage_model)
         self.panel.lock(True)
         owner._scheduled_raman_mda = {"sequence": prepared.sequence}
@@ -333,6 +348,19 @@ class AcquisitionController(QObject):
         owner._scheduled_raman_mda = None
         ext = prepared.extensions
         collector, transformer = self._hardware_snapshot
+        display = prepared.sequence.metadata.get(METADATA_KEY, {}).get("raman_grid_editor", {})
+        if prepared.sequence.metadata.get(GRID_KEY, {}).get("backend") == "galvo":
+            display = prepared.sequence.metadata.get(METADATA_KEY, {}).get("galvo_grid_editor", {})
+        self.grid_image = None
+        if GRID_KEY in prepared.sequence.metadata:
+            from .raman_grid_image import RamanGridImage
+            self.grid_image = RamanGridImage(
+                prepared.sequence, display.get("shift_cm", 1003), collector,
+                frame_shape=(owner.core.getImageHeight(), owner.core.getImageWidth()),
+                pixel_size=owner.core.getPixelSizeUm(),
+                output_dir=output,
+            )
+            self.grid_image.capture_scan_preview(owner.viewer)
         if GRID_KEY in prepared.sequence.metadata:
             metadata = deepcopy(prepared.sequence.metadata)
             regions = metadata[GRID_KEY]["regions"]
@@ -387,11 +415,14 @@ class AcquisitionController(QObject):
                     exact_path=True,
                 )
                 owner.mda_writer = self.writer
+                self.writer.prepare_output(self._measurement_settings)
             owner._raman_mda_pending = True
             owner._raman_mda_writer = self.writer
             owner._start_live_mda_timing(estimate.acquisition_count)
             owner.mda_dir_input.setText(str(output or ""))
             self.cancelled = False
+            if self.grid_image is not None:
+                self.grid_image.start(owner.viewer, owner.status, prepared.sequence)
             owner.core.run_mda(prepared.sequence, output=None)
             owner.status.setText("Status: MDA started")
         except Exception:
@@ -402,6 +433,7 @@ class AcquisitionController(QObject):
         if self.pending is not None:
             self.timer.stop()
             self.pending = None
+            self._measurement_settings = None
             self.owner._scheduled_raman_mda = None
             self.panel.lock(False)
             self.owner._finish_live_mda_timing("canceled before start")
@@ -436,6 +468,7 @@ class AcquisitionController(QObject):
                         self.writer.close(status=reason)
                     reason = self.writer.completion_status
             finally:
+                self._measurement_settings = None
                 self.writer = None
                 self.active_sequence = None
                 owner.core.register_mda_engine(self.previous_engine)
@@ -445,6 +478,11 @@ class AcquisitionController(QObject):
                 self.panel.lock(False)
                 owner._finish_live_mda_timing(reason)
                 owner.status.setText(f"Status: MDA {reason}")
+                grid_image, self.grid_image = self.grid_image, None
+                if reason == "completed" and grid_image is not None:
+                    run_layer = getattr(getattr(owner, "_lazy_mda_viewer", None), "_run_layer", None)
+                    grid_image.show(owner.viewer, owner.status,
+                                    reference_layer=run_layer[2] if run_layer is not None else None)
         finally:
             self._finishing = False
 
@@ -570,11 +608,9 @@ def install_unified_mda(owner):
                     position.model_dump(mode="json") for position in self.stage_positions.value()
                 ]
                 metadata[METADATA_KEY]["grid_positions_enabled"] = bool(self.tab_wdg.isChecked(self.stage_positions))
-                # Dense grids traverse virtual stage positions rather than g.
-                shutter_axes = tuple("p" if axis == "g" else axis
-                                     for axis in seq.keep_shutter_open_across)
-                return seq.replace(metadata=metadata, stage_positions=(), grid_plan=None,
-                                   keep_shutter_open_across=shutter_axes)
+                # iter_grid_events interprets virtual grid positions using g.
+                # Preserve the checkbox axis through saving and acquisition.
+                return seq.replace(metadata=metadata, stage_positions=(), grid_plan=None)
             return seq.replace(metadata=metadata, grid_plan=None if self.grid_modes.mode == "raman" else seq.grid_plan)
 
         def setValue(self, value):
@@ -636,6 +672,8 @@ def install_unified_mda(owner):
                 self.grid_modes.restore_regions(value)
                 write_extensions(owner, ext)
                 self.update_summary()
+                if self.grid_modes.mode == "galvo":
+                    self.tab_wdg.setCurrentWidget(self.grid_plan)
 
         def run_mda(self):
             try:
@@ -685,7 +723,10 @@ def install_unified_mda(owner):
             self._duration_label.setVisible(not dense)
             controller = getattr(owner, "_acquisition_controller", None)
             editable = not self._locked and not (controller and controller.busy)
-            self.stage_positions.setEnabled(editable)
+            galvo = self.grid_modes.mode == "galvo"
+            self.stage_positions.setEnabled(editable and not galvo)
+            if galvo and self.tab_wdg.isChecked(self.stage_positions):
+                self.tab_wdg.setChecked(self.stage_positions, False)
             self.grid_plan.setEnabled(editable)
             self.raman_selection_tab.setEnabled(editable)
             self.grid_modes.refresh()
@@ -696,7 +737,7 @@ def install_unified_mda(owner):
                                            if position_owned else "Integrate legacy aiming points into one spectrum.")
             self.update_dense_positions(sequence)
             if dense:
-                count = grid_count(sequence)
+                count = sum(r["x"][2] * r["y"][2] for r in sequence.metadata[GRID_KEY]["regions"])
                 self.grid_summary.setText(f"Dense Raman grid: {count:,} virtual positions. "
                                           "Each row represents a region. Points are generated during acquisition.")
             try:
@@ -744,10 +785,14 @@ def install_unified_mda(owner):
                     self.dense_grid_table.setItem(row, column, QTableWidgetItem(text))
 
     old = get_mda_widget_from_napari(owner.main_window)
-    value = old.value()
+    # The upstream widget starts with a current-position row. Start our editor
+    # without registered positions; users can add or load them explicitly.
+    value = old.value().replace(stage_positions=())
     dock = owner.main_window._dock_widgets["MDA"]
     panel = UnifiedMDAWidget(parent=owner.main_window, mmcore=owner.core)
     panel.setValue(value)
+    panel.stage_positions.setValue(())
+    panel.tab_wdg.setChecked(panel.stage_positions, False)
     dock.setWidget(panel)
     old._disconnect()
     old.control_btns._disconnect()

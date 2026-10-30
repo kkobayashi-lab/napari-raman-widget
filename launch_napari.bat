@@ -3,4 +3,4 @@ call C:\Users\spraman\anaconda3\Scripts\activate.bat confocal_control_gui_cellpo
 if errorlevel 1 exit /b %errorlevel%
 cd /d C:\Users\spraman\confocal_control_gui\napari-raman-widget
 python run_napari.py
-pause
+exit /b %errorlevel%

@@ -212,6 +212,18 @@ def prepare_acquisition(sequence, extensions, targets, image_shape=None):
     ext = deepcopy(extensions)
     from raman_mda_engine.grid_plan import GRID_KEY, grid_count
     compact_grid = GRID_KEY in sequence.metadata
+    from raman_mda_engine.galvo_grid import is_galvo_grid
+    galvo = is_galvo_grid(sequence)
+    if galvo:
+        from raman_mda_engine.grid_plan import validate_grid
+        validate_grid(sequence.metadata[GRID_KEY])
+        targets = []
+        ext.raman.batch = False
+        ext.raman.pre_acq = False
+        # Stage-based aiming/focus policies do not apply to voltage-space scans.
+        # Change only the detached run so other modes retain their settings.
+        ext.autofocus.mode = "off"
+        ext.tracking.enabled = False
     if compact_grid and sequence.metadata.get(METADATA_KEY, {}).get("grid_mode") == "raman":
         ext.raman.batch = False
         ext.raman.pre_acq = False
@@ -225,6 +237,8 @@ def prepare_acquisition(sequence, extensions, targets, image_shape=None):
     if len(channels) > 1:
         raise ValueError("Only one RM channel is supported")
     enabled = bool(channels)
+    if galvo and not enabled:
+        raise ValueError("Add the RM channel to acquire a Raman galvo grid")
     exposure = float(channels[0].exposure or 0) if enabled else 0.0
     if enabled and (not math.isfinite(exposure) or exposure < 73.8):
         raise ValueError("RM exposure must be at least 73.8 ms per collection")
@@ -261,7 +275,7 @@ def prepare_acquisition(sequence, extensions, targets, image_shape=None):
         sources = (*remap_targets(sequence, focus), SnapshotSource(record))
     else:
         sources = tuple(SnapshotSource(record) for record in targets) if compact_grid else tuple(remap_targets(sequence, targets))
-    if enabled and not any(s.role == "cell" and any(len(x) for x in s._points_by_position.values()) for s in sources):
+    if enabled and not galvo and not any(s.role == "cell" and any(len(x) for x in s._points_by_position.values()) for s in sources):
         raise ValueError("RM acquisition needs prepared Raman targets")
     if policies is not None and ext.tracking.enabled:
         raise ValueError("Disable tracking for position-owned Raman targets; reselect positions from updated images instead")

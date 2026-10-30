@@ -127,13 +127,20 @@ class LazyMDAViewer:
         if pixel_size:
             scale[-2:] = [pixel_size, pixel_size]
         channel_summary = ", ".join(channel_labels) or "Camera"
+        # Grid scans use the live spatial Raman map as their primary display.
+        # This shared stack includes the rendered spectra and can be enabled manually.
+        from raman_mda_engine.grid_plan import GRID_KEY
         layer = self.viewer.add_image(
             array,
             name=f"MDA ({channel_summary})",
-            visible=True,
+            visible=GRID_KEY not in sequence.metadata,
             scale=scale,
             metadata=metadata,
         )
+        # Match napari's "continuous" contrast mode. The stack starts empty,
+        # and camera frames and rendered Raman plots have different ranges.
+        # Recalculate from each displayed slice, including when browsing later.
+        layer._keep_auto_contrast = True
         axis_labels = [*axes, "y", "x"]
         if len(self.viewer.dims.axis_labels) == len(axis_labels):
             self.viewer.dims.axis_labels = axis_labels

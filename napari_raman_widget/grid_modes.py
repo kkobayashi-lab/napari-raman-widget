@@ -21,6 +21,7 @@ class GridModes:
         self.selector = QComboBox()
         self.selector.addItem("Imaging grid — camera fields", "imaging")
         self.selector.addItem("Raman grid — center points", "raman")
+        self.selector.addItem("Raman galvo grid — voltage range", "galvo")
         layout.addWidget(self.selector)
         layout.addWidget(self.imaging)
         self.raman = QWidget()
@@ -42,11 +43,19 @@ class GridModes:
         from .raman_grid_editor import RamanGridEditor
         self.editor = RamanGridEditor(self)
         layout.addWidget(self.raman)
+        from .galvo_grid_editor import GalvoGridEditor
+        self.galvo = GalvoGridEditor(self)
+        layout.addWidget(self.galvo)
         panel.grid_plan.setWidget(container)
         self.selector.currentIndexChanged.connect(self.change_mode)
         self.refresh()
 
     def compile_regions(self, metadata):
+        if self.mode == "galvo":
+            metadata[GRID_KEY] = self.galvo.plan()
+            metadata[METADATA_KEY]["galvo_grid_editor"] = self.galvo.settings()
+            metadata[METADATA_KEY]["targets"] = []
+            return
         if self.mode != "raman" or not hasattr(self.owner, "_grid_regions"):
             return
         regions = self.owner._grid_regions
@@ -71,6 +80,8 @@ class GridModes:
 
     def restore_regions(self, sequence):
         plan = sequence.metadata.get(GRID_KEY)
+        if plan and plan.get("backend") == "galvo":
+            return
         if not hasattr(self.owner, "_grid_regions") or plan == self.loaded_grid:
             return
         self.loaded_grid = deepcopy(plan)
@@ -102,10 +113,11 @@ class GridModes:
 
     def restore(self, sequence):
         metadata = sequence.metadata
-        self.mode = ("raman" if GRID_KEY in metadata else
+        self.mode = ("galvo" if metadata.get(GRID_KEY, {}).get("backend") == "galvo" else "raman" if GRID_KEY in metadata else
                      metadata.get(METADATA_KEY, {}).get("grid_mode", "imaging"))
-        if self.mode not in ("imaging", "raman"):
+        if self.mode not in ("imaging", "raman", "galvo"):
             self.mode = "imaging"
+        self.galvo.restore(metadata.get(METADATA_KEY, {}).get("galvo_grid_editor"))
         self.selector.blockSignals(True)
         self.selector.setCurrentIndex(self.selector.findData(self.mode))
         self.selector.blockSignals(False)
@@ -113,12 +125,14 @@ class GridModes:
 
     def refresh(self):
         raman = self.mode == "raman"
-        self.imaging.setVisible(True)
+        self.imaging.setVisible(self.mode != "galvo")
         self.editor.set_visible(raman)
         self.raman.setVisible(raman)
+        self.galvo.setVisible(self.mode == "galvo")
+        self.galvo.update_summary()
         index = self.panel.tab_wdg.indexOf(self.panel.grid_plan)
         checkbox = self.panel.tab_wdg.tabBar().tabButton(index, QTabBar.LeftSide)
-        checkbox.setVisible(not raman)
+        checkbox.setVisible(self.mode == "imaging")
 
     def change_mode(self):
         panel = self.panel
@@ -145,6 +159,8 @@ class GridModes:
             meta["targets"] = deepcopy(previous.get("targets", []))
             if "raman_grid_editor" in previous:
                 meta["raman_grid_editor"] = deepcopy(previous["raman_grid_editor"])
+            if "galvo_grid_editor" in previous:
+                meta["galvo_grid_editor"] = deepcopy(previous["galvo_grid_editor"])
             if "wellplate_plan" in previous:
                 meta["wellplate_plan"] = deepcopy(previous["wellplate_plan"])
         positions = draft.stage_positions if draft is not None else current.stage_positions
