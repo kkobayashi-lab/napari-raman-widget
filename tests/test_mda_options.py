@@ -20,7 +20,7 @@ from napari_raman_widget.widget import (
 
 
 def test_live_completion_remembers_latest_ten_intervals(monkeypatch):
-    from napari_raman_widget.mda_timing import remembered_acquisition_seconds
+    from napari_raman_widget.mda_timing import remembered_overhead_seconds
 
     owner = SimpleNamespace(
         _raman_mda_pending=True,
@@ -30,17 +30,61 @@ def test_live_completion_remembers_latest_ten_intervals(monkeypatch):
         _mda_live_intervals=[],
         mda_live_eta_label=SimpleNamespace(setText=lambda text: None),
     )
+    monkeypatch.setattr("napari_raman_widget.widget.time.perf_counter", lambda: 0)
+    HardwareWidget._start_live_mda_timing(owner, 20)
     now = 0
     for interval in range(1, 13):
         now += interval
         monkeypatch.setattr("napari_raman_widget.widget.time.perf_counter", lambda: now)
-        HardwareWidget._record_live_mda_completion(owner)
+        HardwareWidget._record_live_mda_completion(owner, "raman", 100)
         if interval < 10:
-            assert remembered_acquisition_seconds() is None
-    assert remembered_acquisition_seconds() == 7.5
+            assert remembered_overhead_seconds("raman") is None
+    assert remembered_overhead_seconds("raman") == 7.4
     HardwareWidget._start_live_mda_timing(owner, 30)
     assert owner._mda_live_intervals == []
-    assert remembered_acquisition_seconds() == 7.5
+    assert remembered_overhead_seconds("raman") == 7.4
+
+
+def test_raman_completion_uses_spectrum_count_and_actual_exposure():
+    calls = []
+    owner = SimpleNamespace(
+        _raman_visualization_engine=SimpleNamespace(_batch=True),
+        _lazy_mda_viewer=None,
+        _record_live_mda_completion=lambda *args: calls.append(args),
+    )
+    event = SimpleNamespace(index={"p": 0}, sequence=None)
+    HardwareWidget._on_raman_spectra_ready(
+        owner, event, np.zeros((3, 20)), np.zeros((100, 2)), [], 500,
+    )
+    assert calls == [("raman_batch", 500, 3, event)]
+    event.sequence = SimpleNamespace(metadata={
+        "raman_positions": {"0": {"mode": "centered"}},
+    })
+    HardwareWidget._on_raman_spectra_ready(
+        owner, event, np.zeros((6, 20)), np.zeros((6, 2)), [], 100,
+    )
+    assert calls[-1] == ("raman", 100, 6, event)
+    HardwareWidget._on_mda_frame_completed(
+        owner, None, SimpleNamespace(exposure=200),
+    )
+    assert calls[-1][:3] == ("imaging", 200, 1)
+
+
+def test_live_completion_excludes_scheduled_wait(monkeypatch):
+    from napari_raman_widget.mda_timing import remembered_overhead_seconds
+    owner = SimpleNamespace(
+        _raman_mda_pending=True,
+        mda_live_eta_label=SimpleNamespace(setText=lambda text: None),
+    )
+    monkeypatch.setattr("napari_raman_widget.widget.time.perf_counter", lambda: 0)
+    HardwareWidget._start_live_mda_timing(owner, 10)
+    for i in range(10):
+        monkeypatch.setattr("napari_raman_widget.widget.time.perf_counter",
+                            lambda: i * 10 + 0.7)
+        HardwareWidget._record_live_mda_completion(
+            owner, "raman", 100, 1, SimpleNamespace(min_start_time=i * 10),
+        )
+    assert abs(remembered_overhead_seconds("raman") - 0.6) < 1e-9
 
 
 class TestCellLayerMetadata(unittest.TestCase):
@@ -188,25 +232,14 @@ class TestCellposeModelSelection(unittest.TestCase):
 
 
 class TestOutputPaths(unittest.TestCase):
-    def test_relative_paths_follow_latest_output_folder(self):
-        selected = {"path": "first"}
-        widget = SimpleNamespace(
-            out_path=SimpleNamespace(text=lambda: selected["path"])
-        )
-
-        first = HardwareWidget._output_path(widget, "reference/test.zarr")
-        selected["path"] = "second"
-        second = HardwareWidget._output_path(widget, "reference/test.zarr")
-
-        self.assertEqual(first, Path("first/reference/test.zarr"))
-        self.assertEqual(second, Path("second/reference/test.zarr"))
+    def test_relative_standalone_paths_use_current_directory(self):
+        result = HardwareWidget._output_path(SimpleNamespace(), "reference/test.zarr")
+        self.assertEqual(result, Path.cwd() / "reference/test.zarr")
 
     def test_absolute_output_paths_are_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
             absolute = Path(directory) / "run"
-            widget = SimpleNamespace(
-                out_path=SimpleNamespace(text=lambda: "ignored")
-            )
+            widget = SimpleNamespace()
 
             result = HardwareWidget._output_path(widget, absolute)
 
@@ -466,6 +499,7 @@ class TestHardwareControls(unittest.TestCase):
             daq=object(),
             transformer=object(),
             status=SimpleNamespace(setText=statuses.append),
+            _reset_galvo_voltage_inputs=lambda: None,
             _aim_beam_at_pixel=lambda x, y: (
                 aims.append((x, y)) or np.array([0.2, -0.3])
             ),
@@ -1027,7 +1061,6 @@ class TestSavedAcquisitionViewer(unittest.TestCase):
             objective_combo.addItem("3")
             widget = SimpleNamespace(
                 mda_dir_input=SimpleNamespace(text=lambda: str(run)),
-                out_path=SimpleNamespace(text=lambda: ""),
                 objective_combo=objective_combo,
                 vandermonde_objective=None,
                 sel_vdm_path=SimpleNamespace(text=lambda: "model.json"),

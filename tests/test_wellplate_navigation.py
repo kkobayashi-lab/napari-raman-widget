@@ -68,6 +68,33 @@ def test_invalid_reload_disables_old_targets(panel, tmp_path):
     panel.owner.core.setXYPosition.assert_not_called()
 
 
+def test_live_highlight_follows_stage_readback(panel, tmp_path):
+    from qtpy.QtCore import Qt
+    from qtpy.QtTest import QTest
+
+    plan = CalibratedWellPlatePlan(plate="96-well", a1_center_xy=(100, 200),
+        stage_affine_um=((0, -9000, 100), (9000, 0, 200)))
+    path = tmp_path / "plate.json"
+    path.write_text(plan.model_dump_json())
+    a1, a2 = plan.all_well_positions[:2]
+    core = panel.owner.core
+    core.getXYPosition.return_value = (a1.x, a1.y)
+    panel.load_config(path)
+    panel.owner.show()
+    first = panel.view._well_items[(0, 0)]
+    second = panel.view._well_items[(0, 1)]
+    assert first.brush().color() == Qt.green
+    panel.move_to_position(a2)
+    assert first.brush().color() == Qt.green
+    core.getXYPosition.return_value = (a2.x + 3200, a2.y)
+    QTest.qWait(400)
+    assert second.brush().color() == Qt.green
+    assert first.brush().color() == Qt.transparent
+    core.getXYPosition.return_value = ((a1.x + a2.x) / 2, a1.y)
+    panel._refresh_stage_well()
+    assert second.brush().color() == Qt.transparent
+
+
 def test_navigation_rejects_disconnected_and_acquiring_stage(panel, tmp_path):
     path = tmp_path / "plate.json"
     path.write_text(WellPlatePlan(plate="96-well", a1_center_xy=(1, 2)).model_dump_json())

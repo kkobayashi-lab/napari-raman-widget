@@ -12,20 +12,22 @@ from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QPushButton,
-    QScrollArea, QSlider, QSpinBox,
+    QScrollArea, QSlider, QSpinBox, QGroupBox,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QMessageBox
 )
 from .acquisition_viewer import LargeAcquisitionViewerWindow
 from .field_help import apply_tooltips
 from .log_window import LogWindow, _StdoutRedirector
 from .lazy_visualization import install_lazy_mda_viewer
+from .live_preview import install_live_preview_channel_lock
 from .loading_paths import LOADING_PATHS
 from .mda_timing import (
     IMAGING_FRAME_OVERHEAD_S,
     RAMAN_POINT_OVERHEAD_S,
     estimate_mda_time,
     estimate_live_mda_end,
-    remember_live_mda_estimate,
+    AcquisitionOverheadLearner,
+    _event_min_start_seconds,
     format_duration,
     mda_schedule_window,
 )
@@ -365,6 +367,23 @@ class HardwareWidget(QWidget):
         self.center_laser_btn.clicked.connect(self.center_laser)
         hardware_layout.addWidget(self.center_laser_btn)
 
+        galvo_row = QHBoxLayout()
+        self.galvo_x_input = QDoubleSpinBox()
+        self.galvo_y_input = QDoubleSpinBox()
+        for axis, control in (("X", self.galvo_x_input), ("Y", self.galvo_y_input)):
+            control.setDecimals(4)
+            control.setRange(-1.6, 1.6)
+            control.setSingleStep(0.001)
+            control.setSuffix(" V")
+            control.setKeyboardTracking(False)
+            control.setToolTip("Manual galvo voltage; press Apply galvo voltage to move.")
+            galvo_row.addWidget(QLabel(f"Galvo {axis}:"))
+            galvo_row.addWidget(control)
+        hardware_layout.addLayout(galvo_row)
+        self.apply_galvo_btn = QPushButton("Apply galvo voltage")
+        self.apply_galvo_btn.clicked.connect(self.apply_galvo_voltage)
+        hardware_layout.addWidget(self.apply_galvo_btn)
+
         drag_row = QHBoxLayout()
         self.drag_stage_btn = QPushButton("Drag image to move stage")
         self.drag_stage_btn.setCheckable(True)
@@ -447,24 +466,6 @@ class HardwareWidget(QWidget):
         autofocus_box = make_collapsible("Autofocus", expanded=True)
         autofocus_layout = QVBoxLayout(autofocus_box)
         outer.addWidget(autofocus_box)
-
-        # ================= DATA OUTPUT SECTION =================
-        output_box = make_collapsible("Data Output", expanded=True)
-        output_layout = QVBoxLayout()
-        output_layout.addWidget(QLabel(
-            "Base folder for new saves (changes apply immediately):"
-        ))
-        out_row = QHBoxLayout()
-        self.out_path = QLineEdit()
-        self.out_path.setPlaceholderText("(current directory)")
-        out_browse = QPushButton("...")
-        out_browse.setFixedWidth(30)
-        out_browse.clicked.connect(self.browse_out)
-        out_row.addWidget(self.out_path)
-        out_row.addWidget(out_browse)
-        output_layout.addLayout(out_row)
-        output_box.setLayout(output_layout)
-        outer.addWidget(output_box)
 
         # ================= COLLECT SPECTRUM SECTION =================
         raman_box = make_collapsible(
@@ -742,7 +743,8 @@ class HardwareWidget(QWidget):
         scan_box.hide()
 
         # ================= GENERATE STAGE GRID SECTION =================
-        grid_box = make_collapsible("Generate stage grid", expanded=False)
+        grid_box = QGroupBox("Raman point grids")
+        self._raman_grid_panel = grid_box
         grid_layout = QVBoxLayout()
 
         grid_layout.addWidget(QLabel(
@@ -752,6 +754,7 @@ class HardwareWidget(QWidget):
         self.grid_dense_check = QCheckBox("Dense grid (procedural; keep positions out of MDA)")
         self.grid_dense_check.setChecked(True)
         grid_layout.addWidget(self.grid_dense_check)
+        self.grid_dense_check.hide()
 
         definition_row = QHBoxLayout()
         definition_row.addWidget(QLabel("Grid definition:"))
@@ -763,22 +766,7 @@ class HardwareWidget(QWidget):
         definition_row.addWidget(self.grid_definition_combo)
         grid_layout.addLayout(definition_row)
 
-        # Fixed point in image (pixel) coordinates -- same point at every FOV.
-        fovx_row = QHBoxLayout()
-        fovx_row.addWidget(QLabel("FOV x (px):"))
-        self.grid_fovx_input = QSpinBox()
-        self.grid_fovx_input.setRange(0, 100000)
-        self.grid_fovx_input.setValue(510)
-        fovx_row.addWidget(self.grid_fovx_input)
-        grid_layout.addLayout(fovx_row)
-
-        fovy_row = QHBoxLayout()
-        fovy_row.addWidget(QLabel("FOV y (px):"))
-        self.grid_fovy_input = QSpinBox()
-        self.grid_fovy_input.setRange(0, 100000)
-        self.grid_fovy_input.setValue(510)
-        fovy_row.addWidget(self.grid_fovy_input)
-        grid_layout.addLayout(fovy_row)
+        grid_layout.addWidget(QLabel("One Raman point at the center of each field; spacing is in µm."))
 
         # Stage grid extent / spacing (real stage units).
         xr_row = QHBoxLayout()
@@ -874,7 +862,7 @@ class HardwareWidget(QWidget):
         sampling_row = QHBoxLayout()
         sampling_row.addWidget(QLabel("Grid sampling:"))
         self.grid_sampling_combo = QComboBox()
-        self.grid_sampling_combo.addItem("Maximum spacing", "spacing")
+        self.grid_sampling_combo.addItem("Spacing", "spacing")
         self.grid_sampling_combo.addItem(
             "Point count (including endpoints)", "count"
         )
@@ -882,7 +870,7 @@ class HardwareWidget(QWidget):
         grid_layout.addLayout(sampling_row)
 
         xs_row = QHBoxLayout()
-        self._grid_xstep_label = QLabel("X max spacing (um):")
+        self._grid_xstep_label = QLabel("X spacing (um):")
         xs_row.addWidget(self._grid_xstep_label)
         self.grid_xstep_input = QDoubleSpinBox()
         self.grid_xstep_input.setRange(0.01, 1_000_000)
@@ -893,7 +881,7 @@ class HardwareWidget(QWidget):
         grid_layout.addLayout(xs_row)
 
         ys_row = QHBoxLayout()
-        self._grid_ystep_label = QLabel("Y max spacing (um):")
+        self._grid_ystep_label = QLabel("Y spacing (um):")
         ys_row.addWidget(self._grid_ystep_label)
         self.grid_ystep_input = QDoubleSpinBox()
         self.grid_ystep_input.setRange(0.01, 1_000_000)
@@ -1046,7 +1034,7 @@ class HardwareWidget(QWidget):
             control.textChanged.connect(self._update_grid_size_preview)
         self._update_grid_size_preview()
 
-        grid_layout.addWidget(QLabel("Grids in this acquisition:"))
+        grid_layout.addWidget(QLabel("Raman grids to acquire with Run MDA:"))
         self.grid_region_list = QListWidget()
         self.grid_region_list.setMaximumHeight(120)
         grid_layout.addWidget(self.grid_region_list)
@@ -1066,13 +1054,15 @@ class HardwareWidget(QWidget):
         self.grid_clear_btn.clicked.connect(self.clear_grids)
         grid_region_buttons.addWidget(self.grid_clear_btn)
         grid_layout.addLayout(grid_region_buttons)
-        self.apply_grid_mda_btn = QPushButton("Use grids in MDA")
+        self.apply_grid_mda_btn = QPushButton("Apply Raman grids")
         self.apply_grid_mda_btn.clicked.connect(self.apply_grids_to_mda)
         grid_layout.addWidget(self.apply_grid_mda_btn)
+        self.apply_grid_mda_btn.hide()
         self._refresh_grid_region_list()
 
         grid_box.setLayout(grid_layout)
-        outer.addWidget(grid_box)
+        grid_box.setParent(self)
+        grid_box.hide()
 
         # ================= AUTOMATED CELL SELECTION SECTION =================
         self.sel_box = make_collapsible("Automated cell selection", expanded=False)
@@ -1246,7 +1236,7 @@ class HardwareWidget(QWidget):
         self.sel_seg_debug_check.setChecked(False)
         self.sel_seg_debug_check.setToolTip(
             "Save each exact Cellpose input and label mask as lossless .npy "
-            "files under Data Output/segmentation_debug. Napari can open "
+            "files under segmentation_debug in the current working directory. Napari can open "
             "these files directly."
         )
         sel_layout.addWidget(self.sel_seg_debug_check)
@@ -1442,16 +1432,6 @@ class HardwareWidget(QWidget):
         if path:
             self.tf_path.setText(path)
 
-    def browse_out(self):
-        path = QFileDialog.getExistingDirectory(
-            self, "Select output folder", str(self._output_path("."))
-        )
-        if path:
-            self.out_path.setText(path)
-            self.status.setText(
-                f"Status: new saves will use {self._output_path('.')}"
-            )
-
     def browse_vandermonde(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select Vandermonde model", "",
@@ -1509,13 +1489,11 @@ class HardwareWidget(QWidget):
 
     # -------- helpers --------
     def _output_path(self, path):
-        """Resolve a relative result path under the current output folder."""
+        """Resolve standalone result paths; MDA owns its save folder separately."""
         candidate = Path(path).expanduser()
         if candidate.is_absolute():
             return candidate
-        base_text = self.out_path.text().strip()
-        base = Path(base_text).expanduser() if base_text else Path.cwd()
-        return base / candidate
+        return Path.cwd() / candidate
 
     def _get_image_xy(self):
         """Return (X_size, Y_size) from the camera via the core if connected,
@@ -1680,6 +1658,43 @@ class HardwareWidget(QWidget):
             )
         return volts[0]
 
+    def _reset_galvo_voltage_inputs(self):
+        """Default manual inputs to the loaded calibration's beam center."""
+        center_x, center_y = DEFAULT_BEAM_CENTER_XY
+        volts = np.asarray(self._pt_to_volts(np.array([center_y, center_x])))
+        if volts.shape != (1, 2) or not np.all(np.isfinite(volts)):
+            raise ValueError("Transformer must return one finite X/Y voltage pair")
+        if np.any(np.abs(volts) > 1.6):
+            raise ValueError("Calibrated center exceeds the +/-1.6 V galvo limit")
+        self.galvo_x_input.setValue(float(volts[0, 0]))
+        self.galvo_y_input.setValue(float(volts[0, 1]))
+
+    def apply_galvo_voltage(self):
+        """Hold the galvos at the manually entered X/Y voltages."""
+        if self.core is None or self.daq is None:
+            self.status.setText("Status: not connected")
+            return
+        mda = getattr(self.core, "mda", None)
+        is_running = getattr(mda, "is_running", False)
+        if is_running() if callable(is_running) else bool(is_running):
+            self.status.setText("Status: stop the active MDA before adjusting galvo voltage")
+            return
+        try:
+            volts = np.array([self.galvo_x_input.value(), self.galvo_y_input.value()])
+            if not np.all(np.isfinite(volts)) or np.any(np.abs(volts) > 1.6):
+                raise ValueError("Galvo voltages must be finite and within +/-1.6 V")
+            set_position = getattr(self.daq, "set_galvo_position", None)
+            if callable(set_position):
+                set_position(volts)
+            else:
+                self.daq.galvo.stop()
+                self.daq.galvo.write(np.ascontiguousarray(volts), auto_start=True)
+            self.status.setText(
+                f"Status: galvo position set [X={volts[0]:.4f}, Y={volts[1]:.4f} V]"
+            )
+        except Exception as e:
+            self.status.setText(f"Status: galvo adjustment failed -- {e}")
+
     def center_laser(self):
         """Hold the laser at the same calibrated center used on connection."""
         if self.core is None or self.daq is None:
@@ -1698,6 +1713,7 @@ class HardwareWidget(QWidget):
         center_x, center_y = DEFAULT_BEAM_CENTER_XY
         try:
             volts = self._aim_beam_at_pixel(center_x, center_y)
+            self._reset_galvo_voltage_inputs()
             self.status.setText(
                 f"Status: laser centered at ({center_x:.0f}, {center_y:.0f}) "
                 f"[X={volts[0]:.3f}, Y={volts[1]:.3f} V]"
@@ -1839,9 +1855,10 @@ class HardwareWidget(QWidget):
         try:
             nx, ny, positions, *_rest = self._grid_size_preview()
             order = self.grid_scan_order_combo.currentText()
+            repeats = self.mda_repeats_input.value() if hasattr(self, "mda_repeats_input") else 1
             self.grid_size_label.setText(
                 f"Grid: {nx} x {ny} = {positions:,} positions; "
-                f"{order}; frames per point configured in MDA"
+                f"{order}; {repeats} frames per point = {positions * repeats:,} spectra per plane/time point"
             )
         except ValueError:
             self.grid_size_label.setText(
@@ -1865,7 +1882,7 @@ class HardwareWidget(QWidget):
             f"Grid shape: {nx} x {ny}\n"
             f"Scan order: {self.grid_scan_order_combo.currentText()}\n"
             f"Stage positions: {positions:,}\n"
-            "Frames per point: configured in MDA\n\n"
+            f"Frames per point: {self.mda_repeats_input.value()}\n\n"
             f"X span: {x_span:.3f} um; spacing: {x_spacing:.3f} um\n"
             f"Y span: {y_span:.3f} um; spacing: {y_spacing:.3f} um",
         )
@@ -2226,7 +2243,14 @@ class HardwareWidget(QWidget):
         self, event, spectra, points, which, _exposure
     ):
         """Add the spectrum image at RM's index in the shared MDA stack."""
-        self._record_live_mda_completion()
+        policy = (getattr(getattr(event, "sequence", None), "metadata", {}) or {}).get(
+            "raman_positions", {}).get(str(event.index.get("p", 0)), {})
+        batch = (policy.get("mode") == "integrated_batch" if policy else
+                 getattr(self._raman_visualization_engine, "_batch", False))
+        self._record_live_mda_completion(
+            "raman_batch" if batch else "raman", _exposure,
+            len(np.atleast_2d(spectra)), event,
+        )
         if self._lazy_mda_viewer is None:
             return
         try:
@@ -2245,18 +2269,22 @@ class HardwareWidget(QWidget):
 
     def _on_mda_frame_completed(self, _image, _event, *_metadata):
         """Update the live ETA after one camera acquisition completes."""
-        self._record_live_mda_completion()
+        self._record_live_mda_completion(
+            "imaging", getattr(_event, "exposure", None), 1, _event,
+        )
 
     def _start_live_mda_timing(self, total_acquisitions):
         self._mda_live_total = max(0, int(total_acquisitions))
         self._mda_live_completed = 0
         self._mda_live_intervals = []
         self._mda_live_last_completion = time.perf_counter()
+        self._mda_live_started = self._mda_live_last_completion
+        self._mda_overhead_learner = AcquisitionOverheadLearner()
         self.mda_live_eta_label.setText(
             "Live ETA: collecting the first measurement..."
         )
 
-    def _record_live_mda_completion(self):
+    def _record_live_mda_completion(self, kind=None, exposure_ms=None, count=1, event=None):
         """Update ETA from the rolling average of the latest 10 completions."""
         if (
             not self._raman_mda_pending
@@ -2267,6 +2295,11 @@ class HardwareWidget(QWidget):
 
         now_monotonic = time.perf_counter()
         interval = now_monotonic - self._mda_live_last_completion
+        previous_elapsed = self._mda_live_last_completion - self._mda_live_started
+        scheduled_wait = max(0.0, _event_min_start_seconds(event) - previous_elapsed)
+        self._mda_overhead_learner.record(
+            kind, interval, exposure_ms, count, min(interval, scheduled_wait),
+        )
         self._mda_live_last_completion = now_monotonic
         self._mda_live_intervals.append(interval)
         self._mda_live_intervals = self._mda_live_intervals[-10:]
@@ -2280,7 +2313,6 @@ class HardwareWidget(QWidget):
         )
         if live is None:
             return
-        remember_live_mda_estimate(live)
         end_text = live.expected_end.strftime("%Y-%m-%d %H:%M:%S %Z")
         self.mda_live_eta_label.setText(
             f"Live ETA: {end_text} "
@@ -2534,6 +2566,7 @@ class HardwareWidget(QWidget):
                 )
                 if isinstance(result, tuple) and len(result) >= 2:
                     self.main_window = result[1]
+                    install_live_preview_channel_lock(self.main_window, self.core)
                     self._lazy_mda_viewer = install_lazy_mda_viewer(
                         self.main_window, self.core, self.viewer
                     )
@@ -2558,6 +2591,7 @@ class HardwareWidget(QWidget):
             tf = self.tf_path.text().strip()
             if tf:
                 self.transformer = CoordTransformer.from_json(tf)
+                self._reset_galvo_voltage_inputs()
 
             objective = self._refresh_objective_combo()
             vdm_msg = self._load_vandermonde()
@@ -2598,6 +2632,7 @@ class HardwareWidget(QWidget):
         try:
             from cns_control.coordtransformer import CoordTransformer
             self.transformer = CoordTransformer.from_json(tf)
+            self._reset_galvo_voltage_inputs()
             vdm_msg = self._load_vandermonde()
             self.status.setText(f"Status: transformer reloaded OK{vdm_msg}")
         except Exception as e:
@@ -2923,6 +2958,7 @@ class HardwareWidget(QWidget):
             )
             model_path = Path(f"{model_base}.json")
             self.transformer = CoordTransformer.from_json(model_path)
+            self._reset_galvo_voltage_inputs()
             self.tf_path.setText(str(model_path))
             self.status.setText(f"Status: saved & loaded {model_path} OK")
         except Exception as e:
@@ -4122,10 +4158,8 @@ class HardwareWidget(QWidget):
     def _current_grid_source_settings(self):
         """Return settings that must be shared by every combined grid."""
         return {
-            "fov_x": int(self.grid_fovx_input.value()),
-            "fov_y": int(self.grid_fovy_input.value()),
-            "pattern_size": float(self.sel_sqsize_input.value()),
-            "pattern_n": int(self.sel_sqn_input.value()),
+            "fov_x": self.core.getImageWidth() / 2,
+            "fov_y": self.core.getImageHeight() / 2,
             "dense": self.grid_dense_check.isChecked(),
         }
 
@@ -4165,8 +4199,7 @@ class HardwareWidget(QWidget):
             )
         else:
             self.grid_region_summary.setText(
-                "No grids added. FOV and point-pattern "
-                "settings are shared across all grids."
+                "No grids added. Each grid samples the field center at every stage position."
             )
         self.grid_remove_btn.setEnabled(has_grids)
         self.grid_clear_btn.setEnabled(has_grids)
@@ -4175,15 +4208,14 @@ class HardwareWidget(QWidget):
             self.apply_grid_mda_btn.setEnabled(has_grids and not (controller and controller.busy))
 
         for name in (
-            "grid_fovx_input",
-            "grid_fovy_input",
             "grid_dense_check",
-            "sel_sqsize_input",
-            "sel_sqn_input",
         ):
             control = getattr(self, name, None)
             if control is not None:
                 control.setEnabled(not has_grids)
+        panel = getattr(self, "_unified_mda", None)
+        if panel is not None and panel._ready and panel.grid_modes.mode == "raman":
+            panel.valueChanged.emit()
 
     def _reset_grid_regions(self, *, clear_grid_selection=True):
         """Discard the accumulated grid regions and unlock shared controls."""
@@ -4277,8 +4309,8 @@ class HardwareWidget(QWidget):
             self.status.setText("Status: no default engine -- reconnect")
             return
 
-        fov_x = int(self.grid_fovx_input.value())
-        fov_y = int(self.grid_fovy_input.value())
+        fov_x = self.core.getImageWidth() / 2
+        fov_y = self.core.getImageHeight() / 2
         x_range = float(self.grid_xrange_input.value())
         y_range = float(self.grid_yrange_input.value())
         x_step = float(self.grid_xstep_input.value())
@@ -4287,8 +4319,6 @@ class HardwareWidget(QWidget):
         if self.grid_sampling_combo.currentData() == "count":
             x_count = int(self.grid_xcount_input.value())
             y_count = int(self.grid_ycount_input.value())
-        sq_size = float(self.sel_sqsize_input.value())
-        sq_n = int(self.sel_sqn_input.value())
         source_settings = self._current_grid_source_settings()
         if self._grid_regions:
             expected = self._grid_regions[0]["source_settings"]
@@ -4341,6 +4371,21 @@ class HardwareWidget(QWidget):
                 )
                 return
 
+        if base_z is None and tilt_reference_points is None:
+            response = QMessageBox.warning(
+                self,
+                "Grid Z not specified",
+                "No Z position is specified for this grid and tilt correction is off.\n\n"
+                "Enter or capture a focused Z position, or enable tilt correction, "
+                "to define the grid's focus.\n\n"
+                "Add this grid without an explicit Z position?",
+                QMessageBox.Ok | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if response != QMessageBox.Ok:
+                self.status.setText("Status: grid not added — specify Z or enable tilt correction")
+                return
+
         log = LogWindow(title="Stage grid log")
         log.show()
         self._plot_windows.append(log)
@@ -4350,11 +4395,14 @@ class HardwareWidget(QWidget):
 
         try:
             from cns_control.utils import grid_point_selections
+            from raman_mda_engine.aiming.transformers import Identity
 
             with _StdoutRedirector(log):
                 self._prepare_for_selection()
                 self.core.register_mda_engine(self.default_engine)
-                point_transformer = self._make_point_transformer(sq_size, sq_n)
+                # Stage motion defines the grid; never expand its fixed laser
+                # point using the cell-selection Square/Circle pattern.
+                point_transformer = Identity()
                 sources, _autofocus_p, region_seq = grid_point_selections(
                     self.core, self.viewer, self.main_window,
                     point_transformer,
@@ -4423,7 +4471,7 @@ class HardwareWidget(QWidget):
                 f"Status: added grid {len(self._grid_regions)} "
                 f"({n_region_positions} positions; {n_total_positions} total, "
                 f"aiming point at ({fov_x},{fov_y}), {z_detail}) -- "
-                "attach the Raman grid plan to MDA to acquire"
+                "ready for Run MDA"
             )
         except Exception as e:
             log.append(f"\n--- stage grid failed: {e} ---\n")
@@ -4464,16 +4512,22 @@ class HardwareWidget(QWidget):
             "Autofocus, segmentation/tracking, and stage movement time "
             "are not included."
         )
-        if estimate.remembered_average_seconds is not None:
+        if getattr(estimate, "learned_overheads", ()):
+            learned = ", ".join(
+                f"{kind.replace('_', ' ')}: {value:.3f} s"
+                for kind, value in estimate.learned_overheads
+            )
             message = message[:message.index("Estimate details:")] + (
                 "Estimate details:\n"
-                f"- {estimate.acquisition_count:,} acquisitions\n"
-                f"- {format_duration(estimate.remembered_average_seconds)} "
-                "per acquisition, remembered from the last 10 live measurements\n"
-                f"- {scheduled_wait} additional scheduled interval time\n\n"
-                "Measured timing includes overhead from the previous run. "
-                "Changes to exposure, points, or acquisition settings may change "
-                "the actual duration; live ETA updates during the run."
+                f"- {estimate.raman_points:,} Raman spectra and "
+                f"{estimate.imaging_frames:,} imaging frames\n"
+                f"- Remembered overhead per spectrum/frame: {learned}\n"
+                "- Current exposures and repeats are included; unlearned modes "
+                "use default overhead\n"
+                f"- {scheduled_wait} scheduled interval time\n\n"
+                "Overhead is learned from the last 10 measurements per mode "
+                "and retained across runs. Hardware and workflow changes may "
+                "affect the actual duration; live ETA updates during the run."
             )
         if overwrite:
             resolved_output = Path(output_dir).expanduser().resolve()

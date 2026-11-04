@@ -172,6 +172,7 @@ def install_raman_tab(panel, owner):
     owner._raman_settings_panel.show()
     layout.addStretch()
     QTabWidget.addTab(panel.tab_wdg, tab, "Raman selection")
+    panel.raman_selection_tab = tab
 
 
 class RamanEditor:

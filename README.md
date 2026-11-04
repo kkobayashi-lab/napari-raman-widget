@@ -23,6 +23,29 @@ base folder in **Data Output**. Changing it applies to the next save
 immediately and does not reconnect hardware or change the process working
 directory.
 
+## Imaging and Raman grids
+
+In **MDA → Grid**, choose **Imaging grid** for camera tiles with FOV/overlap
+controls, or **Raman grid** for one centered Raman point per stage location.
+Both modes use the native MDA geometry editor: rows/columns, width/height, or
+absolute boundaries (including the native stage-boundary capture buttons).
+Raman mode replaces overlap with X/Y spacing and treats boundaries as point-center
+limits, without a half-FOV offset. Area/boundary modes include the endpoints and
+reduce spacing to fit when needed. Rows/columns use the specified spacing exactly.
+The native current-position origin and all scan orders, including spiral, are supported.
+Raman mode retains our polynomial tilt correction and constant-Z capture.
+Add the desired regions to the list, then click **Run MDA**. Adding, removing,
+or clearing regions updates the acquisition directly; there is no Apply step.
+Grids stay compact in the Grid tab. The Positions tab stays unchanged, and its
+entries are preserved when saving/loading the experiment. Raman grids use absolute
+stage coordinates independently of that list; imaging grids can tile around stage positions.
+
+**Frames per Raman grid point** collects consecutive spectra before moving.
+It is independent of Time-tab repetitions; each spectrum is retained separately.
+Channels, Z stacks, saving, and autofocus remain configured in their MDA tabs.
+Switching grid types retains each mode's geometry during the session. Saved
+experiments retain the active mode, grid geometry, correction, and frame count.
+
 ## Raman selection in MDA
 
 Open **MDA → Raman selection → Select Raman points / batches**. Use a completed acquisition already
@@ -42,7 +65,7 @@ The stage moves to each batch's geometric center (area centroid for polygons),
 using the current objective's pixel-to-stage calibration. Sampling coordinates
 are shifted relative to the new FOV center, and the galvo scans within the batch
 during **one RM exposure**. The RM channel exposure in Channels is the
-total integration time per batch, not per sampling point. **Spectrum repeats** in
+total integration time per batch, not per sampling point. **Frames per Raman point / batch** in
 Raman selection repeats the whole batch. Raman planes, camera-position filters,
 and galvo prepositioning also live in Raman selection; the old Raman acquisition
 section is removed. Centered positions and batches can share a run using Append.
@@ -146,11 +169,10 @@ Hardware-library imports (`pymmcore_plus`, `cns_control`, etc.) are done
 lazily inside methods, so the package imports cleanly on machines without
 the rig.
 
-## Automatic autofocus positions selection
+## Automatically assign autofocus position
 
-In **MDA > Autofocus**, select an autofocus axis and enable **Automatic autofocus
-positions selection**. The only selection parameter is **Minimum empty patch
-radius (camera px)**. Selection uses the camera channels already scheduled in the
+In **MDA > Autofocus**, select an autofocus axis and enable **Automatically assign autofocus position**. The only selection parameter is **Minimum empty patch
+radius (camera px)**, defaulting to **50 pixels**. Selection uses the camera channels already scheduled in the
 acquisition; it captures no additional preview images and has no separate channel
 or exposure configuration. Manual references are ignored while this is enabled.
 
@@ -340,11 +362,10 @@ the rig. The `anthropic` import used by the chat panel is likewise lazy, so
 the package still imports (and the assistant simply reports it is unavailable)
 when the SDK or API key is missing.
 
-## Automatic autofocus positions selection
+## Automatically assign autofocus position
 
-In **MDA > Autofocus**, select an autofocus axis and enable **Automatic autofocus
-positions selection**. The only selection parameter is **Minimum empty patch
-radius (camera px)**. Selection uses the camera channels already scheduled in the
+In **MDA > Autofocus**, select an autofocus axis and enable **Automatically assign autofocus position**. The only selection parameter is **Minimum empty patch
+radius (camera px)**, defaulting to **50 pixels**. Selection uses the camera channels already scheduled in the
 acquisition; it captures no additional preview images and has no separate channel
 or exposure configuration. Manual references are ignored while this is enabled.
 

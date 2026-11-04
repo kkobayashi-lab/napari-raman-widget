@@ -78,8 +78,7 @@ galvanometer volts. Place the intended Points or Shapes layer last in the layer 
 
 \chapter{Loading}
 This section is expanded at startup. Choose the hardware and calibration paths
-before connecting. Data Output is independent of the hardware connection and may
-be changed at any time.
+before connecting. Configure acquisition output in the MDA tab.
 
 \fieldtable
 Micro-Manager config (.cfg) & \code{test3.cfg} & Device configuration used for
@@ -124,19 +123,9 @@ Reload transformer & Reloads the coordinate models without reconnecting.\\
 \bottomrule\end{longtable}
 
 \chapter{Data Output}
-The \ui{Base folder for new saves} is independent of hardware initialization.
-Changing it takes effect on the next save without reconnecting hardware and
-without changing the process working directory. An acquisition already in
-progress continues writing to the directory selected when that run started.
-
-\fieldtable
-Base folder for new saves & blank = current directory & Base location for
-relative spectrum, reference, map, model, and MDA paths. Absolute paths remain
-unchanged. The browse button updates the base immediately.\\
-\endfieldtable
-
-For example, the relative MDA writer path \code{data/run} is resolved as
-\code{<Data Output>/data/run}.
+Use \ui{Save Acquisition} in the MDA tab to choose the acquisition output folder.
+Standalone calibration and spectrum files with relative names are saved in the
+current working directory. Absolute paths are used unchanged.
 
 \chapter{Collect Spectra Using Points Layer}
 
@@ -149,7 +138,7 @@ Exposure (ms) & 1000; 1--1,000,000 & Integration time used by the spectrum colle
 N (repeats, at least 2) & 2; 2--1000 & Number of identical copies of the transformed
 galvo coordinate used for acquisition. The minimum of two is enforced.\\
 Save as & blank = display only & Optional filename. If the \code{.npy} suffix is
-not provided, the widget adds it. A relative name is saved under Data Output.\\
+not provided, the widget adds it. A relative name is saved in the current working directory.\\
 \endfieldtable
 
 \ui{Collect spectra at last point} restarts the galvo, transforms the point,

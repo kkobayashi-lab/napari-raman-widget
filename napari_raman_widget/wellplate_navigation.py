@@ -3,9 +3,9 @@ import json
 from pathlib import Path
 
 import numpy as np
+from qtpy.QtCore import Qt, QTimer
 from qtpy.QtWidgets import QFileDialog, QLabel, QPushButton, QVBoxLayout, QWidget
 from pymmcore_widgets.useq_widgets._well_plate_widget import WellPlateView
-from useq import WellPlatePlan
 
 from .wellplate_calibration import plate_plan_model, install_plate_navigation_view
 
@@ -15,6 +15,10 @@ class WellPlateNavigationPanel(QWidget):
         super().__init__(owner)
         self.owner = owner
         self.plan = None
+        self._current_well = None
+        self._position_timer = QTimer(self)
+        self._position_timer.setInterval(250)
+        self._position_timer.timeout.connect(self._refresh_stage_well)
         layout = QVBoxLayout(self)
         self.load_button = QPushButton("Load well plate config…")
         self.load_button.clicked.connect(self.load_config)
@@ -29,6 +33,7 @@ class WellPlateNavigationPanel(QWidget):
         self.view.setMinimumHeight(260)
         self.view.setDragMode(WellPlateView.DragMode.NoDrag)
         self.view.setSelectionMode(WellPlateView.SelectionMode.NoSelection)
+        self.view.setSelectedColor(Qt.transparent)
         install_plate_navigation_view(self.view)
         self.view.setEnabled(False)
         self.view.positionDoubleClicked.connect(self.move_to_position)
@@ -36,6 +41,44 @@ class WellPlateNavigationPanel(QWidget):
         self.status = QLabel("No plate loaded.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._refresh_stage_well()
+        self._position_timer.start()
+
+    def hideEvent(self, event):
+        self._position_timer.stop()
+        super().hideEvent(event)
+
+    def _refresh_stage_well(self):
+        if self.plan is None:
+            return
+        well = None
+        core = self.owner.core
+        try:
+            if (core is not None and not core.mda.is_running()
+                    and core.getXYStageDevice()):
+                xy = core.getXYPosition()
+                # Map stage offsets into fractions of the well's two radii.
+                offsets = (xy - self._centers) @ self._to_well_units
+                if self.plan.plate.circular_wells:
+                    distances = np.linalg.norm(offsets, axis=1)
+                else:
+                    distances = np.max(np.abs(offsets), axis=1)
+                nearest = int(np.argmin(distances))
+                if distances[nearest] <= 1 + 1e-9:
+                    p = self.plan.all_well_positions[nearest]
+                    well = (p.plate_row, p.plate_col)
+        except Exception:
+            # The stage may be disconnected or temporarily unavailable.
+            pass
+        if well != self._current_well:
+            if self._current_well is not None:
+                self.view.setWellColor(*self._current_well, None)
+            if well is not None:
+                self.view.setWellColor(*well, Qt.green)
+            self._current_well = well
 
     def load_config(self, path=None):
         if not isinstance(path, (str, Path)):
@@ -48,6 +91,13 @@ class WellPlateNavigationPanel(QWidget):
             plan = model.model_validate(data)
             if not np.isfinite(plan.affine_transform).all():
                 raise ValueError("Plate coordinates must be finite")
+            self._centers = np.array([(p.x, p.y) for p in plan.all_well_positions])
+            # As for the clickable boundary dots, use calibrated directions
+            # with the physical well height and width (in micrometers).
+            directions = plan.affine_transform[:2, :2][::-1]
+            radii = np.asarray(plan.plate.well_size[::-1]) * 500
+            axes = directions / np.linalg.norm(directions, axis=0) * radii
+            self._to_well_units = np.linalg.inv(axes).T
             self.view.drawPlate(plan)
         except Exception as error:
             self.plan = None
@@ -57,6 +107,9 @@ class WellPlateNavigationPanel(QWidget):
             self.status.setText(f"Could not load plate: {error}")
             return
         self.plan = plan
+        self._current_well = None
+        if self.isVisible():
+            self._refresh_stage_well()
         self.config_label.setText(str(Path(path)))
         self.view.setEnabled(True)
         self.status.setText(f"Loaded {plan.plate.rows} × {plan.plate.columns} plate. Ready for XY navigation.")

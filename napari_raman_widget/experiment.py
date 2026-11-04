@@ -32,7 +32,7 @@ class AutofocusSettings:
     fine_points: int = 8
     axes: tuple[str, ...] = ("p", "t")
     automatic_positions: bool = False
-    automatic_min_radius_px: float = 20.0
+    automatic_min_radius_px: float = 50.0
 
 
 @dataclass
@@ -225,6 +225,9 @@ def prepare_acquisition(sequence, extensions, targets, image_shape=None):
             raise ValueError("Use the well-plate FOV selection for grids with a Z height model")
         if any(s.z_plan and not s.z_plan.is_relative for s in subsequences):
             raise ValueError("Use relative Z stacks with the plate Z height model")
+    if compact_grid and sequence.metadata.get(METADATA_KEY, {}).get("grid_mode") == "raman":
+        ext.raman.batch = False
+        ext.raman.pre_acq = False
     if compact_grid and (sequence.stage_positions or sequence.grid_plan):
         raise ValueError("Detach the Raman grid before using native stage positions or grids")
     if compact_grid and any(not record.get("fixed") for record in targets):
@@ -254,7 +257,7 @@ def prepare_acquisition(sequence, extensions, targets, image_shape=None):
     automatic_af = custom_af and ext.autofocus.automatic_positions
     if automatic_af:
         if ext.autofocus.mode != "laser":
-            raise ValueError("Automatic autofocus positions selection requires laser autofocus")
+            raise ValueError("Automatically assign autofocus position requires laser autofocus")
         if not math.isfinite(ext.autofocus.automatic_min_radius_px) or ext.autofocus.automatic_min_radius_px <= 0:
             raise ValueError("Automatic autofocus minimum radius must be positive and finite")
     if custom_af and sequence.z_plan and not sequence.z_plan.is_relative:

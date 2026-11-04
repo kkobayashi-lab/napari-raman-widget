@@ -1,9 +1,10 @@
 """Grid focus capture without microscope hardware."""
 
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
-from qtpy.QtWidgets import QApplication, QLineEdit, QWidget
+from qtpy.QtWidgets import QApplication, QLineEdit, QMessageBox, QWidget
 
 from napari_raman_widget.widget import HardwareWidget
 
@@ -34,3 +35,41 @@ def test_corner_capture_records_xy_and_grid_z(corner):
     finally:
         widget.deleteLater()
         app.processEvents()
+
+
+@pytest.mark.parametrize("z_text,tilt,response,continues,warns", [
+    ("", False, QMessageBox.Cancel, False, True),
+    ("  ", False, QMessageBox.Ok, True, True),
+    ("0", False, QMessageBox.Cancel, True, False),
+    ("12.5", False, QMessageBox.Cancel, True, False),
+    ("", True, QMessageBox.Cancel, True, False),
+])
+def test_add_grid_warns_only_without_declared_z(z_text, tilt, response, continues, warns):
+    widget = HardwareWidget(SimpleNamespace(window=SimpleNamespace()))
+    widget.core = Mock()
+    widget.core.getImageWidth.return_value = 512
+    widget.core.getImageHeight.return_value = 512
+    widget.default_engine = Mock()
+    widget.grid_z_input.setText(z_text)
+    if tilt:
+        for point in ((0, 0, 1), (10, 0, 2), (0, 10, 3)):
+            widget._add_grid_tilt_row(point)
+        widget.grid_tilt_check.setChecked(True)
+    try:
+        with patch("napari_raman_widget.widget.QMessageBox.warning", return_value=response) as warning, \
+             patch("napari_raman_widget.widget.LogWindow", side_effect=RuntimeError("generation reached")) as log:
+            if continues:
+                with pytest.raises(RuntimeError, match="generation reached"):
+                    widget.run_grid_selection()
+            else:
+                widget.run_grid_selection()
+                log.assert_not_called()
+            assert warning.call_count == int(warns)
+            if warns:
+                assert warning.call_args.args[-1] == QMessageBox.Cancel
+            assert widget._grid_regions == []
+            widget.core.register_mda_engine.assert_not_called()
+    finally:
+        widget.core = None
+        widget.deleteLater()
+        QApplication.instance().processEvents()

@@ -3,17 +3,17 @@
 The MDA dock now owns experiment channels, exposures, positions, grids, time plans,
 Z plans, axis order, output settings, and Run/Pause/Resume/Cancel. Its extension
 sections configure Raman collection, custom autofocus, and segmentation/tracking.
-The Raman dock retains connection, live hardware control, calibration, scans, and
-target preparation. The old Run Raman MDA section has been removed.
+The Raman dock retains connection, live hardware control, calibration, and cell
+target preparation. Raman grid setup now lives in MDA's Grid tab.
 
 ## Preparing an experiment
 
 1. Connect the microscope. Raman hardware initialization is optional for camera MDA.
-2. Prepare cell targets or Raman grids in Raman, if needed.
-3. In Generate stage grid, **Dense grid** is checked by default. Click **Use grids
-   in MDA** to attach its compact definition. MDA shows the virtual position count;
-   its position table stays empty. Uncheck Dense grid before adding grids to use
-   explicit MDA positions instead. All regions in a run share this mode.
+2. Prepare cell targets if needed. In **MDA → Grid**, choose **Imaging grid** for
+   camera FOV/overlap controls or **Raman grid** for centered point sampling.
+3. In Raman grid mode, add regions to the grid list and click **Run MDA**.
+   Grids stay compact and list edits take effect immediately. The Positions tab
+   remains separate and retains its entries; Raman grids use their own absolute coordinates.
    **Apply prepared positions to MDA** in Automated cell selection still transfers
    individual cell positions. Grid preparation creates one aiming point per position;
    **Frames per point** in MDA controls spectral repeats and is preserved when attaching
@@ -49,10 +49,11 @@ save measurement data or copy calibration files. **Load Settings** restores that
 Dense grids save bounds/counts, traversal order, constant Z or fitted surface, and
 shared fixed targets. They do not save an expanded position table or duplicate target
 coordinates at every grid point. The acquisition engine generates positions lazily;
-changing the grid in Raman requires clicking **Use grids in MDA** again. Rebuild
+changes to the grid list are used directly by **Run MDA**. Rebuild
 and reattach grids from older saved settings to replace duplicated aiming points;
-loading those settings preserves their existing target coordinates. Use **Detach
-dense Raman grid** in MDA to return to native position/grid editing.
+loading those settings preserves their existing target coordinates. Use **Clear
+grids** to clear the point grids, or choose **Imaging grid** to
+return to camera tiling. Mode switching retains each mode's geometry for the session.
 
 Camera-only runs without tracking or dense grids use the native MDA output formats. Raman, dense-grid, and tracked
 runs use the existing combined folder writer, regardless of the native format menu:

@@ -9,8 +9,8 @@ from napari_raman_widget.mda_timing import (
     estimate_live_mda_end,
     format_duration,
     mda_schedule_window,
-    remember_live_mda_estimate,
-    remembered_acquisition_seconds,
+    AcquisitionOverheadLearner,
+    remembered_overhead_seconds,
 )
 
 
@@ -155,53 +155,87 @@ def test_live_eta_is_unavailable_before_first_measurement():
     assert estimate_live_mda_end([], 0, 20, datetime.now()) is None
 
 
-def test_remembered_window_is_reused_per_completion_not_per_raman_point():
-    live = estimate_live_mda_end(range(1, 13), 12, 20, datetime.now())
-    remember_live_mda_estimate(live)
-    # A fresh settings instance reads the saved value, as on a later launch.
-    assert remembered_acquisition_seconds() == 7.5
+def _learn(kind="raman", exposure=100, count=1, overhead=0.6, wait=0):
+    learner = AcquisitionOverheadLearner()
+    for _ in range(10):
+        learner.record(kind, (exposure / 1000 + overhead) * count + wait,
+                       exposure, count, wait)
+    return learner
+
+
+def test_previous_run_100ms_predicts_500ms_with_same_overhead():
+    _learn()
+    # The learner is discarded: a new QSettings instance loads persisted overhead.
+    assert remembered_overhead_seconds("raman") == pytest.approx(0.6)
     estimate = estimate_mda_time(
-        _sequence(_event("RM"), _event("BF", exposure=50)),
-        [_two_point_source()], 1000, [0], [0], point_repeats=3,
+        _sequence(*[_event("RM") for _ in range(5)]),
+        [_two_point_source()], 500, [0], [],
     )
-    assert estimate.raman_points == 6
-    assert estimate.acquisition_count == 2
-    assert estimate.duration_seconds == 15
-    assert estimate.remembered_average_seconds == 7.5
+    assert estimate.raman_points == 10
+    assert estimate.duration_seconds == pytest.approx(11)
+    assert dict(estimate.learned_overheads)["raman"] == pytest.approx(0.6)
 
 
-def test_short_run_does_not_replace_saved_full_window():
-    remember_live_mda_estimate(
-        estimate_live_mda_end([2] * 10, 10, 20, datetime.now())
-    )
-    remember_live_mda_estimate(
-        estimate_live_mda_end([100] * 9, 9, 20, datetime.now())
-    )
-    assert remembered_acquisition_seconds() == 2
-
-
-def test_remembered_timing_respects_schedule_and_skips_unacquired_events():
-    remember_live_mda_estimate(
-        estimate_live_mda_end([2] * 10, 10, 20, datetime.now())
-    )
+def test_variable_exposures_counts_and_repeats_are_normalized():
+    learner = AcquisitionOverheadLearner()
+    for i in range(1, 11):
+        learner.record("raman", (i / 10 + 0.2) * i, i * 100, i)
     estimate = estimate_mda_time(
-        _sequence(_event("RM", z=1), _event("BF", p=1),
-                  _event("RM"), _event("RM", min_start_time=10)),
-        [_two_point_source()], 1000, [0], [0],
+        _sequence(_event("RM")), [_two_point_source()], 500, [0], [],
+        point_repeats=3,
     )
-    assert estimate.acquisition_count == 2
-    assert estimate.active_seconds == 4
-    assert estimate.duration_seconds == 12
-    assert estimate.scheduled_wait_seconds == 8
+    assert estimate.duration_seconds == pytest.approx(6 * 0.7)
 
 
-@pytest.mark.parametrize("value", ["broken", "nan", "inf", -1, 0])
-def test_invalid_saved_timing_falls_back_to_fixed_estimate(value):
+def test_modes_are_learned_independently():
+    _learn("raman", overhead=0.2)
+    _learn("imaging", overhead=0.05)
+    _learn("raman_batch", overhead=0.3, count=3)
+    estimate = estimate_mda_time(
+        _sequence(_event("RM"), _event("BF", exposure=200)),
+        [_two_point_source()], 500, [0], [0], batch=True, point_repeats=3,
+    )
+    assert estimate.duration_seconds == pytest.approx(3 * 0.8 + 0.25)
+
+
+def test_short_run_preserves_previous_overhead_and_window_rolls():
+    learner = _learn(overhead=0.2)
+    for _ in range(10):
+        learner.record("raman", 0.5, 100)
+    assert remembered_overhead_seconds("raman") == pytest.approx(0.4)
+    learner = AcquisitionOverheadLearner()
+    for _ in range(9):
+        learner.record("raman", 100, 100)
+    assert remembered_overhead_seconds("raman") == pytest.approx(0.4)
+
+
+def test_waits_are_not_saved_as_overhead_or_counted_twice():
+    _learn(overhead=0.2, wait=10)
+    estimate = estimate_mda_time(
+        _sequence(_event("RM"), _event("RM", min_start_time=10)),
+        [_two_point_source()], 500, [0], [],
+    )
+    assert estimate.active_seconds == pytest.approx(2.8)
+    assert estimate.duration_seconds == pytest.approx(11.4)
+
+
+@pytest.mark.parametrize("value", ["broken", "nan", "inf", -1])
+def test_invalid_saved_overhead_falls_back(value):
     from napari_raman_widget.mda_timing import _timing_settings
-
-    _timing_settings().setValue("mda/average_acquisition_seconds", value)
+    _timing_settings().setValue("mda/overhead_v2/raman", value)
     estimate = estimate_mda_time(
         _sequence(_event("RM")), [_two_point_source()], 1000, [0], [0],
     )
     assert estimate.duration_seconds == 3.2
-    assert estimate.remembered_average_seconds is None
+    assert not estimate.learned_overheads
+
+
+def test_legacy_total_is_ignored_and_zero_overhead_is_valid():
+    from napari_raman_widget.mda_timing import _timing_settings
+    _timing_settings().setValue("mda/average_acquisition_seconds", 99)
+    assert remembered_overhead_seconds("raman") is None
+    _learn(overhead=0)
+    estimate = estimate_mda_time(
+        _sequence(_event("RM")), [_two_point_source()], 500, [0], [],
+    )
+    assert estimate.duration_seconds == 1
